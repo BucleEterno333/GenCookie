@@ -89,7 +89,7 @@ login_urls = {
         "ignoreAuthState=1&disableLoginPrepopulate=1&ref_=ap_sw_aa"
     ),
     'amazon.com.mx': (
-        "https://www.amazon.com.mx/ap/signin?ie=UTF8&openid.pape.max_auth_age=0&"
+        "https://www.amazon.com.mx/ap/register?openid.pape.max_auth_age=900&openid.return_to=https%3A%2F%2Fwww.amazon.com.mx%2Fap%2Fcnep%3Fie%3DUTF8%26orig_return_to%3Dhttps%253A%252F%252Fwww.amazon.com.mx%252Fyour-account%26openid.assoc_handle%3Dmxflex%26pageId%3Dmxflex&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=mxflex&openid.mode=checkid_setup&openid.ns.pape=http%3A%2F%2Fspecs.openid.net%2Fextensions%2Fpape%2F1.0&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
         "openid.return_to=https%3A%2F%2Fwww.amazon.com.mx%2F%3F_encoding%3DUTF8%26ref_%3Dnavm_accountmenu_switchacct&"
         "openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&"
         "openid.assoc_handle=anywhere_v2_mx&_encoding=UTF8&openid.mode=checkid_setup&"

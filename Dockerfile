@@ -16,4 +16,4 @@ RUN pip install --no-cache-dir python-telegram-bot>=20.0 fastapi>=0.104.0 uvicor
 
 COPY amazon_cookie_gen.py .
 
-ENTRYPOINT ["python", "amazon_cookie_gen.py"]
+CMD ["python", "amazon_cookie_gen.py", "--api", "--port", "8000"]
