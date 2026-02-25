@@ -7,6 +7,8 @@ Amazon Cookie Generator - Versión completa mejorada
 - Integración con Hero SMS para verificación telefónica (amazon.com)
 - Logging detallado y archivos de depuración
 - Soporte para modo interactivo y argumentos CLI
+- AHORA: Soporte para API REST (devuelve JSON)
+- AHORA: Opción para no agregar dirección
 """
 
 import os
@@ -19,6 +21,7 @@ import asyncio
 import logging
 import socket
 import argparse
+import sys
 from urllib.parse import urlencode, urljoin, quote
 from bs4 import BeautifulSoup
 import requests
@@ -1052,15 +1055,36 @@ async def add_address(session, domain, email, password, token=None, service=None
     return True
 
 # -------------------------------------------------------------------
-# CREACIÓN DE CUENTA PRINCIPAL (create_amazon_account)
+# CREACIÓN DE CUENTA PRINCIPAL (create_amazon_account) - MODIFICADA
 # -------------------------------------------------------------------
-async def create_amazon_account(domain, email=None, token=None, service=None):
-    """Crea una cuenta de Amazon y retorna las cookies finales."""
+async def create_amazon_account(domain, email=None, token=None, service=None, add_address_flag=True):
+    """
+    Crea una cuenta de Amazon y retorna las cookies finales.
+    Parámetros:
+        domain: dominio de Amazon (ej. amazon.com)
+        email: correo opcional (si no se proporciona, se genera uno)
+        token: token del servicio de correo
+        service: servicio de correo utilizado
+        add_address_flag: True para agregar dirección, False para omitir
+    """
     playwright = None
     browser = None
     context = None
     page = None
     session = None
+
+    # Diccionario para almacenar los datos de la cuenta generada
+    account_data = {
+        'email': None,
+        'password': None,
+        'name': None,
+        'phone': None,
+        'address': None,
+        'cookie_string': None,
+        'cookie_dict': None,
+        'country': domain.split('.')[-1].upper() if '.' in domain else domain,
+        'timestamp': time.time()
+    }
 
     try:
         # Preparar sesión requests con proxy
@@ -1079,17 +1103,21 @@ async def create_amazon_account(domain, email=None, token=None, service=None):
         if not ok:
             logger.error(f"Proxy no funciona: {msg}")
             return None
-        print(f"✅ Proxy funcionando - IP: {msg}")
 
         # Generar credenciales si no se proporcionan
         if not email:
             email, token, service = await generate_temp_email()
             if not email:
                 return None
+        
         password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
         first_name = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5)).capitalize()
         last_name = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5)).capitalize()
         fullname = f"{first_name} {last_name}"
+        
+        account_data['email'] = email
+        account_data['password'] = password
+        account_data['name'] = fullname
 
         # Iniciar Playwright con proxy
         playwright = await async_playwright().start()
@@ -1121,9 +1149,6 @@ async def create_amazon_account(domain, email=None, token=None, service=None):
         )
         page = await context.new_page()
 
-        # Establecer cookies iniciales en el contexto de Playwright (opcional)
-        # No es necesario porque la página de registro no las requiere
-
         print(f"📧 Creando cuenta: {email}")
         print(f"🌐 Navegando a {domain}...")
         await page.goto(register_urls[domain], wait_until='networkidle', timeout=60000)
@@ -1142,7 +1167,6 @@ async def create_amazon_account(domain, email=None, token=None, service=None):
             logger.debug("Nombre completo llenado")
         except Exception as e:
             logger.warning(f"No se pudo llenar nombre con selector principal: {e}")
-            # Intentar con otros selectores
             try:
                 await page.fill('input[placeholder*="name" i]', fullname)
             except:
@@ -1179,15 +1203,14 @@ async def create_amazon_account(domain, email=None, token=None, service=None):
             pass
 
         # Teléfono (solo amazon.com)
+        request_id = None
         if domain == 'amazon.com':
             phone_number = None
-            request_id = None
             if HERO_SMS_API_KEY:
                 phone_info = await get_hero_sms_number()
                 if phone_info:
                     phone_number, request_id = phone_info
                 else:
-                    # Si falla Hero SMS, usar número falso (pero la cuenta no se verificará)
                     phone_number = f"+1{random.randint(200,999)}{random.randint(1000000,9999999)}"
                     logger.warning("No se pudo obtener número real, usando número falso")
             else:
@@ -1198,9 +1221,11 @@ async def create_amazon_account(domain, email=None, token=None, service=None):
                 await page.wait_for_selector('input[name="phoneNumber"]', timeout=5000)
                 await page.fill('input[name="phoneNumber"]', phone_number)
                 logger.debug(f"Número de teléfono llenado: {phone_number}")
+                account_data['phone'] = phone_number
             except:
                 try:
                     await page.fill('input[type="tel"]', phone_number)
+                    account_data['phone'] = phone_number
                 except Exception as e:
                     logger.error(f"No se pudo llenar teléfono: {e}")
                     return None
@@ -1284,19 +1309,28 @@ async def create_amazon_account(domain, email=None, token=None, service=None):
             # Obtener cookies del navegador
             cookies = await context.cookies()
             cookie_dict = {c['name']: c['value'] for c in cookies}
-            logger.debug(f"Cookies obtenidas del navegador: {list(cookie_dict.keys())}")
+            cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
+            
+            account_data['cookie_dict'] = cookie_dict
+            account_data['cookie_string'] = cookie_string
 
             # Sincronizar cookies con la sesión requests para agregar dirección
             for name, value in cookie_dict.items():
                 session.cookies.set(name, value, domain=f".{domain}")
 
-            # Agregar dirección
-            print("📍 Agregando dirección...")
-            addr_ok = await add_address(session, domain, email, password, token, service)
-            if addr_ok:
-                print("✅ Dirección agregada")
+            # Agregar dirección SOLO si el usuario lo solicita
+            if add_address_flag:
+                print("📍 Agregando dirección...")
+                addr_ok = await add_address(session, domain, email, password, token, service)
+                if addr_ok:
+                    print("✅ Dirección agregada")
+                    account_data['address'] = "Dirección agregada exitosamente"
+                else:
+                    print("⚠️ No se pudo agregar dirección")
+                    account_data['address'] = "Error al agregar dirección"
             else:
-                print("⚠️ No se pudo agregar dirección, continuando...")
+                print("📍 Omisión de dirección solicitada por el usuario")
+                account_data['address'] = "No se agregó dirección (opción desactivada)"
 
             # Navegar a la página de wallet para obtener cookies completas
             try:
@@ -1304,11 +1338,14 @@ async def create_amazon_account(domain, email=None, token=None, service=None):
                 await page.wait_for_timeout(3000)
                 cookies = await context.cookies()
                 cookie_dict = {c['name']: c['value'] for c in cookies}
+                cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
+                account_data['cookie_dict'] = cookie_dict
+                account_data['cookie_string'] = cookie_string
                 logger.debug("Cookies actualizadas tras visitar wallet")
             except Exception as e:
                 logger.warning(f"Error al visitar wallet: {e}")
 
-            return cookie_dict
+            return account_data
         else:
             print(f"❌ Registro fallido, URL final: {page.url}")
             return None
@@ -1328,7 +1365,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None):
             await playwright.stop()
 
 # -------------------------------------------------------------------
-# FUNCIONES DE INTERFAZ (menú interactivo y argumentos)
+# FUNCIONES DE INTERFAZ (menú interactivo y argumentos) - MODIFICADAS
 # -------------------------------------------------------------------
 def convert_cookie_dict(cookies_dict, country_code):
     """Convierte un diccionario de cookies a string formateado."""
@@ -1336,7 +1373,7 @@ def convert_cookie_dict(cookies_dict, country_code):
         return "No se obtuvieron cookies"
     return '; '.join([f"{k}={v}" for k, v in cookies_dict.items()])
 
-async def generate_cookies(country=None):
+async def generate_cookies(country=None, add_address=True):
     """Genera cookies para uno o todos los dominios."""
     country_map = {
         'CA': 'amazon.ca', 'MX': 'amazon.com.mx', 'US': 'amazon.com',
@@ -1344,33 +1381,41 @@ async def generate_cookies(country=None):
         'IT': 'amazon.it', 'ES': 'amazon.es', 'JP': 'amazon.co.jp',
         'AU': 'amazon.com.au', 'IN': 'amazon.in'
     }
+    
+    result = {
+        'success': False,
+        'data': None,
+        'error': None,
+        'country': country
+    }
+    
     if country:
         country = country.upper()
         if country in country_map:
-            domains_to_run = [country_map[country]]
+            domain = country_map[country]
+            print(f"\n🔄 Procesando {domain}...")
+            account_data = await create_amazon_account(domain, add_address_flag=add_address)
+            if account_data:
+                result['success'] = True
+                result['data'] = account_data
+            else:
+                result['error'] = f"No se pudo generar cookie para {country}"
         else:
-            print(f"❌ País no soportado: {country}")
-            return
+            result['error'] = f"País no soportado: {country}"
     else:
-        domains_to_run = domains
-
-    for dom in domains_to_run:
-        print(f"\n🔄 Procesando {dom}...")
-        cookies = await create_amazon_account(dom)
-        if cookies:
-            # Determinar código de país para formateo (no esencial)
-            cc = dom.split('.')[-1].upper()
-            if dom == 'amazon.com': cc = 'US'
-            elif dom == 'amazon.com.mx': cc = 'MX'
-            elif dom == 'amazon.com.au': cc = 'AU'
-            elif dom == 'amazon.co.uk': cc = 'UK'
-            elif dom == 'amazon.co.jp': cc = 'JP'
-            print(f"\n🍪 Cookies para {dom} ({cc}):")
-            print(convert_cookie_dict(cookies, cc))
-            print("🟢")
-        else:
-            print(f"❌ No se generaron cookies para {dom}")
-        await asyncio.sleep(5)  # Pausa entre dominios
+        # Para múltiples países, devolvemos una lista
+        results = []
+        for dom in domains_to_run:
+            print(f"\n🔄 Procesando {dom}...")
+            account_data = await create_amazon_account(dom, add_address_flag=add_address)
+            if account_data:
+                results.append(account_data)
+            await asyncio.sleep(5)
+        result['success'] = len(results) > 0
+        result['data'] = results
+        result['error'] = None if results else "No se generaron cookies"
+    
+    return result
 
 def interactive_menu():
     """Menú interactivo para ejecución manual."""
@@ -1401,11 +1446,34 @@ def interactive_menu():
         if op == '1':
             print("\nPaíses disponibles: CA, MX, US, UK, DE, FR, IT, ES, JP, AU, IN")
             pais = input("Código de país: ").strip()
-            asyncio.run(generate_cookies(pais))
+            print("\n¿Agregar dirección a la cuenta?")
+            add_addr = input("Agregar dirección? (s/n, por defecto s): ").strip().lower()
+            add_address_flag = add_addr != 'n'
+            
+            result = asyncio.run(generate_cookies(pais, add_address_flag))
+            if result['success']:
+                data = result['data']
+                print(f"\n✅ Cookie generada exitosamente:")
+                print(f"   Email: {data['email']}")
+                print(f"   Contraseña: {data['password']}")
+                print(f"   Cookie: {data['cookie_string'][:100]}...")
+                if data.get('address'):
+                    print(f"   Dirección: {data['address']}")
+            else:
+                print(f"❌ Error: {result['error']}")
+                
         elif op == '2':
             confirm = input("¿Generar cookies para TODOS los países? (s/n): ").strip().lower()
             if confirm in ('s', 'si', 'y', 'yes'):
-                asyncio.run(generate_cookies())
+                print("\n¿Agregar dirección a las cuentas?")
+                add_addr = input("Agregar dirección? (s/n, por defecto s): ").strip().lower()
+                add_address_flag = add_addr != 'n'
+                
+                result = asyncio.run(generate_cookies(None, add_address_flag))
+                if result['success']:
+                    print(f"\n✅ Se generaron {len(result['data'])} cookies")
+                else:
+                    print(f"❌ Error: {result['error']}")
             else:
                 print("Cancelado")
         elif op == '3':
@@ -1415,17 +1483,58 @@ def interactive_menu():
             print("❌ Opción inválida")
 
 # -------------------------------------------------------------------
+# FUNCIÓN PARA API (nueva)
+# -------------------------------------------------------------------
+async def generate_cookie_api(country, add_address=True):
+    """
+    Función para ser llamada desde una API.
+    Retorna un diccionario con los resultados.
+    """
+    try:
+        result = await generate_cookies(country, add_address)
+        return result
+    except Exception as e:
+        logger.exception("Error en generate_cookie_api")
+        return {
+            'success': False,
+            'error': str(e),
+            'country': country
+        }
+
+# -------------------------------------------------------------------
 # ENTRYPOINT PRINCIPAL
 # -------------------------------------------------------------------
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generador de cookies de Amazon')
     parser.add_argument('--country', help='Código de país (CA, MX, US, UK, DE, FR, IT, ES, JP, AU, IN)')
     parser.add_argument('--all', action='store_true', help='Generar para todos los países')
+    parser.add_argument('--no-address', action='store_true', help='No agregar dirección a la cuenta')
+    parser.add_argument('--json', action='store_true', help='Salida en formato JSON (para API)')
     args = parser.parse_args()
 
+    add_address_flag = not args.no_address
+
     if args.country:
-        asyncio.run(generate_cookies(args.country))
+        if args.json:
+            # Modo JSON - para API
+            result = asyncio.run(generate_cookie_api(args.country, add_address_flag))
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            # Modo interactivo simple
+            result = asyncio.run(generate_cookies(args.country, add_address_flag))
+            if result['success']:
+                data = result['data']
+                print(f"\n✅ Cookie generada exitosamente:")
+                print(f"   Email: {data['email']}")
+                print(f"   Contraseña: {data['password']}")
+                print(f"   Cookie: {data['cookie_string']}")
+            else:
+                print(f"❌ Error: {result['error']}")
     elif args.all:
-        asyncio.run(generate_cookies())
+        if args.json:
+            result = asyncio.run(generate_cookies(None, add_address_flag))
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            asyncio.run(generate_cookies(None, add_address_flag))
     else:
         interactive_menu()
