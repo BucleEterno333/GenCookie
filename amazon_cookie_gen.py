@@ -984,49 +984,121 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         else:
             logger.debug("   ✅ No se detectó captcha visible")
 
-        # ===== PASO 9: Buscar campos del formulario =====
+        # ===== PASO 9: Buscar campos del formulario (VERSIÓN MEJORADA) =====
         logger.debug("🔍 [PASO 9] Buscando campos del formulario...")
-        
-        # Buscar campo de nombre
-        name_field = await page.query_selector('input[name="customerName"], input[placeholder*="name" i]')
-        if name_field:
-            await name_field.fill(fullname)
-            logger.debug("   ✅ Campo de nombre llenado")
-        else:
-            logger.error("   ❌ No se encontró campo de nombre")
-            # Mostrar los inputs disponibles para debug
-            inputs = await page.query_selector_all('input')
-            input_names = []
-            for inp in inputs:
-                name = await inp.get_attribute('name')
-                if name:
-                    input_names.append(name)
-            logger.debug(f"   📋 Inputs disponibles: {input_names}")
-            return None
 
-        # Buscar campo de email
-        email_field = await page.query_selector('input[name="email"], input[type="email"]')
+        # Mostrar todos los inputs disponibles para debug
+        all_inputs = await page.query_selector_all('input')
+        logger.debug(f"   📋 Total inputs encontrados: {len(all_inputs)}")
+
+        input_details = []
+        for inp in all_inputs:
+            input_type = await inp.get_attribute('type') or 'N/A'
+            input_name = await inp.get_attribute('name') or 'N/A'
+            input_id = await inp.get_attribute('id') or 'N/A'
+            input_placeholder = await inp.get_attribute('placeholder') or 'N/A'
+            input_details.append(f"type={input_type}, name={input_name}, id={input_id}, placeholder={input_placeholder}")
+            logger.debug(f"   🔹 Input: {input_details[-1]}")
+
+        # ===== CAMPO DE EMAIL =====
+        logger.debug("📧 Buscando campo de email...")
+        email_field = None
+
+        # Estrategias para encontrar el campo de email (en orden)
+        email_selectors = [
+            'input#ap_email_login',           # Por ID exacto
+            'input[name="email"]',             # Por name
+            'input[type="email"]',             # Por type
+            'input[name="email"][type="email"]', # Combinación
+            'input[autocomplete="username"]',   # Por autocomplete
+            'input[placeholder*="correo"]',     # Por placeholder (contiene "correo")
+            'input[placeholder*="email"]'       # Por placeholder (contiene "email")
+        ]
+
+        for selector in email_selectors:
+            logger.debug(f"   Probando selector: {selector}")
+            field = await page.query_selector(selector)
+            if field:
+                email_field = field
+                logger.debug(f"   ✅ Encontrado con selector: {selector}")
+                break
+
         if email_field:
             await email_field.fill(email)
-            logger.debug(f"   ✅ Campo de email llenado: {email}")
+            logger.debug(f"   ✅ Email llenado: {email}")
+            
+            # Verificar que se llenó correctamente
+            filled_value = await email_field.get_attribute('value')
+            logger.debug(f"   📝 Valor verificado: {filled_value}")
         else:
-            logger.error("   ❌ No se encontró campo de email")
-            return None
+            logger.error("   ❌ No se pudo encontrar campo de email con ningún selector")
+            
+            # Intentar por índice (último recurso)
+            if len(all_inputs) >= 2:
+                logger.debug("   ⚠️ Intentando con el segundo input como fallback")
+                await all_inputs[1].fill(email)
+                logger.debug("   ✅ Email llenado usando índice")
+            else:
+                return None
 
-        # Buscar campo de password
-        password_field = await page.query_selector('input[name="password"], input[type="password"]')
+        # ===== CAMPO DE NOMBRE =====
+        logger.debug("👤 Buscando campo de nombre...")
+        name_field = None
+
+        name_selectors = [
+            'input[name="customerName"]',
+            'input[placeholder*="nombre" i]',
+            'input[placeholder*="name" i]',
+            'input#ap_customer_name'
+        ]
+
+        for selector in name_selectors:
+            field = await page.query_selector(selector)
+            if field:
+                name_field = field
+                logger.debug(f"   ✅ Nombre encontrado con selector: {selector}")
+                break
+
+        if name_field:
+            await name_field.fill(fullname)
+            logger.debug(f"   ✅ Nombre llenado: {fullname}")
+        else:
+            logger.warning("   ⚠️ No se encontró campo de nombre, puede estar en otra página")
+
+        # ===== CAMPO DE CONTRASEÑA =====
+        logger.debug("🔑 Buscando campo de contraseña...")
+        password_field = None
+
+        password_selectors = [
+            'input[name="password"]',
+            'input[type="password"]',
+            'input#ap_password'
+        ]
+
+        for selector in password_selectors:
+            field = await page.query_selector(selector)
+            if field:
+                password_field = field
+                logger.debug(f"   ✅ Contraseña encontrada con selector: {selector}")
+                break
+
         if password_field:
             await password_field.fill(password)
-            logger.debug("   ✅ Campo de password llenado")
+            logger.debug(f"   ✅ Contraseña llenada")
+            
+            # Verificar que se llenó (sin mostrar el valor)
+            filled = await password_field.get_attribute('value')
+            if filled:
+                logger.debug(f"   📝 Contraseña verificada (longitud: {len(filled)})")
         else:
-            logger.error("   ❌ No se encontró campo de password")
+            logger.error("   ❌ No se encontró campo de contraseña")
             return None
 
-        # Buscar campo de confirmación (opcional)
+        # ===== CAMPO DE CONFIRMACIÓN (opcional) =====
         confirm_field = await page.query_selector('input[name="passwordCheck"]')
         if confirm_field:
             await confirm_field.fill(password)
-            logger.debug("   ✅ Campo de confirmación llenado")
+            logger.debug("   ✅ Confirmación de contraseña llenada")
         else:
             logger.debug("   ℹ️ No hay campo de confirmación (opcional)")
 
@@ -1188,6 +1260,79 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
 # -------------------------------------------------------------------
 # FUNCIÓN PARA API
 # -------------------------------------------------------------------
+
+
+# ========== FUNCIÓN DE DEBUG PARA VER ESTRUCTURA ==========
+async def debug_amazon_structure(domain='amazon.com.mx'):
+    """Función para ver la estructura exacta de la página de registro"""
+    
+    print(f"\n🔍 DEBUGGEANDO ESTRUCTURA DE {domain}")
+    print("="*50)
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)  # Con headless=False para ver
+        page = await browser.new_page()
+        
+        print(f"🌐 Navegando a {register_urls[domain]}")
+        await page.goto(register_urls[domain], wait_until='networkidle')
+        await page.wait_for_timeout(3000)
+        
+        # Tomar screenshot
+        await page.screenshot(path=f'debug_{domain}.png')
+        print(f"📸 Screenshot guardado como debug_{domain}.png")
+        
+        # Obtener todos los inputs
+        inputs = await page.query_selector_all('input')
+        print(f"\n📋 INPUTS ENCONTRADOS ({len(inputs)}):")
+        print("-"*50)
+        
+        for i, inp in enumerate(inputs):
+            input_type = await inp.get_attribute('type') or 'N/A'
+            input_name = await inp.get_attribute('name') or 'N/A'
+            input_id = await inp.get_attribute('id') or 'N/A'
+            input_placeholder = await inp.get_attribute('placeholder') or 'N/A'
+            input_class = await inp.get_attribute('class') or 'N/A'
+            input_autocomplete = await inp.get_attribute('autocomplete') or 'N/A'
+            
+            print(f"\n🔹 INPUT #{i+1}:")
+            print(f"   Type: {input_type}")
+            print(f"   Name: {input_name}")
+            print(f"   ID: {input_id}")
+            print(f"   Placeholder: {input_placeholder}")
+            print(f"   Class: {input_class}")
+            print(f"   Autocomplete: {input_autocomplete}")
+        
+        # Obtener todos los botones
+        buttons = await page.query_selector_all('button, input[type="submit"]')
+        print(f"\n📋 BOTONES ENCONTRADOS ({len(buttons)}):")
+        print("-"*50)
+        
+        for i, btn in enumerate(buttons):
+            btn_text = await btn.text_content() or await btn.get_attribute('value') or 'N/A'
+            btn_id = await btn.get_attribute('id') or 'N/A'
+            btn_class = await btn.get_attribute('class') or 'N/A'
+            print(f"\n🔹 BOTÓN #{i+1}:")
+            print(f"   Texto: {btn_text.strip() if btn_text != 'N/A' else 'N/A'}")
+            print(f"   ID: {btn_id}")
+            print(f"   Class: {btn_class}")
+        
+        # Obtener el HTML completo para análisis
+        html = await page.content()
+        with open(f'debug_{domain}.html', 'w', encoding='utf-8') as f:
+            f.write(html)
+        print(f"\n📄 HTML guardado como debug_{domain}.html")
+        
+        await browser.close()
+        print("\n✅ Debug completado")
+
+# Para ejecutar esta función, agrega esto al final del archivo:
+# asyncio.run(debug_amazon_structure('amazon.com.mx'))
+
+
+
+
+
+
 # ========== FUNCIÓN PARA API CON MÁS DEBUG ==========
 async def generate_cookie_api(country, add_address=True):
     """
@@ -1342,6 +1487,7 @@ def diagnostic():
 # MAIN
 # -------------------------------------------------------------------
 if __name__ == '__main__':
+    asyncio.run(debug_amazon_structure('amazon.com.mx'))
     parser = argparse.ArgumentParser(description='API de generador de cookies Amazon')
     parser.add_argument('--cli', action='store_true', help='Ejecutar en modo CLI (menú interactivo)')
     args = parser.parse_args()
@@ -1400,3 +1546,5 @@ if __name__ == '__main__':
         print(f"   GET  /health - Health check")
         print(f"   POST /generate - Generar cookie")
         app.run(host=API_HOST, port=API_PORT, debug=False, threaded=True)
+
+
