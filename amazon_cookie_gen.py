@@ -1262,26 +1262,27 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
 # -------------------------------------------------------------------
 
 
-# ========== FUNCIÓN DE DEBUG PARA VER ESTRUCTURA ==========
+# ========== FUNCIÓN DE DEBUG PARA VER ESTRUCTURA (CORREGIDA) ==========
 async def debug_amazon_structure(domain='amazon.com.mx'):
-    """Función para ver la estructura exacta de la página de registro"""
+    """Función para ver la estructura exacta de la página de registro (MODO HEADLESS)"""
     
     print(f"\n🔍 DEBUGGEANDO ESTRUCTURA DE {domain}")
     print("="*50)
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)  # Con headless=False para ver
+        # CAMBIO IMPORTANTE: headless=True para servidor
+        browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         
         print(f"🌐 Navegando a {register_urls[domain]}")
         await page.goto(register_urls[domain], wait_until='networkidle')
         await page.wait_for_timeout(3000)
         
-        # Tomar screenshot
+        # Tomar screenshot (igual funciona en headless)
         await page.screenshot(path=f'debug_{domain}.png')
         print(f"📸 Screenshot guardado como debug_{domain}.png")
         
-        # Obtener todos los inputs
+        # Obtener todos los inputs (esto no necesita interfaz gráfica)
         inputs = await page.query_selector_all('input')
         print(f"\n📋 INPUTS ENCONTRADOS ({len(inputs)}):")
         print("-"*50)
@@ -1291,32 +1292,14 @@ async def debug_amazon_structure(domain='amazon.com.mx'):
             input_name = await inp.get_attribute('name') or 'N/A'
             input_id = await inp.get_attribute('id') or 'N/A'
             input_placeholder = await inp.get_attribute('placeholder') or 'N/A'
-            input_class = await inp.get_attribute('class') or 'N/A'
-            input_autocomplete = await inp.get_attribute('autocomplete') or 'N/A'
             
             print(f"\n🔹 INPUT #{i+1}:")
             print(f"   Type: {input_type}")
             print(f"   Name: {input_name}")
             print(f"   ID: {input_id}")
             print(f"   Placeholder: {input_placeholder}")
-            print(f"   Class: {input_class}")
-            print(f"   Autocomplete: {input_autocomplete}")
         
-        # Obtener todos los botones
-        buttons = await page.query_selector_all('button, input[type="submit"]')
-        print(f"\n📋 BOTONES ENCONTRADOS ({len(buttons)}):")
-        print("-"*50)
-        
-        for i, btn in enumerate(buttons):
-            btn_text = await btn.text_content() or await btn.get_attribute('value') or 'N/A'
-            btn_id = await btn.get_attribute('id') or 'N/A'
-            btn_class = await btn.get_attribute('class') or 'N/A'
-            print(f"\n🔹 BOTÓN #{i+1}:")
-            print(f"   Texto: {btn_text.strip() if btn_text != 'N/A' else 'N/A'}")
-            print(f"   ID: {btn_id}")
-            print(f"   Class: {btn_class}")
-        
-        # Obtener el HTML completo para análisis
+        # Obtener HTML
         html = await page.content()
         with open(f'debug_{domain}.html', 'w', encoding='utf-8') as f:
             f.write(html)
@@ -1324,13 +1307,6 @@ async def debug_amazon_structure(domain='amazon.com.mx'):
         
         await browser.close()
         print("\n✅ Debug completado")
-
-# Para ejecutar esta función, agrega esto al final del archivo:
-# asyncio.run(debug_amazon_structure('amazon.com.mx'))
-
-
-
-
 
 
 # ========== FUNCIÓN PARA API CON MÁS DEBUG ==========
@@ -1487,6 +1463,7 @@ def diagnostic():
 # MAIN
 # -------------------------------------------------------------------
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
     asyncio.run(debug_amazon_structure('amazon.com.mx'))
     parser = argparse.ArgumentParser(description='API de generador de cookies Amazon')
     parser.add_argument('--cli', action='store_true', help='Ejecutar en modo CLI (menú interactivo)')
