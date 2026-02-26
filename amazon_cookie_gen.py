@@ -841,12 +841,11 @@ async def add_address(session, domain, email, password, token=None, service=None
 
 # -------------------------------------------------------------------
 # CREACIÓN DE CUENTA PRINCIPAL
-# -------------------------------------------------------------------
 async def create_amazon_account(domain, email=None, token=None, service=None, add_address_flag=True):
     """
     Crea una cuenta de Amazon y retorna los datos de la cuenta.
     """
-    logger.debug(f"🏁 create_amazon_account iniciado para domain={domain}, add_address_flag={add_address_flag}")
+    logger.debug(f"🏁 [ENTRADA] create_amazon_account para {domain}")
     
     playwright = None
     browser = None
@@ -867,33 +866,37 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
     }
 
     try:
+        # ===== PASO 1: Configurar sesión y proxy =====
+        logger.debug("📦 [PASO 1] Configurando sesión requests...")
         session = requests.Session()
         if PROXY_HOST_PORT:
             proxy_url = f"http://{PROXY_HOST_PORT}"
             if PROXY_AUTH:
                 proxy_url = f"http://{PROXY_AUTH}@{PROXY_HOST_PORT}"
             session.proxies = {'http': proxy_url, 'https': proxy_url}
-            logger.debug(f"🌐 Proxy configurado: {PROXY_HOST_PORT}")
+            logger.debug(f"   ✅ Proxy configurado: {PROXY_HOST_PORT}")
         else:
-            logger.warning("⚠️ No se configuró proxy, se usará IP directa")
+            logger.warning("   ⚠️ No se configuró proxy")
 
-        # Probar proxy
-        logger.debug("🔄 Probando proxy...")
+        # ===== PASO 2: Probar proxy =====
+        logger.debug("🔄 [PASO 2] Probando proxy...")
         ok, msg = test_proxy(session)
         if not ok:
-            logger.error(f"❌ Proxy no funciona: {msg}")
+            logger.error(f"   ❌ Proxy no funciona: {msg}")
             return None
-        logger.debug(f"✅ Proxy funcionando - IP: {msg}")
+        logger.debug(f"   ✅ Proxy OK - IP: {msg}")
 
-        # Generar credenciales
-        logger.debug("📧 Generando email temporal...")
+        # ===== PASO 3: Generar email =====
+        logger.debug("📧 [PASO 3] Generando email temporal...")
         if not email:
             email, token, service = await generate_temp_email()
             if not email:
-                logger.error("❌ No se pudo generar email temporal")
+                logger.error("   ❌ No se pudo generar email temporal")
                 return None
-            logger.debug(f"✅ Email generado: {email} (servicio: {service})")
+            logger.debug(f"   ✅ Email generado: {email} (servicio: {service})")
         
+        # ===== PASO 4: Generar credenciales =====
+        logger.debug("🔑 [PASO 4] Generando credenciales...")
         password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
         first_name = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5)).capitalize()
         last_name = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5)).capitalize()
@@ -903,12 +906,18 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         account_data['password'] = password
         account_data['name'] = fullname
         
-        logger.debug(f"👤 Nombre generado: {fullname}")
-        logger.debug(f"🔑 Password generada: [OCULTA]")
+        logger.debug(f"   👤 Nombre: {fullname}")
+        logger.debug(f"   🔐 Password: [OCULTA]")
 
-        # Iniciar Playwright
-        logger.debug("🎬 Iniciando Playwright...")
-        playwright = await async_playwright().start()
+        # ===== PASO 5: Iniciar Playwright =====
+        logger.debug("🎬 [PASO 5] Iniciando Playwright...")
+        try:
+            playwright = await async_playwright().start()
+            logger.debug("   ✅ Playwright iniciado")
+        except Exception as e:
+            logger.error(f"   ❌ Error iniciando Playwright: {e}")
+            return None
+            
         launch_options = {
             'headless': True,
             'args': [
@@ -928,126 +937,222 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                 proxy_dict['username'] = user
                 proxy_dict['password'] = pwd
             launch_options['proxy'] = proxy_dict
+            logger.debug(f"   🌐 Proxy Playwright: {PROXY_HOST_PORT}")
 
-        browser = await playwright.chromium.launch(**launch_options)
+        # ===== PASO 6: Lanzar browser =====
+        logger.debug("🚀 [PASO 6] Lanzando browser...")
+        try:
+            browser = await playwright.chromium.launch(**launch_options)
+            logger.debug("   ✅ Browser lanzado")
+        except Exception as e:
+            logger.error(f"   ❌ Error lanzando browser: {e}")
+            return None
+            
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 720},
             user_agent=random.choice(USER_AGENTS)
         )
         page = await context.new_page()
+        logger.debug("   ✅ Contexto y página creados")
 
-        await page.goto(register_urls[domain], wait_until='networkidle', timeout=60000)
+        # ===== PASO 7: Navegar a registro =====
+        register_url = register_urls.get(domain)
+        logger.debug(f"🌐 [PASO 7] Navegando a: {register_url}")
+        
+        try:
+            await page.goto(register_url, wait_until='networkidle', timeout=60000)
+            logger.debug("   ✅ Página cargada")
+        except Exception as e:
+            logger.error(f"   ❌ Error cargando página: {e}")
+            return None
+            
         await page.wait_for_timeout(3000)
+        logger.debug("   ⏱️ Espera de 3 segundos completada")
 
-        # Llenar formulario
-        try:
-            await page.wait_for_selector('input[name="customerName"]', timeout=5000)
-            await page.fill('input[name="customerName"]', fullname)
-        except:
-            pass
+        # ===== PASO 8: Verificar contenido =====
+        content = await page.content()
+        logger.debug(f"📄 [PASO 8] Longitud del HTML: {len(content)} caracteres")
+        
+        # Guardar HTML para debug
+        with open(f'debug_register_{domain}.html', 'w', encoding='utf-8') as f:
+            f.write(content)
+        logger.debug(f"   ✅ HTML guardado como debug_register_{domain}.html")
 
-        try:
-            await page.fill('input[name="email"]', email)
-        except:
-            try:
-                await page.fill('input[type="email"]', email)
-            except:
-                return None
+        # Verificar si hay captcha
+        if 'captcha' in content.lower():
+            logger.warning("   ⚠️ Posible captcha detectado en la página")
+        else:
+            logger.debug("   ✅ No se detectó captcha visible")
 
-        try:
-            await page.fill('input[name="password"]', password)
-        except:
-            try:
-                await page.fill('input[type="password"]', password)
-            except:
-                return None
+        # ===== PASO 9: Buscar campos del formulario =====
+        logger.debug("🔍 [PASO 9] Buscando campos del formulario...")
+        
+        # Buscar campo de nombre
+        name_field = await page.query_selector('input[name="customerName"], input[placeholder*="name" i]')
+        if name_field:
+            await name_field.fill(fullname)
+            logger.debug("   ✅ Campo de nombre llenado")
+        else:
+            logger.error("   ❌ No se encontró campo de nombre")
+            # Mostrar los inputs disponibles para debug
+            inputs = await page.query_selector_all('input')
+            input_names = []
+            for inp in inputs:
+                name = await inp.get_attribute('name')
+                if name:
+                    input_names.append(name)
+            logger.debug(f"   📋 Inputs disponibles: {input_names}")
+            return None
 
-        try:
-            await page.wait_for_selector('input[name="passwordCheck"]', timeout=2000)
-            await page.fill('input[name="passwordCheck"]', password)
-        except:
-            pass
+        # Buscar campo de email
+        email_field = await page.query_selector('input[name="email"], input[type="email"]')
+        if email_field:
+            await email_field.fill(email)
+            logger.debug(f"   ✅ Campo de email llenado: {email}")
+        else:
+            logger.error("   ❌ No se encontró campo de email")
+            return None
 
+        # Buscar campo de password
+        password_field = await page.query_selector('input[name="password"], input[type="password"]')
+        if password_field:
+            await password_field.fill(password)
+            logger.debug("   ✅ Campo de password llenado")
+        else:
+            logger.error("   ❌ No se encontró campo de password")
+            return None
+
+        # Buscar campo de confirmación (opcional)
+        confirm_field = await page.query_selector('input[name="passwordCheck"]')
+        if confirm_field:
+            await confirm_field.fill(password)
+            logger.debug("   ✅ Campo de confirmación llenado")
+        else:
+            logger.debug("   ℹ️ No hay campo de confirmación (opcional)")
+
+        # ===== PASO 10: Teléfono para US =====
         request_id = None
         if domain == 'amazon.com':
+            logger.debug("📱 [PASO 10] Procesando número de teléfono para US...")
             phone_number = None
             if HERO_SMS_API_KEY:
                 phone_info = await get_hero_sms_number()
                 if phone_info:
                     phone_number, request_id = phone_info
+                    logger.debug(f"   ✅ Número real obtenido: {phone_number}")
                 else:
                     phone_number = f"+1{random.randint(200,999)}{random.randint(1000000,9999999)}"
+                    logger.warning(f"   ⚠️ Usando número falso: {phone_number}")
             else:
                 phone_number = f"+1{random.randint(200,999)}{random.randint(1000000,9999999)}"
+                logger.warning("   ⚠️ Hero SMS no configurado, usando número falso")
 
-            try:
-                await page.wait_for_selector('input[name="phoneNumber"]', timeout=5000)
-                await page.fill('input[name="phoneNumber"]', phone_number)
+            phone_field = await page.query_selector('input[name="phoneNumber"], input[type="tel"]')
+            if phone_field:
+                await phone_field.fill(phone_number)
                 account_data['phone'] = phone_number
-            except:
-                try:
-                    await page.fill('input[type="tel"]', phone_number)
-                    account_data['phone'] = phone_number
-                except:
-                    pass
+                logger.debug(f"   ✅ Teléfono llenado: {phone_number}")
+            else:
+                logger.warning("   ⚠️ No se encontró campo de teléfono")
 
+        # ===== PASO 11: Aceptar términos =====
+        logger.debug("✅ [PASO 11] Buscando checkbox de términos...")
+        terms_checkbox = await page.query_selector('input[name="agreement"], input[type="checkbox"]')
+        if terms_checkbox:
+            await terms_checkbox.check()
+            logger.debug("   ✅ Checkbox marcado")
+        else:
+            logger.debug("   ℹ️ No hay checkbox de términos")
+
+        # ===== PASO 12: Hacer clic en botón de registro =====
+        logger.debug("🖱️ [PASO 12] Haciendo clic en botón de registro...")
         try:
             await page.click('input[type="submit"], button[type="submit"], #continue')
-        except Exception:
+            logger.debug("   ✅ Click realizado")
+        except Exception as e:
+            logger.error(f"   ❌ Error al hacer click: {e}")
             return None
 
+        # ===== PASO 13: Esperar respuesta =====
+        logger.debug("⏳ [PASO 13] Esperando respuesta...")
         await page.wait_for_load_state('networkidle', timeout=30000)
-
+        
         current_url = page.url
+        logger.debug(f"   📍 URL actual: {current_url}")
+
+        # ===== PASO 14: Verificar resultado =====
         content = await page.content()
+        with open(f'debug_response_{domain}.html', 'w', encoding='utf-8') as f:
+            f.write(content)
+        logger.debug(f"   ✅ Respuesta guardada como debug_response_{domain}.html")
+
         soup = BeautifulSoup(content, 'html.parser')
 
+        # Verificar errores
         error_div = soup.find('div', {'class': re.compile('a-alert-error|a-alert-warning|a-box-error', re.I)})
         if error_div:
+            error_msg = error_div.get_text(strip=True)
+            logger.error(f"   ❌ Error en registro: {error_msg}")
             return None
 
+        # ===== PASO 15: Verificación en dos pasos =====
         if 'verification' in current_url.lower() or 'cvf' in current_url.lower():
+            logger.debug("🔐 [PASO 15] Verificación en dos pasos detectada")
+            
             if domain == 'amazon.com' and request_id:
+                logger.debug("   📱 Esperando código SMS...")
                 code = await get_hero_sms_code(request_id)
                 if code:
-                    try:
-                        await page.fill('input[name="code"]', code)
-                        await page.click('button[type="submit"]')
-                        await page.wait_for_load_state('networkidle', timeout=15000)
-                    except:
-                        return None
+                    await page.fill('input[name="code"]', code)
+                    await page.click('button[type="submit"]')
+                    await page.wait_for_load_state('networkidle', timeout=15000)
+                    logger.debug("   ✅ Código SMS enviado")
                 else:
+                    logger.error("   ❌ No se recibió código SMS")
                     return None
             else:
+                logger.debug("   📧 Esperando código de correo...")
                 code = await get_verification_code(email, token, service)
                 if code:
-                    try:
-                        await page.fill('input[name="code"]', code)
-                        await page.click('button[type="submit"]')
-                        await page.wait_for_load_state('networkidle', timeout=15000)
-                    except:
-                        return None
+                    await page.fill('input[name="code"]', code)
+                    await page.click('button[type="submit"]')
+                    await page.wait_for_load_state('networkidle', timeout=15000)
+                    logger.debug("   ✅ Código de correo enviado")
                 else:
+                    logger.error("   ❌ No se recibió código de correo")
                     return None
 
+        # ===== PASO 16: Verificar éxito =====
+        logger.debug("🎉 [PASO 16] Verificando éxito del registro...")
         if 'your-account' in page.url.lower() or 'account' in page.url.lower():
+            logger.debug("   ✅ Registro exitoso!")
+            
+            # Obtener cookies
             cookies = await context.cookies()
             cookie_dict = {c['name']: c['value'] for c in cookies}
             cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
             
             account_data['cookie_dict'] = cookie_dict
             account_data['cookie_string'] = cookie_string
+            logger.debug(f"   🍪 Cookies obtenidas: {len(cookie_dict)} cookies")
 
+            # Sincronizar cookies
             for name, value in cookie_dict.items():
                 session.cookies.set(name, value, domain=f".{domain}")
 
+            # Agregar dirección si se solicita
             if add_address_flag:
+                logger.debug("📍 [PASO 17] Agregando dirección...")
                 addr_ok = await add_address(session, domain, email, password, token, service)
                 account_data['address'] = "Dirección agregada" if addr_ok else "Error al agregar dirección"
+                logger.debug(f"   ✅ Resultado dirección: {account_data['address']}")
             else:
                 account_data['address'] = "No se agregó dirección"
+                logger.debug("   ℹ️ Omisión de dirección")
 
+            # Visitar wallet para cookies completas
             try:
+                logger.debug("💳 Visitando wallet...")
                 await page.goto(wallet_urls[domain], wait_until='networkidle', timeout=20000)
                 await page.wait_for_timeout(3000)
                 cookies = await context.cookies()
@@ -1055,17 +1160,22 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                 cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
                 account_data['cookie_dict'] = cookie_dict
                 account_data['cookie_string'] = cookie_string
-            except Exception:
-                pass
+                logger.debug(f"   ✅ Cookies actualizadas: {len(cookie_dict)} cookies")
+            except Exception as e:
+                logger.warning(f"   ⚠️ Error al visitar wallet: {e}")
 
+            logger.debug("🏁 [FIN] create_amazon_account completado con éxito")
             return account_data
         else:
+            logger.error(f"   ❌ Registro fallido, URL final: {page.url}")
             return None
 
     except Exception as e:
-        logger.exception("Error en create_amazon_account")
+        logger.exception(f"💥 Excepción en create_amazon_account: {str(e)}")
         return None
     finally:
+        # Limpieza
+        logger.debug("🧹 Limpiando recursos...")
         if page:
             await page.close()
         if context:
@@ -1074,7 +1184,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             await browser.close()
         if playwright:
             await playwright.stop()
-
+        logger.debug("✅ Limpieza completada")
 # -------------------------------------------------------------------
 # FUNCIÓN PARA API
 # -------------------------------------------------------------------
