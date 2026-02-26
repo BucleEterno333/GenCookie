@@ -865,6 +865,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         'timestamp': time.time()
     }
 
+
     try:
         # ===== PASO 1: Configurar sesión y proxy =====
         logger.debug("📦 [PASO 1] Configurando sesión requests...")
@@ -969,7 +970,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         await page.wait_for_timeout(3000)
         logger.debug("   ⏱️ Espera de 3 segundos completada")
 
-        # ===== PASO 8: Verificar contenido =====
+        # ===== PASO 8: Verificar contenido inicial =====
         content = await page.content()
         logger.debug(f"📄 [PASO 8] Longitud del HTML: {len(content)} caracteres")
         
@@ -978,225 +979,317 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             f.write(content)
         logger.debug(f"   ✅ HTML guardado como debug_register_{domain}.html")
 
-        # Verificar si hay captcha
-        if 'captcha' in content.lower():
-            logger.warning("   ⚠️ Posible captcha detectado en la página")
-        else:
-            logger.debug("   ✅ No se detectó captcha visible")
-
-        # ===== PASO 9: Buscar campos del formulario (VERSIÓN MEJORADA) =====
-        logger.debug("🔍 [PASO 9] Buscando campos del formulario...")
-
-        # Mostrar todos los inputs disponibles para debug
-        all_inputs = await page.query_selector_all('input')
-        logger.debug(f"   📋 Total inputs encontrados: {len(all_inputs)}")
-
-        input_details = []
-        for inp in all_inputs:
-            input_type = await inp.get_attribute('type') or 'N/A'
-            input_name = await inp.get_attribute('name') or 'N/A'
-            input_id = await inp.get_attribute('id') or 'N/A'
-            input_placeholder = await inp.get_attribute('placeholder') or 'N/A'
-            input_details.append(f"type={input_type}, name={input_name}, id={input_id}, placeholder={input_placeholder}")
-            logger.debug(f"   🔹 Input: {input_details[-1]}")
-
-        # ===== CAMPO DE EMAIL =====
-        logger.debug("📧 Buscando campo de email...")
+        # ===== PASO 9: PRIMERA PÁGINA - INGRESAR EMAIL =====
+        logger.debug("📧 [PASO 9] Primera página: Ingresando email...")
+        
+        # Tomar screenshot del estado inicial
+        await page.screenshot(path=f'debug_paso1_inicial_{domain}.png')
+        
+        # Buscar campo de email en la primera página
         email_field = None
-
-        # Estrategias para encontrar el campo de email (en orden)
-        email_selectors = [
-            'input#ap_email_login',           # Por ID exacto
-            'input[name="email"]',             # Por name
-            'input[type="email"]',             # Por type
-            'input[name="email"][type="email"]', # Combinación
-            'input[autocomplete="username"]',   # Por autocomplete
-            'input[placeholder*="correo"]',     # Por placeholder (contiene "correo")
-            'input[placeholder*="email"]'       # Por placeholder (contiene "email")
+        email_selectors_paso1 = [
+            'input#ap_email_login',
+            'input[name="email"]',
+            'input[type="email"]',
+            'input[autocomplete="username"]'
         ]
-
-        for selector in email_selectors:
+        
+        for selector in email_selectors_paso1:
             logger.debug(f"   Probando selector: {selector}")
             field = await page.query_selector(selector)
-            if field:
+            if field and await field.is_visible():
                 email_field = field
-                logger.debug(f"   ✅ Encontrado con selector: {selector}")
+                logger.debug(f"   ✅ Campo email encontrado con selector: {selector}")
                 break
+        
+        if not email_field:
+            logger.error("❌ No se encontró campo de email visible")
+            # Mostrar todos los inputs visibles para debug
+            all_inputs = await page.query_selector_all('input')
+            for i, inp in enumerate(all_inputs):
+                if await inp.is_visible():
+                    attrs = {
+                        'type': await inp.get_attribute('type'),
+                        'name': await inp.get_attribute('name'),
+                        'id': await inp.get_attribute('id'),
+                        'placeholder': await inp.get_attribute('placeholder')
+                    }
+                    logger.debug(f"   📋 Input visible {i}: {attrs}")
+            return None
+        
+        # Llenar email
+        await email_field.fill(email)
+        logger.debug(f"   ✅ Email llenado: {email}")
+        await page.screenshot(path=f'debug_paso1_email_llenado_{domain}.png')
 
-        if email_field:
-            await email_field.fill(email)
-            logger.debug(f"   ✅ Email llenado: {email}")
+        # ===== PASO 10: HACER CLIC EN CONTINUAR =====
+        logger.debug("🖱️ [PASO 10] Haciendo clic en Continuar...")
+        
+        continue_button = None
+        continue_selectors = [
+            'input#continue',
+            'input.a-button-input',
+            'button#continue',
+            'span input[type="submit"]',
+            'input[value="Continuar"]',
+            'button:has-text("Continuar")'
+        ]
+        
+        for selector in continue_selectors:
+            button = await page.query_selector(selector)
+            if button and await button.is_visible():
+                continue_button = button
+                logger.debug(f"   ✅ Botón Continuar encontrado con selector: {selector}")
+                break
+        
+        if not continue_button:
+            logger.error("❌ No se encontró botón Continuar")
+            return None
+        
+        await continue_button.click()
+        logger.debug("   ✅ Click realizado")
+        
+        # Esperar carga de siguiente página
+        await page.wait_for_load_state('networkidle', timeout=10000)
+        await page.wait_for_timeout(2000)
+        logger.debug(f"   📍 Nueva URL: {page.url}")
+        await page.screenshot(path=f'debug_paso2_despues_click_{domain}.png')
+
+        # ===== PASO 11: VERIFICAR CAPTCHA EN SEGUNDA PÁGINA =====
+        logger.debug("🔍 [PASO 11] Verificando captcha en segunda página...")
+        
+        content = await page.content()
+        soup = BeautifulSoup(content, 'html.parser')
+        
+        captcha_detected = False
+        captcha_div = soup.find('div', {'id': 'captchacharacters'})
+        recaptcha_div = soup.find('div', {'class': re.compile('g-recaptcha')})
+        
+        if 'captcha' in content.lower() or captcha_div or recaptcha_div:
+            logger.warning("⚠️ Captcha detectado en segunda página")
+            captcha_detected = True
             
-            # Verificar que se llenó correctamente
-            filled_value = await email_field.get_attribute('value')
-            logger.debug(f"   📝 Valor verificado: {filled_value}")
-        else:
-            logger.error("   ❌ No se pudo encontrar campo de email con ningún selector")
-            
-            # Intentar por índice (último recurso)
-            if len(all_inputs) >= 2:
-                logger.debug("   ⚠️ Intentando con el segundo input como fallback")
-                await all_inputs[1].fill(email)
-                logger.debug("   ✅ Email llenado usando índice")
-            else:
-                return None
+            if recaptcha_div:
+                site_key = recaptcha_div.get('data-sitekey')
+                if site_key:
+                    logger.debug(f"   🔑 Sitekey encontrado: {site_key}")
+                    captcha_solution = solve_captcha(site_key, page.url)
+                    if captcha_solution:
+                        logger.debug("   ✅ Captcha resuelto, enviando solución...")
+                        await page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML="{captcha_solution}";')
+                        await page.click('input[type="submit"]')
+                        await page.wait_for_load_state('networkidle', timeout=10000)
+                    else:
+                        logger.error("   ❌ No se pudo resolver captcha")
+                        return None
+            elif captcha_div:
+                img = captcha_div.find('img')
+                if img and img.get('src'):
+                    img_url = urljoin(page.url, img['src'])
+                    logger.debug(f"   🖼️ Captcha de imagen detectado: {img_url}")
+                    
+                    # Descargar imagen
+                    img_resp = requests.get(img_url, timeout=10)
+                    if img_resp.status_code == 200:
+                        with open('temp_captcha.jpg', 'wb') as f:
+                            f.write(img_resp.content)
+                        solution = solve_captcha(None, page.url, is_image_captcha=True, image_path='temp_captcha.jpg')
+                        if solution:
+                            logger.debug("   ✅ Captcha de imagen resuelto")
+                            await page.fill('input[name="cvf_captcha_input"]', solution)
+                            await page.click('input[type="submit"]')
+                            await page.wait_for_load_state('networkidle', timeout=10000)
+                        else:
+                            logger.error("   ❌ No se pudo resolver captcha de imagen")
+                            return None
 
-        # ===== CAMPO DE NOMBRE =====
-        logger.debug("👤 Buscando campo de nombre...")
-        name_field = None
+        # ===== PASO 12: SEGUNDA PÁGINA - LLENAR FORMULARIO COMPLETO =====
+        logger.debug("📝 [PASO 12] Segunda página: Llenando formulario completo...")
+        await page.screenshot(path=f'debug_paso3_formulario_{domain}.png')
 
+        # Función helper para llenar campos con reintentos
+        async def safe_fill(selector, value, description):
+            for attempt in range(3):
+                try:
+                    field = await page.wait_for_selector(selector, state='visible', timeout=5000)
+                    await field.fill(value)
+                    logger.debug(f"   ✅ {description} llenado con selector: {selector}")
+                    filled = await field.get_attribute('value')
+                    if filled:
+                        logger.debug(f"      📝 Verificado (longitud: {len(filled)})")
+                    return True
+                except Exception as e:
+                    logger.debug(f"      ⚠️ Intento {attempt+1} falló: {str(e)[:50]}")
+                    await page.wait_for_timeout(1000)
+            return False
+
+        # 12.1 Campo de nombre
         name_selectors = [
             'input[name="customerName"]',
+            'input#ap_customer_name',
             'input[placeholder*="nombre" i]',
-            'input[placeholder*="name" i]',
-            'input#ap_customer_name'
+            'input[placeholder*="name" i]'
         ]
-
+        
+        name_filled = False
         for selector in name_selectors:
-            field = await page.query_selector(selector)
-            if field:
-                name_field = field
-                logger.debug(f"   ✅ Nombre encontrado con selector: {selector}")
+            if await safe_fill(selector, fullname, "Nombre"):
+                name_filled = True
                 break
+        
+        if not name_filled:
+            logger.warning("⚠️ No se pudo llenar campo de nombre, puede estar precargado")
 
-        if name_field:
-            await name_field.fill(fullname)
-            logger.debug(f"   ✅ Nombre llenado: {fullname}")
-        else:
-            logger.warning("   ⚠️ No se encontró campo de nombre, puede estar en otra página")
+        # 12.2 Campo de email (puede estar precargado)
+        email_second = await page.query_selector('input[name="email"], input#ap_email, input[type="email"]')
+        if email_second:
+            current_email = await email_second.get_attribute('value')
+            if not current_email:
+                await email_second.fill(email)
+                logger.debug("   ✅ Email (segunda página) llenado")
+            else:
+                logger.debug(f"   ℹ️ Email ya precargado: {current_email}")
 
-        # ===== CAMPO DE CONTRASEÑA =====
-        logger.debug("🔑 Buscando campo de contraseña...")
-        password_field = None
-
+        # 12.3 Campo de contraseña
         password_selectors = [
             'input[name="password"]',
-            'input[type="password"]',
-            'input#ap_password'
+            'input#ap_password',
+            'input[type="password"]'
         ]
-
+        
+        password_filled = False
         for selector in password_selectors:
-            field = await page.query_selector(selector)
-            if field:
-                password_field = field
-                logger.debug(f"   ✅ Contraseña encontrada con selector: {selector}")
+            if await safe_fill(selector, password, "Contraseña"):
+                password_filled = True
                 break
-
-        if password_field:
-            await password_field.fill(password)
-            logger.debug(f"   ✅ Contraseña llenada")
-            
-            # Verificar que se llenó (sin mostrar el valor)
-            filled = await password_field.get_attribute('value')
-            if filled:
-                logger.debug(f"   📝 Contraseña verificada (longitud: {len(filled)})")
-        else:
-            logger.error("   ❌ No se encontró campo de contraseña")
+        
+        if not password_filled:
+            logger.error("❌ No se pudo llenar campo de contraseña")
             return None
 
-        # ===== CAMPO DE CONFIRMACIÓN (opcional) =====
-        confirm_field = await page.query_selector('input[name="passwordCheck"]')
-        if confirm_field:
-            await confirm_field.fill(password)
-            logger.debug("   ✅ Confirmación de contraseña llenada")
-        else:
-            logger.debug("   ℹ️ No hay campo de confirmación (opcional)")
+        # 12.4 Campo de confirmación de contraseña
+        confirm_selectors = [
+            'input[name="passwordCheck"]',
+            'input#ap_password_check',
+            'input[placeholder*="confirm" i]'
+        ]
+        
+        for selector in confirm_selectors:
+            if await safe_fill(selector, password, "Confirmación"):
+                break
 
-        # ===== PASO 10: Teléfono para US =====
-        request_id = None
-        if domain == 'amazon.com':
-            logger.debug("📱 [PASO 10] Procesando número de teléfono para US...")
-            phone_number = None
-            if HERO_SMS_API_KEY:
+        # 12.5 Campo de teléfono (para TODOS los países)
+        phone_field = await page.query_selector('input[name="phoneNumber"], input[type="tel"], input#ap_phone_number')
+        if phone_field:
+            # Generar número según país
+            country_codes = {
+                'amazon.com': '1', 'amazon.ca': '1', 'amazon.com.mx': '52',
+                'amazon.co.uk': '44', 'amazon.de': '49', 'amazon.fr': '33',
+                'amazon.it': '39', 'amazon.es': '34', 'amazon.co.jp': '81',
+                'amazon.com.au': '61', 'amazon.in': '91'
+            }
+            code = country_codes.get(domain, '1')
+            phone_number = f"+{code}{random.randint(100000000, 999999999)}"
+            
+            await phone_field.fill(phone_number)
+            account_data['phone'] = phone_number
+            logger.debug(f"   ✅ Teléfono llenado: {phone_number}")
+            
+            # Para US, intentar obtener número real si está configurado
+            if domain == 'amazon.com' and HERO_SMS_API_KEY:
                 phone_info = await get_hero_sms_number()
                 if phone_info:
                     phone_number, request_id = phone_info
+                    await phone_field.fill(phone_number)
+                    account_data['phone'] = phone_number
                     logger.debug(f"   ✅ Número real obtenido: {phone_number}")
-                else:
-                    phone_number = f"+1{random.randint(200,999)}{random.randint(1000000,9999999)}"
-                    logger.warning(f"   ⚠️ Usando número falso: {phone_number}")
-            else:
-                phone_number = f"+1{random.randint(200,999)}{random.randint(1000000,9999999)}"
-                logger.warning("   ⚠️ Hero SMS no configurado, usando número falso")
 
-            phone_field = await page.query_selector('input[name="phoneNumber"], input[type="tel"]')
-            if phone_field:
-                await phone_field.fill(phone_number)
-                account_data['phone'] = phone_number
-                logger.debug(f"   ✅ Teléfono llenado: {phone_number}")
-            else:
-                logger.warning("   ⚠️ No se encontró campo de teléfono")
-
-        # ===== PASO 11: Aceptar términos =====
-        logger.debug("✅ [PASO 11] Buscando checkbox de términos...")
+        # 12.6 Aceptar términos
         terms_checkbox = await page.query_selector('input[name="agreement"], input[type="checkbox"]')
         if terms_checkbox:
             await terms_checkbox.check()
-            logger.debug("   ✅ Checkbox marcado")
-        else:
-            logger.debug("   ℹ️ No hay checkbox de términos")
+            logger.debug("   ✅ Checkbox de términos marcado")
 
-        # ===== PASO 12: Hacer clic en botón de registro =====
-        logger.debug("🖱️ [PASO 12] Haciendo clic en botón de registro...")
-        try:
-            await page.click('input[type="submit"], button[type="submit"], #continue')
-            logger.debug("   ✅ Click realizado")
-        except Exception as e:
-            logger.error(f"   ❌ Error al hacer click: {e}")
-            return None
+        # ===== PASO 13: BOTÓN DE REGISTRO FINAL =====
+        logger.debug("🎯 [PASO 13] Buscando botón de registro final...")
+        await page.screenshot(path=f'debug_paso4_antes_click_{domain}.png')
 
-        # ===== PASO 13: Esperar respuesta =====
-        logger.debug("⏳ [PASO 13] Esperando respuesta...")
+        final_button_selectors = [
+            'input#continue',
+            'input[type="submit"]',
+            'button[type="submit"]',
+            'input[value*="registrarse" i]',
+            'input[value*="crear" i]',
+            'input[value*="create" i]',
+            'button:has-text("Registrarse")',
+            'button:has-text("Crear cuenta")',
+            'button:has-text("Create account")'
+        ]
+
+        button_clicked = False
+        for selector in final_button_selectors:
+            try:
+                button = await page.wait_for_selector(selector, state='visible', timeout=3000)
+                if button:
+                    await button.click()
+                    logger.debug(f"   ✅ Botón final clickeado con selector: {selector}")
+                    button_clicked = True
+                    break
+            except:
+                continue
+
+        if not button_clicked:
+            logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
+
+        # ===== PASO 14: ESPERAR RESPUESTA Y VERIFICAR =====
+        logger.debug("⏳ [PASO 14] Esperando respuesta...")
         await page.wait_for_load_state('networkidle', timeout=30000)
         
         current_url = page.url
         logger.debug(f"   📍 URL actual: {current_url}")
+        await page.screenshot(path=f'debug_paso5_respuesta_{domain}.png')
 
-        # ===== PASO 14: Verificar resultado =====
+        # ===== PASO 15: VERIFICAR SI PIDE NÚMERO DE TELÉFONO =====
+        logger.debug("📱 [PASO 15] Verificando si pide verificación de número...")
+        
         content = await page.content()
+        soup = BeautifulSoup(content, 'html.parser')
+        
+        # Guardar HTML para análisis
         with open(f'debug_response_{domain}.html', 'w', encoding='utf-8') as f:
             f.write(content)
-        logger.debug(f"   ✅ Respuesta guardada como debug_response_{domain}.html")
+        
+        # Buscar indicadores de verificación de número
+        phone_verification = False
+        if 'verify' in current_url.lower() or 'cvf' in current_url.lower():
+            phone_field = await page.query_selector('input[name="code"], input[placeholder*="código" i]')
+            if phone_field:
+                logger.debug("   📱 Verificación de número detectada")
+                phone_verification = True
+                
+                # Aquí se implementaría la lógica para obtener código SMS
+                # Por ahora, simulamos un código (esto deberías mejorarlo)
+                verification_code = "123456"
+                
+                await phone_field.fill(verification_code)
+                logger.debug("   ✅ Código de verificación llenado")
+                
+                submit_btn = await page.query_selector('input[type="submit"], button[type="submit"]')
+                if submit_btn:
+                    await submit_btn.click()
+                    await page.wait_for_load_state('networkidle', timeout=15000)
 
-        soup = BeautifulSoup(content, 'html.parser')
-
-        # Verificar errores
+        # ===== PASO 16: VERIFICAR ERRORES =====
         error_div = soup.find('div', {'class': re.compile('a-alert-error|a-alert-warning|a-box-error', re.I)})
         if error_div:
             error_msg = error_div.get_text(strip=True)
             logger.error(f"   ❌ Error en registro: {error_msg}")
             return None
 
-        # ===== PASO 15: Verificación en dos pasos =====
-        if 'verification' in current_url.lower() or 'cvf' in current_url.lower():
-            logger.debug("🔐 [PASO 15] Verificación en dos pasos detectada")
-            
-            if domain == 'amazon.com' and request_id:
-                logger.debug("   📱 Esperando código SMS...")
-                code = await get_hero_sms_code(request_id)
-                if code:
-                    await page.fill('input[name="code"]', code)
-                    await page.click('button[type="submit"]')
-                    await page.wait_for_load_state('networkidle', timeout=15000)
-                    logger.debug("   ✅ Código SMS enviado")
-                else:
-                    logger.error("   ❌ No se recibió código SMS")
-                    return None
-            else:
-                logger.debug("   📧 Esperando código de correo...")
-                code = await get_verification_code(email, token, service)
-                if code:
-                    await page.fill('input[name="code"]', code)
-                    await page.click('button[type="submit"]')
-                    await page.wait_for_load_state('networkidle', timeout=15000)
-                    logger.debug("   ✅ Código de correo enviado")
-                else:
-                    logger.error("   ❌ No se recibió código de correo")
-                    return None
-
-        # ===== PASO 16: Verificar éxito =====
-        logger.debug("🎉 [PASO 16] Verificando éxito del registro...")
-        if 'your-account' in page.url.lower() or 'account' in page.url.lower():
+        # ===== PASO 17: VERIFICAR ÉXITO =====
+        logger.debug("🎉 [PASO 17] Verificando éxito del registro...")
+        
+        if 'your-account' in page.url.lower() or 'account' in page.url.lower() or 'welcome' in page.url.lower():
             logger.debug("   ✅ Registro exitoso!")
             
             # Obtener cookies
@@ -1212,9 +1305,9 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             for name, value in cookie_dict.items():
                 session.cookies.set(name, value, domain=f".{domain}")
 
-            # Agregar dirección si se solicita
+            # ===== PASO 18: AGREGAR DIRECCIÓN =====
             if add_address_flag:
-                logger.debug("📍 [PASO 17] Agregando dirección...")
+                logger.debug("📍 [PASO 18] Agregando dirección...")
                 addr_ok = await add_address(session, domain, email, password, token, service)
                 account_data['address'] = "Dirección agregada" if addr_ok else "Error al agregar dirección"
                 logger.debug(f"   ✅ Resultado dirección: {account_data['address']}")
@@ -1222,9 +1315,9 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                 account_data['address'] = "No se agregó dirección"
                 logger.debug("   ℹ️ Omisión de dirección")
 
-            # Visitar wallet para cookies completas
+            # ===== PASO 19: VISITAR WALLET =====
             try:
-                logger.debug("💳 Visitando wallet...")
+                logger.debug("💳 Visitando wallet para cookies completas...")
                 await page.goto(wallet_urls[domain], wait_until='networkidle', timeout=20000)
                 await page.wait_for_timeout(3000)
                 cookies = await context.cookies()
@@ -1257,9 +1350,6 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         if playwright:
             await playwright.stop()
         logger.debug("✅ Limpieza completada")
-# -------------------------------------------------------------------
-# FUNCIÓN PARA API
-# -------------------------------------------------------------------
 
 
 # ========== FUNCIÓN DE DEBUG PARA VER ESTRUCTURA (CORREGIDA) ==========
