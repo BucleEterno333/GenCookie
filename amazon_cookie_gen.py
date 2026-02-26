@@ -956,19 +956,93 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         page = await context.new_page()
         logger.debug("   ✅ Contexto y página creados")
 
-        # ===== PASO 7: Navegar a registro =====
+        # ===== PASO 7: Navegar a registro (VERSIÓN MEJORADA CON REINTENTOS) =====
         register_url = register_urls.get(domain)
         logger.debug(f"🌐 [PASO 7] Navegando a: {register_url}")
-        
-        try:
-            await page.goto(register_url, wait_until='networkidle', timeout=60000)
-            logger.debug("   ✅ Página cargada")
-        except Exception as e:
-            logger.error(f"   ❌ Error cargando página: {e}")
-            return None
+
+        # Configurar headers más humanos
+        await page.set_extra_http_headers({
+            'Accept-Language': 'es-MX,es;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        })
+
+        # Delay aleatorio inicial
+        random_delay = random.uniform(2, 4)
+        logger.debug(f"   ⏱️ Delay aleatorio de {random_delay:.2f} segundos...")
+        await asyncio.sleep(random_delay)
+
+        # Intentar con diferentes estrategias
+        load_success = False
+        strategies = [
+            {'wait': 'networkidle', 'timeout': 120000, 'name': 'networkidle (120s)'},
+            {'wait': 'domcontentloaded', 'timeout': 60000, 'name': 'domcontentloaded (60s)'},
+            {'wait': None, 'timeout': 30000, 'name': 'carga básica (30s)'}
+        ]
+
+        for strategy in strategies:
+            try:
+                logger.debug(f"   🔄 Intentando estrategia: {strategy['name']}")
+                
+                if strategy['wait']:
+                    await page.goto(register_url, wait_until=strategy['wait'], timeout=strategy['timeout'])
+                else:
+                    await page.goto(register_url, timeout=strategy['timeout'])
+                
+                # Esperar un poco después de la carga
+                await page.wait_for_timeout(5000)
+                
+                # Verificar que la página tenga contenido
+                body = await page.query_selector('body')
+                if body:
+                    logger.debug(f"   ✅ Página cargada con estrategia: {strategy['name']}")
+                    load_success = True
+                    break
+                else:
+                    logger.warning(f"   ⚠️ No se detectó body, intentando siguiente estrategia")
+                    
+            except Exception as e:
+                logger.warning(f"   ⚠️ Estrategia {strategy['name']} falló: {str(e)[:100]}")
+                continue
+
+        if not load_success:
+            logger.error("❌ No se pudo cargar la página con ninguna estrategia")
             
-        await page.wait_for_timeout(3000)
-        logger.debug("   ⏱️ Espera de 3 segundos completada")
+            # Intentar un último recurso: recargar la página
+            try:
+                logger.debug("   🔄 Último recurso: recargar página")
+                await page.reload(timeout=60000)
+                await page.wait_for_timeout(5000)
+                
+                body = await page.query_selector('body')
+                if body:
+                    logger.debug("   ✅ Página cargada con recarga")
+                    load_success = True
+                else:
+                    logger.error("   ❌ Recarga falló")
+                    return None
+            except Exception as e:
+                logger.error(f"   ❌ Recarga falló: {e}")
+                return None
+
+        # Tomar screenshot para ver el estado
+        await page.screenshot(path=f'debug_cargada_{domain}.png')
+        logger.debug("   📸 Screenshot post-carga guardado")
+
+        # Verificar si hay algún mensaje de error de Amazon
+        content = await page.content()
+        if "Sorry" in content or "lo sentimos" in content.lower():
+            logger.warning("⚠️ Posible bloqueo de Amazon detectado")
+            await page.screenshot(path=f'debug_bloqueo_{domain}.png')
+            
+            # Intentar con otro user agent
+            new_ua = random.choice(USER_AGENTS)
+            logger.debug(f"   🔄 Cambiando User-Agent a: {new_ua[:50]}...")
+            await context.set_extra_http_headers({'User-Agent': new_ua})
+            await page.reload()
+            await page.wait_for_timeout(5000)
 
         # ===== PASO 8: Verificar contenido inicial =====
         content = await page.content()
