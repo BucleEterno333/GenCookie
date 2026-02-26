@@ -846,6 +846,8 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
     """
     Crea una cuenta de Amazon y retorna los datos de la cuenta.
     """
+    logger.debug(f"🏁 create_amazon_account iniciado para domain={domain}, add_address_flag={add_address_flag}")
+    
     playwright = None
     browser = None
     context = None
@@ -871,15 +873,26 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             if PROXY_AUTH:
                 proxy_url = f"http://{PROXY_AUTH}@{PROXY_HOST_PORT}"
             session.proxies = {'http': proxy_url, 'https': proxy_url}
+            logger.debug(f"🌐 Proxy configurado: {PROXY_HOST_PORT}")
+        else:
+            logger.warning("⚠️ No se configuró proxy, se usará IP directa")
 
+        # Probar proxy
+        logger.debug("🔄 Probando proxy...")
         ok, msg = test_proxy(session)
         if not ok:
+            logger.error(f"❌ Proxy no funciona: {msg}")
             return None
+        logger.debug(f"✅ Proxy funcionando - IP: {msg}")
 
+        # Generar credenciales
+        logger.debug("📧 Generando email temporal...")
         if not email:
             email, token, service = await generate_temp_email()
             if not email:
+                logger.error("❌ No se pudo generar email temporal")
                 return None
+            logger.debug(f"✅ Email generado: {email} (servicio: {service})")
         
         password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
         first_name = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5)).capitalize()
@@ -889,7 +902,12 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         account_data['email'] = email
         account_data['password'] = password
         account_data['name'] = fullname
+        
+        logger.debug(f"👤 Nombre generado: {fullname}")
+        logger.debug(f"🔑 Password generada: [OCULTA]")
 
+        # Iniciar Playwright
+        logger.debug("🎬 Iniciando Playwright...")
         playwright = await async_playwright().start()
         launch_options = {
             'headless': True,
@@ -1060,39 +1078,78 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
 # -------------------------------------------------------------------
 # FUNCIÓN PARA API
 # -------------------------------------------------------------------
+# ========== FUNCIÓN PARA API CON MÁS DEBUG ==========
 async def generate_cookie_api(country, add_address=True):
     """
     Función para ser llamada desde la API.
     """
+    logger.debug(f"🚀 generate_cookie_api llamada con country={country}, add_address={add_address}")
+    
     try:
         if country not in country_to_domain:
+            error_msg = f'País no soportado: {country}'
+            logger.error(f"❌ {error_msg}")
             return {
                 'success': False,
-                'error': f'País no soportado: {country}',
+                'error': error_msg,
                 'country': country
             }
         
         domain = country_to_domain[country]
+        logger.debug(f"📌 Dominio seleccionado: {domain}")
+        
+        # Verificar configuración de proxy
+        logger.debug(f"🔌 Configuración de proxy: PROXY_HOST_PORT={PROXY_HOST_PORT}, PROXY_AUTH={'configurada' if PROXY_AUTH else 'no'}")
+        
+        # Verificar configuración de captcha
+        logger.debug(f"🤖 Captcha: provider={CAPTCHA_PROVIDER}, 2captcha={'✓' if API_KEY_2CAPTCHA else '✗'}, anticaptcha={'✓' if API_KEY_ANTICAPTCHA else '✗'}")
+        
+        # Verificar Hero SMS para US
+        if country == 'US':
+            logger.debug(f"📱 Hero SMS: API_KEY={'✓' if HERO_SMS_API_KEY else '✗'}, country={HERO_SMS_COUNTRY}")
+        
+        logger.debug("⏳ Iniciando create_amazon_account...")
         account_data = await create_amazon_account(domain, add_address_flag=add_address)
         
         if account_data:
+            logger.debug(f"✅ Cuenta creada exitosamente: email={account_data.get('email')}")
             return {
                 'success': True,
                 'data': account_data,
                 'country': country
             }
         else:
+            error_msg = f'No se pudo generar cookie para {country}'
+            logger.error(f"❌ {error_msg} - create_amazon_account retornó None")
+            
+            # Intentar diagnosticar posibles causas
+            diagnostic = []
+            if not PROXY_HOST_PORT:
+                diagnostic.append("Proxy no configurado")
+            if not API_KEY_2CAPTCHA and not API_KEY_ANTICAPTCHA:
+                diagnostic.append("Sin API de captcha")
+            if country == 'US' and not HERO_SMS_API_KEY:
+                diagnostic.append("Hero SMS no configurado para US")
+            
+            if diagnostic:
+                logger.error(f"🔍 Diagnóstico: {', '.join(diagnostic)}")
+            
             return {
                 'success': False,
-                'error': f'No se pudo generar cookie para {country}',
-                'country': country
+                'error': error_msg,
+                'country': country,
+                'diagnostic': diagnostic
             }
     except Exception as e:
+        logger.exception(f"💥 Excepción en generate_cookie_api: {str(e)}")
         return {
             'success': False,
             'error': str(e),
             'country': country
         }
+    
+
+
 
 # -------------------------------------------------------------------
 # API FLASK
@@ -1151,6 +1208,26 @@ def generate():
     finally:
         loop.close()
 
+@app.route('/diagnostic', methods=['GET'])
+def diagnostic():
+    """Endpoint de diagnóstico para verificar configuración"""
+    return jsonify({
+        'status': 'ok',
+        'timestamp': time.time(),
+        'config': {
+            'proxy': 'configurado' if PROXY_HOST_PORT else 'no configurado',
+            'proxy_string': PROXY_STRING[:20] + '...' if PROXY_STRING else None,
+            'captcha_provider': CAPTCHA_PROVIDER,
+            'has_2captcha': bool(API_KEY_2CAPTCHA),
+            'has_anticaptcha': bool(API_KEY_ANTICAPTCHA),
+            'hero_sms': bool(HERO_SMS_API_KEY),
+            'supported_countries': list(country_to_domain.keys())
+        },
+        'environment': {
+            'python_version': sys.version,
+            'platform': sys.platform
+        }
+    })
 # -------------------------------------------------------------------
 # MAIN
 # -------------------------------------------------------------------
