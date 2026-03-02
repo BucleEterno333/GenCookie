@@ -1099,8 +1099,39 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         logger.debug(f"   📍 Nueva URL: {page.url}")
         last_screenshot = await take_screenshot(page, "despues_continuar")
 
+
+        # ===== NUEVO PASO: Página intermedia "Proceder a crear una cuenta" =====
+        logger.debug("🔍 [PASO 10] Verificando página intermedia de confirmación...")
+        # Buscar el botón "Proceder a crear una cuenta"
+        proceed_selectors = [
+            'span#intention-submit-button input.a-button-input',
+            'input[type="submit"][aria-labelledby="intention-submit-button-announce"]',
+            'button:has-text("Proceder a crear una cuenta")',
+            'input[value="Proceder a crear una cuenta"]'
+        ]
+        proceed_button = None
+        for selector in proceed_selectors:
+            try:
+                button = await page.wait_for_selector(selector, state='visible', timeout=3000)
+                if button:
+                    proceed_button = button
+                    logger.debug(f"   ✅ Botón 'Proceder a crear una cuenta' encontrado con selector: {selector}")
+                    break
+            except:
+                continue
+
+        if proceed_button:
+            logger.debug("   🔘 Haciendo clic en 'Proceder a crear una cuenta'...")
+            await proceed_button.click()
+            await page.wait_for_load_state('networkidle', timeout=10000)
+            await page.wait_for_timeout(2000)
+            last_screenshot = await take_screenshot(page, "despues_proceder")
+            logger.debug("   ✅ Clic realizado, página de registro cargada")
+        else:
+            logger.debug("   ℹ️ No se detectó página intermedia, continuando directamente")
+
         # ===== PASO 10: VERIFICAR CAPTCHA EN SEGUNDA PÁGINA =====
-        logger.debug("🔍 [PASO 10] Verificando captcha en segunda página...")
+        logger.debug("🔍 [PASO 11] Verificando captcha en segunda página...")
         
         content = await page.content()
         soup = BeautifulSoup(content, 'html.parser')
