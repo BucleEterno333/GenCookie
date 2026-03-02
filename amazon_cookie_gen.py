@@ -5,8 +5,7 @@ Amazon Cookie Generator - Versión API REST
 - Configuración mediante variables de entorno
 - 2captcha con fallback a anticaptcha
 - Integración con Hero SMS para verificación telefónica
-- AHORA: Modo API con soporte para peticiones JSON
-- AHORA: Control de agregar dirección desde el frontend
+- AHORA: Captura de pantalla en cada paso y envío al frontend (screenshot en base64)
 """
 
 import os
@@ -18,6 +17,8 @@ import uuid
 import asyncio
 import logging
 import argparse
+import base64
+import sys
 from urllib.parse import urlencode, urljoin, quote
 from bs4 import BeautifulSoup
 import requests
@@ -840,10 +841,26 @@ async def add_address(session, domain, email, password, token=None, service=None
     return True
 
 # -------------------------------------------------------------------
-# CREACIÓN DE CUENTA PRINCIPAL
+# FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA
+# -------------------------------------------------------------------
+async def take_screenshot(page, step_name):
+    """Captura la pantalla actual y la retorna en base64."""
+    try:
+        screenshot_bytes = await page.screenshot()
+        screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+        logger.debug(f"📸 Screenshot tomado en paso: {step_name}")
+        return screenshot_b64
+    except Exception as e:
+        logger.warning(f"⚠️ Error tomando screenshot en paso {step_name}: {e}")
+        return None
+
+# -------------------------------------------------------------------
+# CREACIÓN DE CUENTA PRINCIPAL (con capturas)
+# -------------------------------------------------------------------
 async def create_amazon_account(domain, email=None, token=None, service=None, add_address_flag=True):
     """
     Crea una cuenta de Amazon y retorna los datos de la cuenta.
+    Retorna: (account_data, error_message, screenshot_base64)
     """
     logger.debug(f"🏁 [ENTRADA] create_amazon_account para {domain}")
     
@@ -865,6 +882,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         'timestamp': time.time()
     }
 
+    last_screenshot = None  # Guardará la última captura exitosa
 
     try:
         # ===== PASO 1: Configurar sesión y proxy =====
@@ -884,7 +902,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         ok, msg = test_proxy(session)
         if not ok:
             logger.error(f"   ❌ Proxy no funciona: {msg}")
-            return None
+            return None, f"Proxy error: {msg}", None
         logger.debug(f"   ✅ Proxy OK - IP: {msg}")
 
         # ===== PASO 3: Generar email =====
@@ -893,7 +911,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             email, token, service = await generate_temp_email()
             if not email:
                 logger.error("   ❌ No se pudo generar email temporal")
-                return None
+                return None, "No se pudo generar email temporal", None
             logger.debug(f"   ✅ Email generado: {email} (servicio: {service})")
         
         # ===== PASO 4: Generar credenciales =====
@@ -908,7 +926,6 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         account_data['name'] = fullname
         
         logger.debug(f"   👤 Nombre: {fullname}")
-        logger.debug(f"   🔐 Password: [OCULTA]")
 
         # ===== PASO 5: Iniciar Playwright =====
         logger.debug("🎬 [PASO 5] Iniciando Playwright...")
@@ -917,7 +934,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             logger.debug("   ✅ Playwright iniciado")
         except Exception as e:
             logger.error(f"   ❌ Error iniciando Playwright: {e}")
-            return None
+            return None, f"Error iniciando Playwright: {e}", None
             
         launch_options = {
             'headless': True,
@@ -947,7 +964,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             logger.debug("   ✅ Browser lanzado")
         except Exception as e:
             logger.error(f"   ❌ Error lanzando browser: {e}")
-            return None
+            return None, f"Error lanzando browser: {e}", None
             
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 720},
@@ -956,11 +973,10 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         page = await context.new_page()
         logger.debug("   ✅ Contexto y página creados")
 
-        # ===== PASO 7: Navegar a registro (VERSIÓN MEJORADA CON REINTENTOS) =====
+        # ===== PASO 7: Navegar a registro =====
         register_url = register_urls.get(domain)
         logger.debug(f"🌐 [PASO 7] Navegando a: {register_url}")
 
-        # Configurar headers más humanos
         await page.set_extra_http_headers({
             'Accept-Language': 'es-MX,es;q=0.9,en;q=0.8',
             'Accept-Encoding': 'gzip, deflate, br',
@@ -969,12 +985,10 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             'Upgrade-Insecure-Requests': '1'
         })
 
-        # Delay aleatorio inicial
         random_delay = random.uniform(2, 4)
         logger.debug(f"   ⏱️ Delay aleatorio de {random_delay:.2f} segundos...")
         await asyncio.sleep(random_delay)
 
-        # Intentar con diferentes estrategias
         load_success = False
         strategies = [
             {'wait': 'networkidle', 'timeout': 120000, 'name': 'networkidle (120s)'},
@@ -985,16 +999,12 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         for strategy in strategies:
             try:
                 logger.debug(f"   🔄 Intentando estrategia: {strategy['name']}")
-                
                 if strategy['wait']:
                     await page.goto(register_url, wait_until=strategy['wait'], timeout=strategy['timeout'])
                 else:
                     await page.goto(register_url, timeout=strategy['timeout'])
                 
-                # Esperar un poco después de la carga
                 await page.wait_for_timeout(5000)
-                
-                # Verificar que la página tenga contenido
                 body = await page.query_selector('body')
                 if body:
                     logger.debug(f"   ✅ Página cargada con estrategia: {strategy['name']}")
@@ -1002,64 +1012,34 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                     break
                 else:
                     logger.warning(f"   ⚠️ No se detectó body, intentando siguiente estrategia")
-                    
             except Exception as e:
                 logger.warning(f"   ⚠️ Estrategia {strategy['name']} falló: {str(e)[:100]}")
                 continue
 
         if not load_success:
             logger.error("❌ No se pudo cargar la página con ninguna estrategia")
-            
-            # Intentar un último recurso: recargar la página
+            # Intentar recarga final
             try:
                 logger.debug("   🔄 Último recurso: recargar página")
                 await page.reload(timeout=60000)
                 await page.wait_for_timeout(5000)
-                
                 body = await page.query_selector('body')
                 if body:
                     logger.debug("   ✅ Página cargada con recarga")
                     load_success = True
                 else:
                     logger.error("   ❌ Recarga falló")
-                    return None
+                    return None, "No se pudo cargar la página de registro", None
             except Exception as e:
                 logger.error(f"   ❌ Recarga falló: {e}")
-                return None
+                return None, f"Error cargando página: {e}", None
 
-        # Tomar screenshot para ver el estado
-        await page.screenshot(path=f'debug_cargada_{domain}.png')
-        logger.debug("   📸 Screenshot post-carga guardado")
+        # Capturar pantalla después de carga
+        last_screenshot = await take_screenshot(page, "registro_cargada")
 
-        # Verificar si hay algún mensaje de error de Amazon
-        content = await page.content()
-        if "Sorry" in content or "lo sentimos" in content.lower():
-            logger.warning("⚠️ Posible bloqueo de Amazon detectado")
-            await page.screenshot(path=f'debug_bloqueo_{domain}.png')
-            
-            # Intentar con otro user agent
-            new_ua = random.choice(USER_AGENTS)
-            logger.debug(f"   🔄 Cambiando User-Agent a: {new_ua[:50]}...")
-            await context.set_extra_http_headers({'User-Agent': new_ua})
-            await page.reload()
-            await page.wait_for_timeout(5000)
-
-        # ===== PASO 8: Verificar contenido inicial =====
-        content = await page.content()
-        logger.debug(f"📄 [PASO 8] Longitud del HTML: {len(content)} caracteres")
+        # ===== PASO 8: PRIMERA PÁGINA - INGRESAR EMAIL =====
+        logger.debug("📧 [PASO 8] Primera página: Ingresando email...")
         
-        # Guardar HTML para debug
-        with open(f'debug_register_{domain}.html', 'w', encoding='utf-8') as f:
-            f.write(content)
-        logger.debug(f"   ✅ HTML guardado como debug_register_{domain}.html")
-
-        # ===== PASO 9: PRIMERA PÁGINA - INGRESAR EMAIL =====
-        logger.debug("📧 [PASO 9] Primera página: Ingresando email...")
-        
-        # Tomar screenshot del estado inicial
-        await page.screenshot(path=f'debug_paso1_inicial_{domain}.png')
-        
-        # Buscar campo de email en la primera página
         email_field = None
         email_selectors_paso1 = [
             'input#ap_email_login',
@@ -1078,26 +1058,16 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         
         if not email_field:
             logger.error("❌ No se encontró campo de email visible")
-            # Mostrar todos los inputs visibles para debug
-            all_inputs = await page.query_selector_all('input')
-            for i, inp in enumerate(all_inputs):
-                if await inp.is_visible():
-                    attrs = {
-                        'type': await inp.get_attribute('type'),
-                        'name': await inp.get_attribute('name'),
-                        'id': await inp.get_attribute('id'),
-                        'placeholder': await inp.get_attribute('placeholder')
-                    }
-                    logger.debug(f"   📋 Input visible {i}: {attrs}")
-            return None
+            # Capturar pantalla de error
+            last_screenshot = await take_screenshot(page, "error_no_email_field")
+            return None, "No se encontró campo de email", last_screenshot
         
-        # Llenar email
         await email_field.fill(email)
         logger.debug(f"   ✅ Email llenado: {email}")
-        await page.screenshot(path=f'debug_paso1_email_llenado_{domain}.png')
+        last_screenshot = await take_screenshot(page, "email_llenado")
 
-        # ===== PASO 10: HACER CLIC EN CONTINUAR =====
-        logger.debug("🖱️ [PASO 10] Haciendo clic en Continuar...")
+        # ===== PASO 9: HACER CLIC EN CONTINUAR =====
+        logger.debug("🖱️ [PASO 9] Haciendo clic en Continuar...")
         
         continue_button = None
         continue_selectors = [
@@ -1118,19 +1088,19 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         
         if not continue_button:
             logger.error("❌ No se encontró botón Continuar")
-            return None
+            last_screenshot = await take_screenshot(page, "error_no_continue_button")
+            return None, "No se encontró botón Continuar", last_screenshot
         
         await continue_button.click()
         logger.debug("   ✅ Click realizado")
         
-        # Esperar carga de siguiente página
         await page.wait_for_load_state('networkidle', timeout=10000)
         await page.wait_for_timeout(2000)
         logger.debug(f"   📍 Nueva URL: {page.url}")
-        await page.screenshot(path=f'debug_paso2_despues_click_{domain}.png')
+        last_screenshot = await take_screenshot(page, "despues_continuar")
 
-        # ===== PASO 11: VERIFICAR CAPTCHA EN SEGUNDA PÁGINA =====
-        logger.debug("🔍 [PASO 11] Verificando captcha en segunda página...")
+        # ===== PASO 10: VERIFICAR CAPTCHA EN SEGUNDA PÁGINA =====
+        logger.debug("🔍 [PASO 10] Verificando captcha en segunda página...")
         
         content = await page.content()
         soup = BeautifulSoup(content, 'html.parser')
@@ -1153,16 +1123,17 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                         await page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML="{captcha_solution}";')
                         await page.click('input[type="submit"]')
                         await page.wait_for_load_state('networkidle', timeout=10000)
+                        last_screenshot = await take_screenshot(page, "despues_captcha")
                     else:
                         logger.error("   ❌ No se pudo resolver captcha")
-                        return None
+                        last_screenshot = await take_screenshot(page, "error_captcha")
+                        return None, "No se pudo resolver captcha", last_screenshot
             elif captcha_div:
                 img = captcha_div.find('img')
                 if img and img.get('src'):
                     img_url = urljoin(page.url, img['src'])
                     logger.debug(f"   🖼️ Captcha de imagen detectado: {img_url}")
                     
-                    # Descargar imagen
                     img_resp = requests.get(img_url, timeout=10)
                     if img_resp.status_code == 200:
                         with open('temp_captcha.jpg', 'wb') as f:
@@ -1173,13 +1144,15 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                             await page.fill('input[name="cvf_captcha_input"]', solution)
                             await page.click('input[type="submit"]')
                             await page.wait_for_load_state('networkidle', timeout=10000)
+                            last_screenshot = await take_screenshot(page, "despues_captcha_imagen")
                         else:
                             logger.error("   ❌ No se pudo resolver captcha de imagen")
-                            return None
+                            last_screenshot = await take_screenshot(page, "error_captcha_imagen")
+                            return None, "No se pudo resolver captcha de imagen", last_screenshot
 
-        # ===== PASO 12: SEGUNDA PÁGINA - LLENAR FORMULARIO COMPLETO =====
-        logger.debug("📝 [PASO 12] Segunda página: Llenando formulario completo...")
-        await page.screenshot(path=f'debug_paso3_formulario_{domain}.png')
+        # ===== PASO 11: SEGUNDA PÁGINA - LLENAR FORMULARIO COMPLETO =====
+        logger.debug("📝 [PASO 11] Segunda página: Llenando formulario completo...")
+        last_screenshot = await take_screenshot(page, "formulario_antes_llenar")
 
         # Función helper para llenar campos con reintentos
         async def safe_fill(selector, value, description):
@@ -1188,16 +1161,13 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                     field = await page.wait_for_selector(selector, state='visible', timeout=5000)
                     await field.fill(value)
                     logger.debug(f"   ✅ {description} llenado con selector: {selector}")
-                    filled = await field.get_attribute('value')
-                    if filled:
-                        logger.debug(f"      📝 Verificado (longitud: {len(filled)})")
                     return True
                 except Exception as e:
                     logger.debug(f"      ⚠️ Intento {attempt+1} falló: {str(e)[:50]}")
                     await page.wait_for_timeout(1000)
             return False
 
-        # 12.1 Campo de nombre
+        # 11.1 Campo de nombre
         name_selectors = [
             'input[name="customerName"]',
             'input#ap_customer_name',
@@ -1214,7 +1184,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         if not name_filled:
             logger.warning("⚠️ No se pudo llenar campo de nombre, puede estar precargado")
 
-        # 12.2 Campo de email (puede estar precargado)
+        # 11.2 Campo de email (puede estar precargado)
         email_second = await page.query_selector('input[name="email"], input#ap_email, input[type="email"]')
         if email_second:
             current_email = await email_second.get_attribute('value')
@@ -1224,7 +1194,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             else:
                 logger.debug(f"   ℹ️ Email ya precargado: {current_email}")
 
-        # 12.3 Campo de contraseña
+        # 11.3 Campo de contraseña
         password_selectors = [
             'input[name="password"]',
             'input#ap_password',
@@ -1239,9 +1209,10 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         
         if not password_filled:
             logger.error("❌ No se pudo llenar campo de contraseña")
-            return None
+            last_screenshot = await take_screenshot(page, "error_password")
+            return None, "No se pudo llenar campo de contraseña", last_screenshot
 
-        # 12.4 Campo de confirmación de contraseña
+        # 11.4 Campo de confirmación de contraseña
         confirm_selectors = [
             'input[name="passwordCheck"]',
             'input#ap_password_check',
@@ -1252,10 +1223,9 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             if await safe_fill(selector, password, "Confirmación"):
                 break
 
-        # 12.5 Campo de teléfono (para TODOS los países)
+        # 11.5 Campo de teléfono (para TODOS los países)
         phone_field = await page.query_selector('input[name="phoneNumber"], input[type="tel"], input#ap_phone_number')
         if phone_field:
-            # Generar número según país
             country_codes = {
                 'amazon.com': '1', 'amazon.ca': '1', 'amazon.com.mx': '52',
                 'amazon.co.uk': '44', 'amazon.de': '49', 'amazon.fr': '33',
@@ -1269,7 +1239,6 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             account_data['phone'] = phone_number
             logger.debug(f"   ✅ Teléfono llenado: {phone_number}")
             
-            # Para US, intentar obtener número real si está configurado
             if domain == 'amazon.com' and HERO_SMS_API_KEY:
                 phone_info = await get_hero_sms_number()
                 if phone_info:
@@ -1278,15 +1247,16 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                     account_data['phone'] = phone_number
                     logger.debug(f"   ✅ Número real obtenido: {phone_number}")
 
-        # 12.6 Aceptar términos
+        # 11.6 Aceptar términos
         terms_checkbox = await page.query_selector('input[name="agreement"], input[type="checkbox"]')
         if terms_checkbox:
             await terms_checkbox.check()
             logger.debug("   ✅ Checkbox de términos marcado")
 
-        # ===== PASO 13: BOTÓN DE REGISTRO FINAL =====
-        logger.debug("🎯 [PASO 13] Buscando botón de registro final...")
-        await page.screenshot(path=f'debug_paso4_antes_click_{domain}.png')
+        last_screenshot = await take_screenshot(page, "formulario_llenado")
+
+        # ===== PASO 12: BOTÓN DE REGISTRO FINAL =====
+        logger.debug("🎯 [PASO 12] Buscando botón de registro final...")
 
         final_button_selectors = [
             'input#continue',
@@ -1315,36 +1285,21 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         if not button_clicked:
             logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
 
-        # ===== PASO 14: ESPERAR RESPUESTA Y VERIFICAR =====
-        logger.debug("⏳ [PASO 14] Esperando respuesta...")
         await page.wait_for_load_state('networkidle', timeout=30000)
-        
-        current_url = page.url
-        logger.debug(f"   📍 URL actual: {current_url}")
-        await page.screenshot(path=f'debug_paso5_respuesta_{domain}.png')
+        last_screenshot = await take_screenshot(page, "despues_registro")
 
-        # ===== PASO 15: VERIFICAR SI PIDE NÚMERO DE TELÉFONO =====
-        logger.debug("📱 [PASO 15] Verificando si pide verificación de número...")
+        # ===== PASO 13: VERIFICAR SI PIDE NÚMERO DE TELÉFONO =====
+        logger.debug("📱 [PASO 13] Verificando si pide verificación de número...")
         
         content = await page.content()
         soup = BeautifulSoup(content, 'html.parser')
         
-        # Guardar HTML para análisis
-        with open(f'debug_response_{domain}.html', 'w', encoding='utf-8') as f:
-            f.write(content)
-        
-        # Buscar indicadores de verificación de número
-        phone_verification = False
-        if 'verify' in current_url.lower() or 'cvf' in current_url.lower():
+        if 'verify' in page.url.lower() or 'cvf' in page.url.lower():
             phone_field = await page.query_selector('input[name="code"], input[placeholder*="código" i]')
             if phone_field:
                 logger.debug("   📱 Verificación de número detectada")
-                phone_verification = True
-                
                 # Aquí se implementaría la lógica para obtener código SMS
-                # Por ahora, simulamos un código (esto deberías mejorarlo)
-                verification_code = "123456"
-                
+                verification_code = "123456"  # Placeholder
                 await phone_field.fill(verification_code)
                 logger.debug("   ✅ Código de verificación llenado")
                 
@@ -1352,21 +1307,22 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                 if submit_btn:
                     await submit_btn.click()
                     await page.wait_for_load_state('networkidle', timeout=15000)
+                    last_screenshot = await take_screenshot(page, "despues_verificacion")
 
-        # ===== PASO 16: VERIFICAR ERRORES =====
+        # ===== PASO 14: VERIFICAR ERRORES =====
         error_div = soup.find('div', {'class': re.compile('a-alert-error|a-alert-warning|a-box-error', re.I)})
         if error_div:
             error_msg = error_div.get_text(strip=True)
             logger.error(f"   ❌ Error en registro: {error_msg}")
-            return None
+            last_screenshot = await take_screenshot(page, "error_registro")
+            return None, f"Error en registro: {error_msg}", last_screenshot
 
-        # ===== PASO 17: VERIFICAR ÉXITO =====
-        logger.debug("🎉 [PASO 17] Verificando éxito del registro...")
+        # ===== PASO 15: VERIFICAR ÉXITO =====
+        logger.debug("🎉 [PASO 15] Verificando éxito del registro...")
         
         if 'your-account' in page.url.lower() or 'account' in page.url.lower() or 'welcome' in page.url.lower():
             logger.debug("   ✅ Registro exitoso!")
             
-            # Obtener cookies
             cookies = await context.cookies()
             cookie_dict = {c['name']: c['value'] for c in cookies}
             cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
@@ -1375,13 +1331,12 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             account_data['cookie_string'] = cookie_string
             logger.debug(f"   🍪 Cookies obtenidas: {len(cookie_dict)} cookies")
 
-            # Sincronizar cookies
             for name, value in cookie_dict.items():
                 session.cookies.set(name, value, domain=f".{domain}")
 
-            # ===== PASO 18: AGREGAR DIRECCIÓN =====
+            # ===== PASO 16: AGREGAR DIRECCIÓN =====
             if add_address_flag:
-                logger.debug("📍 [PASO 18] Agregando dirección...")
+                logger.debug("📍 [PASO 16] Agregando dirección...")
                 addr_ok = await add_address(session, domain, email, password, token, service)
                 account_data['address'] = "Dirección agregada" if addr_ok else "Error al agregar dirección"
                 logger.debug(f"   ✅ Resultado dirección: {account_data['address']}")
@@ -1389,11 +1344,12 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                 account_data['address'] = "No se agregó dirección"
                 logger.debug("   ℹ️ Omisión de dirección")
 
-            # ===== PASO 19: VISITAR WALLET =====
+            # ===== PASO 17: VISITAR WALLET =====
             try:
                 logger.debug("💳 Visitando wallet para cookies completas...")
                 await page.goto(wallet_urls[domain], wait_until='networkidle', timeout=20000)
                 await page.wait_for_timeout(3000)
+                last_screenshot = await take_screenshot(page, "wallet")
                 cookies = await context.cookies()
                 cookie_dict = {c['name']: c['value'] for c in cookies}
                 cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
@@ -1404,14 +1360,18 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                 logger.warning(f"   ⚠️ Error al visitar wallet: {e}")
 
             logger.debug("🏁 [FIN] create_amazon_account completado con éxito")
-            return account_data
+            return account_data, None, last_screenshot
         else:
             logger.error(f"   ❌ Registro fallido, URL final: {page.url}")
-            return None
+            last_screenshot = await take_screenshot(page, "error_registro_final")
+            return None, f"Registro fallido, URL: {page.url}", last_screenshot
 
     except Exception as e:
         logger.exception(f"💥 Excepción en create_amazon_account: {str(e)}")
-        return None
+        # Intentar capturar pantalla si aún tenemos página
+        if page:
+            last_screenshot = await take_screenshot(page, "excepcion")
+        return None, f"Excepción: {str(e)}", last_screenshot
     finally:
         # Limpieza
         logger.debug("🧹 Limpiando recursos...")
@@ -1425,8 +1385,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             await playwright.stop()
         logger.debug("✅ Limpieza completada")
 
-
-# ========== FUNCIÓN DE DEBUG PARA VER ESTRUCTURA (CORREGIDA) ==========
+# ========== FUNCIÓN DE DEBUG PARA VER ESTRUCTURA ==========
 async def debug_amazon_structure(domain='amazon.com.mx'):
     """Función para ver la estructura exacta de la página de registro (MODO HEADLESS)"""
     
@@ -1434,7 +1393,6 @@ async def debug_amazon_structure(domain='amazon.com.mx'):
     print("="*50)
     
     async with async_playwright() as p:
-        # CAMBIO IMPORTANTE: headless=True para servidor
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         
@@ -1442,11 +1400,9 @@ async def debug_amazon_structure(domain='amazon.com.mx'):
         await page.goto(register_urls[domain], wait_until='networkidle')
         await page.wait_for_timeout(3000)
         
-        # Tomar screenshot (igual funciona en headless)
         await page.screenshot(path=f'debug_{domain}.png')
         print(f"📸 Screenshot guardado como debug_{domain}.png")
         
-        # Obtener todos los inputs (esto no necesita interfaz gráfica)
         inputs = await page.query_selector_all('input')
         print(f"\n📋 INPUTS ENCONTRADOS ({len(inputs)}):")
         print("-"*50)
@@ -1463,7 +1419,6 @@ async def debug_amazon_structure(domain='amazon.com.mx'):
             print(f"   ID: {input_id}")
             print(f"   Placeholder: {input_placeholder}")
         
-        # Obtener HTML
         html = await page.content()
         with open(f'debug_{domain}.html', 'w', encoding='utf-8') as f:
             f.write(html)
@@ -1472,11 +1427,11 @@ async def debug_amazon_structure(domain='amazon.com.mx'):
         await browser.close()
         print("\n✅ Debug completado")
 
-
 # ========== FUNCIÓN PARA API CON MÁS DEBUG ==========
 async def generate_cookie_api(country, add_address=True):
     """
     Función para ser llamada desde la API.
+    Retorna dict con success, data/error, y screenshot.
     """
     logger.debug(f"🚀 generate_cookie_api llamada con country={country}, add_address={add_address}")
     
@@ -1487,64 +1442,41 @@ async def generate_cookie_api(country, add_address=True):
             return {
                 'success': False,
                 'error': error_msg,
-                'country': country
+                'country': country,
+                'screenshot': None
             }
         
         domain = country_to_domain[country]
         logger.debug(f"📌 Dominio seleccionado: {domain}")
         
-        # Verificar configuración de proxy
-        logger.debug(f"🔌 Configuración de proxy: PROXY_HOST_PORT={PROXY_HOST_PORT}, PROXY_AUTH={'configurada' if PROXY_AUTH else 'no'}")
-        
-        # Verificar configuración de captcha
-        logger.debug(f"🤖 Captcha: provider={CAPTCHA_PROVIDER}, 2captcha={'✓' if API_KEY_2CAPTCHA else '✗'}, anticaptcha={'✓' if API_KEY_ANTICAPTCHA else '✗'}")
-        
-        # Verificar Hero SMS para US
-        if country == 'US':
-            logger.debug(f"📱 Hero SMS: API_KEY={'✓' if HERO_SMS_API_KEY else '✗'}, country={HERO_SMS_COUNTRY}")
-        
         logger.debug("⏳ Iniciando create_amazon_account...")
-        account_data = await create_amazon_account(domain, add_address_flag=add_address)
+        account_data, error_msg, screenshot = await create_amazon_account(domain, add_address_flag=add_address)
         
         if account_data:
             logger.debug(f"✅ Cuenta creada exitosamente: email={account_data.get('email')}")
             return {
                 'success': True,
                 'data': account_data,
-                'country': country
+                'country': country,
+                'screenshot': screenshot  # Puede ser None si no se pudo capturar al final
             }
         else:
-            error_msg = f'No se pudo generar cookie para {country}'
-            logger.error(f"❌ {error_msg} - create_amazon_account retornó None")
-            
-            # Intentar diagnosticar posibles causas
-            diagnostic = []
-            if not PROXY_HOST_PORT:
-                diagnostic.append("Proxy no configurado")
-            if not API_KEY_2CAPTCHA and not API_KEY_ANTICAPTCHA:
-                diagnostic.append("Sin API de captcha")
-            if country == 'US' and not HERO_SMS_API_KEY:
-                diagnostic.append("Hero SMS no configurado para US")
-            
-            if diagnostic:
-                logger.error(f"🔍 Diagnóstico: {', '.join(diagnostic)}")
-            
+            error_msg = error_msg or f'No se pudo generar cookie para {country}'
+            logger.error(f"❌ {error_msg}")
             return {
                 'success': False,
                 'error': error_msg,
                 'country': country,
-                'diagnostic': diagnostic
+                'screenshot': screenshot  # Última captura antes del error
             }
     except Exception as e:
         logger.exception(f"💥 Excepción en generate_cookie_api: {str(e)}")
         return {
             'success': False,
             'error': str(e),
-            'country': country
+            'country': country,
+            'screenshot': None
         }
-    
-
-
 
 # -------------------------------------------------------------------
 # API FLASK
@@ -1623,15 +1555,19 @@ def diagnostic():
             'platform': sys.platform
         }
     })
+
 # -------------------------------------------------------------------
 # MAIN
 # -------------------------------------------------------------------
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-    asyncio.run(debug_amazon_structure('amazon.com.mx'))
     parser = argparse.ArgumentParser(description='API de generador de cookies Amazon')
     parser.add_argument('--cli', action='store_true', help='Ejecutar en modo CLI (menú interactivo)')
+    parser.add_argument('--debug-structure', type=str, help='Ejecutar debug de estructura para un dominio (ej: amazon.com.mx)')
     args = parser.parse_args()
+
+    if args.debug_structure:
+        asyncio.run(debug_amazon_structure(args.debug_structure))
+        sys.exit(0)
 
     if args.cli:
         # Modo CLI - menú interactivo
@@ -1672,8 +1608,12 @@ if __name__ == '__main__':
                         print(f"   Email: {data['email']}")
                         print(f"   Contraseña: {data['password']}")
                         print(f"   Cookie: {data['cookie_string'][:100]}...")
+                        if result.get('screenshot'):
+                            print(f"   📸 Screenshot disponible (base64, {len(result['screenshot'])} chars)")
                     else:
                         print(f"❌ Error: {result['error']}")
+                        if result.get('screenshot'):
+                            print(f"   📸 Screenshot del error disponible")
                 finally:
                     loop.close()
             elif op == '2':
@@ -1687,5 +1627,3 @@ if __name__ == '__main__':
         print(f"   GET  /health - Health check")
         print(f"   POST /generate - Generar cookie")
         app.run(host=API_HOST, port=API_PORT, debug=False, threaded=True)
-
-
