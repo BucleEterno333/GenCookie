@@ -1481,8 +1481,26 @@ async def generate_cookie_api(country, add_address=True):
 # -------------------------------------------------------------------
 # API FLASK
 # -------------------------------------------------------------------
+# -------------------------------------------------------------------
+# API FLASK
+# -------------------------------------------------------------------
 app = Flask(__name__)
-CORS(app)  # Permitir CORS para peticiones desde el frontend
+
+# Configuración CORS explícita y segura
+CORS(app, 
+     origins=["https://ciber7erroristaschk.com"],  # Especifica tu dominio exacto
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization"],
+     supports_credentials=True)
+
+# También podemos añadir un after_request para garantizar cabeceras
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'https://ciber7erroristaschk.com')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
 
 @app.route('/', methods=['GET'])
 def home():
@@ -1495,21 +1513,23 @@ def home():
         }
     })
 
-@app.route('/health', methods=['GET'])
+@app.route('/health', methods=['GET', 'OPTIONS'])
 def health():
+    if request.method == 'OPTIONS':
+        # Respuesta vacía para preflight (las cabeceras las pondrá after_request)
+        return '', 200
     return jsonify({
         'status': 'healthy',
         'timestamp': time.time(),
         'proxy': 'configured' if PROXY_HOST_PORT else 'not configured',
-        'captcha': API_KEY_2CAPTCHA or API_KEY_ANTICAPTCHA
+        'captcha': bool(API_KEY_2CAPTCHA or API_KEY_ANTICAPTCHA)
     })
 
-@app.route('/generate', methods=['POST'])
+@app.route('/generate', methods=['POST', 'OPTIONS'])
 def generate():
-    """
-    Endpoint para generar cookie.
-    Espera JSON: {"country": "US", "add_address": true}
-    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     # Verificar API key si está configurada
     if API_KEY:
         auth_header = request.headers.get('Authorization', '')
@@ -1526,7 +1546,7 @@ def generate():
     if not country:
         return jsonify({'success': False, 'error': 'Falta el parámetro country'}), 400
     
-    # Ejecutar la generación de cookie en un bucle asyncio nuevo
+    # Ejecutar la generación en un bucle asyncio nuevo
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
