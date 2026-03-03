@@ -1123,10 +1123,16 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         if proceed_button:
             logger.debug("   🔘 Haciendo clic en 'Proceder a crear una cuenta'...")
             await proceed_button.click()
-            await page.wait_for_load_state('networkidle', timeout=10000)
-            await page.wait_for_timeout(2000)
+            # Esperar a que aparezca el campo de nombre (indicador de que la página de registro cargó)
+            try:
+                await page.wait_for_selector('#ap_customer_name', state='visible', timeout=20000)
+                logger.debug("   ✅ Campo de nombre visible, página de registro cargada")
+            except Exception as e:
+                logger.error(f"   ❌ No apareció el campo de nombre: {e}")
+                last_screenshot = await take_screenshot(page, "error_no_customer_name")
+                return None, f"Timeout esperando campo de nombre: {e}", last_screenshot
+            await page.wait_for_timeout(1000)  # pequeño respiro
             last_screenshot = await take_screenshot(page, "despues_proceder")
-            logger.debug("   ✅ Clic realizado, página de registro cargada")
         else:
             logger.debug("   ℹ️ No se detectó página intermedia, continuando directamente")
 
