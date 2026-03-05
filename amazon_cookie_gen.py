@@ -877,15 +877,15 @@ async def safe_get_content(page, timeout=20):
         return await page.content()
     
     
-# -------------------------------------------------------------------
-# CREACIÓN DE CUENTA PRINCIPAL (con capturas)
-# -------------------------------------------------------------------
-# -------------------------------------------------------------------
-# CREACIÓN DE CUENTA PRINCIPAL (con evasión de detección)
-# -------------------------------------------------------------------
+
 # -------------------------------------------------------------------
 # CREACIÓN DE CUENTA PRINCIPAL (versión estable con manejo de navegación)
 # -------------------------------------------------------------------
+
+
+
+
+
 async def create_amazon_account(domain, email=None, token=None, service=None, add_address_flag=True):
     """
     Crea una cuenta de Amazon y retorna los datos de la cuenta.
@@ -1398,9 +1398,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         if 'captcha' in content.lower() or captcha_div or recaptcha_div:
             logger.warning("⚠️ Captcha detectado")
             captcha_detected = True
-            site_key = recaptcha_div.get('data-sitekey')
-            logger.debug(f"site_key extraído: {site_key}")
-
+            
             if recaptcha_div:
                 site_key = recaptcha_div.get('data-sitekey')
                 if site_key:
