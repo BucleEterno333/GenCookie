@@ -1263,7 +1263,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             logger.debug("   ℹ️ No se detectó página intermedia, continuando directamente")
             # Asegurarnos de que el campo de nombre esté presente
             try:
-                await page.wait_for_selector('#ap_customer_name', state='visible', timeout=10000)
+                await page.wait_for_selector('#ap_customer_name', state='visible', timeout=20000)
                 logger.debug("   ✅ Campo de nombre visible directamente")
             except:
                 logger.warning("   ⚠️ No se encontró campo de nombre, puede que la página sea diferente")
@@ -1272,7 +1272,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         logger.debug("🔍 [PASO 11] Verificando captcha...")
         
         # Asegurar que la página esté estable antes de obtener contenido
-        await page.wait_for_load_state('networkidle', timeout=10000)
+        await page.wait_for_load_state('networkidle', timeout=20000)
         
         content = await safe_get_content(page)
         soup = BeautifulSoup(content, 'html.parser')
@@ -1294,7 +1294,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                         logger.debug("   ✅ Captcha resuelto, enviando solución...")
                         await page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML="{captcha_solution}";')
                         await page.click('input[type="submit"]')
-                        await page.wait_for_load_state('networkidle', timeout=10000)
+                        await page.wait_for_load_state('networkidle', timeout=20000)
                         last_screenshot = await take_screenshot(page, "despues_captcha")
                     else:
                         logger.error("   ❌ No se pudo resolver captcha")
@@ -1315,7 +1315,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                             logger.debug("   ✅ Captcha de imagen resuelto")
                             await page.fill('input[name="cvf_captcha_input"]', solution)
                             await page.click('input[type="submit"]')
-                            await page.wait_for_load_state('networkidle', timeout=10000)
+                            await page.wait_for_load_state('networkidle', timeout=20000)
                             last_screenshot = await take_screenshot(page, "despues_captcha_imagen")
                         else:
                             logger.error("   ❌ No se pudo resolver captcha de imagen")
@@ -1475,7 +1475,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         # ===== PASO 14: Verificar si pide verificación de número =====
         logger.debug("📱 [PASO 14] Verificando si pide verificación de número...")
         
-        await page.wait_for_load_state('networkidle', timeout=10000)
+        await page.wait_for_load_state('networkidle', timeout=20000)
         content = await safe_get_content(page)
 
         soup = BeautifulSoup(content, 'html.parser')
