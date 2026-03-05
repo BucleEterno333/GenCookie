@@ -684,11 +684,12 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
         # ----- PASO 8: Hacer clic en "Hola, identifícate" (o similar) -----
         logger.debug("👤 [PASO 8] Buscando enlace de inicio de sesión...")
         login_selectors = [
-            'a#nav-link-accountList',
-            'a[data-nav-role="signin"]',
-            'a:has-text("Hola, identifícate")',
-            'a:has-text("Hello, Sign in")',
-            'a:has-text("Identifícate")'
+            'a[data-nav-role="signin"]',                     # más confiable (presente en tu HTML)
+            'a.nav-a[data-nav-role="signin"]',               # combinación de clase y atributo
+            'a[data-csa-c-slot-id="nav-link-accountList"]',  # por el data-csa-c-slot-id
+            'a:has-text("Hola, identifícate")',              # por texto (Playwright lo soporta)
+            'a:has-text("Hello, Sign in")',                  # inglés
+            'a:has-text("Identifícate")'                     # versión corta
         ]
         login_link = None
         for selector in login_selectors:
@@ -709,35 +710,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
         await page.wait_for_timeout(2000)
         logger.debug(f"   📍 URL después de login: {page.url}")
         last_screenshot = await take_screenshot(page, "after_login_click")
-
-        # ----- PASO 9: Hacer clic en "Crear cuenta nueva" -----
-        logger.debug("🆕 [PASO 9] Buscando botón/ enlace para crear cuenta...")
-        create_account_selectors = [
-            'a#createAccountSubmit',
-            'a[href*="register"]',
-            'a:has-text("Crear cuenta nueva")',
-            'a:has-text("Create your Amazon account")',
-            'a:has-text("Crear tu cuenta de Amazon")'
-        ]
-        create_link = None
-        for selector in create_account_selectors:
-            try:
-                link = await page.wait_for_selector(selector, state='visible', timeout=5000)
-                if link:
-                    create_link = link
-                    logger.debug(f"   ✅ Enlace de creación encontrado con selector: {selector}")
-                    break
-            except:
-                continue
-        if not create_link:
-            last_screenshot = await take_screenshot(page, "error_no_create_link")
-            return None, "No se encontró enlace para crear cuenta", last_screenshot
-
-        await create_link.click()
-        await page.wait_for_load_state('networkidle', timeout=15000)
-        await page.wait_for_timeout(2000)
-        logger.debug(f"   📍 URL después de crear cuenta: {page.url}")
-        last_screenshot = await take_screenshot(page, "after_create_click")
 
         # ----- A partir de aquí, ya estamos en la página de registro (primera página: email) -----
         # ----- PASO 10: Ingresar email -----
@@ -892,14 +864,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     await phone_field.fill(phone_number)
                     account_data['phone'] = phone_number
                     logger.debug(f"   ✅ Número real Hero SMS: {phone_number}")
-
-        # Términos (si existe)
-        terms = await page.query_selector('input[name="agreement"], input[type="checkbox"]')
-        if terms:
-            await terms.check()
-            logger.debug("   ✅ Checkbox de términos marcado")
-
-        last_screenshot = await take_screenshot(page, "formulario_llenado")
 
         # ----- PASO 14: Botón de registro final -----
         logger.debug("🎯 [PASO 14] Buscando botón de registro final...")
