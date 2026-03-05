@@ -857,7 +857,7 @@ async def take_screenshot(page, step_name):
 # -------------------------------------------------------------------
 # FUNCIÓN AUXILIAR PARA OBTENER CONTENIDO DE FORMA SEGURA
 # -------------------------------------------------------------------
-async def safe_get_content(page, timeout=10):
+async def safe_get_content(page, timeout=20):
     """Obtiene el contenido de la página asegurando que no esté navegando."""
     try:
         # Esperar a que la página esté completamente cargada
