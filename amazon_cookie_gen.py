@@ -860,6 +860,9 @@ async def take_screenshot(page, step_name):
 # -------------------------------------------------------------------
 # CREACIÓN DE CUENTA PRINCIPAL (con evasión de detección)
 # -------------------------------------------------------------------
+# -------------------------------------------------------------------
+# CREACIÓN DE CUENTA PRINCIPAL (versión estable con manejo de navegación)
+# -------------------------------------------------------------------
 async def create_amazon_account(domain, email=None, token=None, service=None, add_address_flag=True):
     """
     Crea una cuenta de Amazon y retorna los datos de la cuenta.
@@ -1192,6 +1195,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         await continue_button.click()
         logger.debug("   ✅ Click realizado")
         
+        # Esperar a que la navegación se complete
         await page.wait_for_load_state('networkidle', timeout=15000)
         await page.wait_for_timeout(2000)
         logger.debug(f"   📍 Nueva URL: {page.url}")
@@ -1224,12 +1228,13 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             await proceed_button.click()
             # Esperar a que aparezca el campo de nombre (formulario de registro)
             try:
+                # Esperar a que la navegación termine y el campo sea visible
                 await page.wait_for_selector('#ap_customer_name', state='visible', timeout=30000)
                 logger.debug("   ✅ Campo de nombre visible, página de registro cargada")
             except Exception as e:
                 logger.error(f"   ❌ No apareció el campo de nombre: {e}")
                 last_screenshot = await take_screenshot(page, "error_no_customer_name")
-                # Verificar si es el mensaje de JavaScript deshabilitado
+                # Verificar si hay algún mensaje de error (como JavaScript deshabilitado)
                 content = await page.content()
                 if "JavaScript se ha deshabilitado" in content:
                     return None, "Error: JavaScript deshabilitado detectado por Amazon", last_screenshot
@@ -1238,9 +1243,18 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             last_screenshot = await take_screenshot(page, "despues_proceder")
         else:
             logger.debug("   ℹ️ No se detectó página intermedia, continuando directamente")
+            # Asegurarnos de que el campo de nombre esté presente
+            try:
+                await page.wait_for_selector('#ap_customer_name', state='visible', timeout=10000)
+                logger.debug("   ✅ Campo de nombre visible directamente")
+            except:
+                logger.warning("   ⚠️ No se encontró campo de nombre, puede que la página sea diferente")
 
-        # ===== PASO 11: Verificar captcha =====
+        # ===== PASO 11: Verificar captcha (solo si no estamos en navegación) =====
         logger.debug("🔍 [PASO 11] Verificando captcha...")
+        
+        # Asegurar que la página esté estable antes de obtener contenido
+        await page.wait_for_load_state('networkidle', timeout=10000)
         
         content = await page.content()
         soup = BeautifulSoup(content, 'html.parser')
@@ -1443,6 +1457,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         # ===== PASO 14: Verificar si pide verificación de número =====
         logger.debug("📱 [PASO 14] Verificando si pide verificación de número...")
         
+        await page.wait_for_load_state('networkidle', timeout=10000)
         content = await page.content()
         soup = BeautifulSoup(content, 'html.parser')
         
@@ -1534,8 +1549,6 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         if playwright:
             await playwright.stop()
         logger.debug("✅ Limpieza completada")
-
-
 
 # ========== FUNCIÓN DE DEBUG PARA VER ESTRUCTURA ==========
 async def debug_amazon_structure(domain='amazon.com.mx'):
