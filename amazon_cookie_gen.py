@@ -251,54 +251,130 @@ async def get_hero_sms_code(request_id, timeout=120):
 # -------------------------------------------------------------------
 # CORREO TEMPORAL
 # -------------------------------------------------------------------
+# CORREO TEMPORAL (MEJORADO)
+# -------------------------------------------------------------------
 async def generate_temp_email():
+    """Genera una dirección de correo temporal con reintentos y timeouts más largos."""
     services = [
         ('mail.tm', 'https://api.mail.tm'),
-        ('guerrillamail', 'https://api.guerrillamail.com'),
-        ('tempmail.plus', 'https://api.tempmail.plus')
+        ('guerrillamail', 'https://api.guerrillamail.com/ajax.php'),
+        ('tempmail.plus', 'https://api.tempmail.plus/generate')
     ]
     for service_name, api_url in services:
-        try:
-            if service_name == 'mail.tm':
-                resp = requests.get(f"{api_url}/domains", timeout=10)
-                if resp.status_code == 200:
+        for attempt in range(3):  # Reintentar cada servicio hasta 3 veces
+            try:
+                logger.debug(f"📧 Intentando {service_name} (intento {attempt+1}/3)...")
+                if service_name == 'mail.tm':
+                    # Obtener dominios
+                    resp = requests.get(f"{api_url}/domains", timeout=30)
+                    if resp.status_code != 200:
+                        logger.warning(f"   mail.tm dominios respondió {resp.status_code}")
+                        continue
                     data = resp.json()
                     domains_list = data.get('hydra:member', [])
-                    if domains_list and domains_list[0].get('domain'):
-                        domain = domains_list[0]['domain']
-                        email = f"{uuid.uuid4().hex[:8]}@{domain}"
-                        password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
-                        acc_resp = requests.post(
-                            f"{api_url}/accounts",
-                            json={"address": email, "password": password},
-                            timeout=10
-                        )
-                        if acc_resp.status_code == 201:
-                            token = acc_resp.json().get('token')
-                            logger.debug(f"📧 Email generado (mail.tm): {email}, token={token[:10]}...")
+                    if not domains_list or not domains_list[0].get('domain'):
+                        logger.warning("   mail.tm no devolvió dominios")
+                        continue
+                    domain = domains_list[0]['domain']
+                    email = f"{uuid.uuid4().hex[:8]}@{domain}"
+                    password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
+                    # Crear cuenta
+                    acc_resp = requests.post(
+                        f"{api_url}/accounts",
+                        json={"address": email, "password": password},
+                        timeout=30
+                    )
+                    if acc_resp.status_code == 201:
+                        token = acc_resp.json().get('token')
+                        logger.debug(f"✅ mail.tm: {email}, token={token[:10]}...")
+                        return email, token, service_name
+                    else:
+                        logger.warning(f"   mail.tm creación falló: {acc_resp.status_code}")
+
+                elif service_name == 'guerrillamail':
+                    resp = requests.get(
+                        f"{api_url}?f=get_email_address&ip=127.0.0.1",
+                        timeout=30
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        email = data.get('email_addr')
+                        token = data.get('sid_token')
+                        if email and token:
+                            logger.debug(f"✅ guerrillamail: {email}")
                             return email, token, service_name
-            elif service_name == 'guerrillamail':
-                resp = requests.get(f"{api_url}/ajax.php?f=get_email_address&ip=127.0.0.1", timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    email = data.get('email_addr')
-                    token = data.get('sid_token')
-                    if email and token:
-                        logger.debug(f"📧 Email generado (guerrillamail): {email}, token={token[:10]}...")
-                        return email, token, service_name
-            elif service_name == 'tempmail.plus':
-                resp = requests.get(f"{api_url}/generate", timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    email = data.get('email')
-                    token = data.get('token')
-                    if email and token:
-                        logger.debug(f"📧 Email generado (tempmail.plus): {email}, token={token[:10]}...")
-                        return email, token, service_name
-        except Exception as e:
-            logger.warning(f"⚠️ Error con servicio {service_name}: {e}")
-            continue
+                    else:
+                        logger.warning(f"   guerrillamail respondió {resp.status_code}")
+
+                elif service_name == 'tempmail.plus':
+                    resp = requests.get(api_url, timeout=30)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        email = data.get('email')
+                        token = data.get('token')
+                        if email and token:
+                            logger.debug(f"✅ tempmail.plus: {email}")
+                            return email, token, service_name
+                    else:
+                        logger.warning(f"   tempmail.plus respondió {resp.status_code}")
+
+            except requests.exceptions.Timeout:
+                logger.warning(f"⚠️ Timeout en {service_name}")
+            except requests.exceptions.ConnectionError as e:
+                logger.warning(f"⚠️ Error de conexión en {service_name}: {e}")
+            except Exception as e:
+                logger.warning(f"⚠️ Error inesperado en {service_name}: {e}")
+            await asyncio.sleep(2)  # Espera entre reintentos
+    logger.error("❌ Todos los servicios de correo fallaron")
     return None, None, None
+
+async def get_verification_code(email, token, service, max_attempts=20, wait_time=10):
+    """Obtiene el código de verificación del correo temporal con más intentos y pausas."""
+    logger.debug(f"📧 Esperando código de verificación para {email} (servicio: {service})...")
+    for attempt in range(max_attempts):
+        try:
+            if service == 'mail.tm' and token:
+                resp = requests.get(
+                    "https://api.mail.tm/messages",
+                    headers={'Authorization': f'Bearer {token}'},
+                    timeout=30
+                )
+                if resp.status_code == 200:
+                    emails = resp.json().get('hydra:member', [])
+                    for mail in emails:
+                        text = mail.get('text', '') or mail.get('html', '') or mail.get('intro', '')
+                        code = get_str(text, 'Your verification code is ', '\n')
+                        if code:
+                            logger.debug(f"📧 Código obtenido de mail.tm: {code}")
+                            return code
+            elif service == 'guerrillamail' and token:
+                resp = requests.get(
+                    f"https://api.guerrillamail.com/ajax.php?f=check_email&seq=0&sid_token={token}",
+                    timeout=30
+                )
+                if resp.status_code == 200:
+                    emails = resp.json().get('list', [])
+                    for mail in emails:
+                        body = mail.get('mail_body', '') or mail.get('mail_body_ex', '')
+                        code = get_str(body, 'Your verification code is ', '\n')
+                        if code:
+                            logger.debug(f"📧 Código obtenido de guerrillamail: {code}")
+                            return code
+            elif service == 'tempmail.plus' and token:
+                resp = requests.get(f"https://api.tempmail.plus/messages/{token}", timeout=30)
+                if resp.status_code == 200:
+                    emails = resp.json().get('messages', [])
+                    for mail in emails:
+                        text = mail.get('text', '') or mail.get('html', '')
+                        code = get_str(text, 'Your verification code is ', '\n')
+                        if code:
+                            logger.debug(f"📧 Código obtenido de tempmail.plus: {code}")
+                            return code
+        except Exception as e:
+            logger.debug(f"📧 Intento {attempt+1} falló: {e}")
+        await asyncio.sleep(wait_time)
+    logger.error("❌ No se pudo obtener código de verificación")
+    return None
 
 async def get_verification_code(email, token, service, max_attempts=15, wait_time=8):
     logger.debug(f"📧 Esperando código de verificación para {email} (servicio: {service})...")
