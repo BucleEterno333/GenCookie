@@ -357,6 +357,7 @@ def get_str(string, start, end, occurrence=1):
 def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
     """Resuelve captcha usando 2captcha o anticaptcha."""
     solution = None
+    logger.debug(f"Intentando resolver captcha con site_key={site_key}, url={page_url}")
 
     if API_KEY_2CAPTCHA and (CAPTCHA_PROVIDER == '2captcha' or not solution):
         try:
@@ -390,6 +391,10 @@ def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
             logger.error(f"anticaptcha falló: {e}")
             solution = None
 
+    if solution:
+            logger.debug(f"✅ Captcha resuelto: {solution[:10]}...")
+    else:
+            logger.error("❌ No se obtuvo solución de captcha")
     return solution
 
 # -------------------------------------------------------------------
@@ -1284,7 +1289,9 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         if 'captcha' in content.lower() or captcha_div or recaptcha_div:
             logger.warning("⚠️ Captcha detectado")
             captcha_detected = True
-            
+            site_key = recaptcha_div.get('data-sitekey')
+            logger.debug(f"site_key extraído: {site_key}")
+
             if recaptcha_div:
                 site_key = recaptcha_div.get('data-sitekey')
                 if site_key:
