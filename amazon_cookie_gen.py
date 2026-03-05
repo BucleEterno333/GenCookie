@@ -1382,93 +1382,151 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                     account_data['phone'] = phone_number
                     logger.debug(f"   ✅ Número real obtenido: {phone_number}")
 
-        # ===== PASO 11: Verificar captcha (solo si no estamos en navegación) =====
-        logger.debug("🔍 [PASO 12] Verificando captcha...")
-        
-        # Asegurar que la página esté estable antes de obtener contenido
-        await page.wait_for_load_state('networkidle', timeout=20000)
-        
-        content = await safe_get_content(page)
-        soup = BeautifulSoup(content, 'html.parser')
-        
+        # ===== PASO 14: Verificar si aparece captcha después del envío =====
+        logger.debug("🔍 Verificando si aparece captcha después del envío...")
+        await page.wait_for_timeout(5000)  # Esperar un poco a que cargue la página
+
+        # Comprobar si la URL contiene "captcha" o hay elementos de captcha
+        current_url = page.url.lower()
+        content = await page.content()
+
         captcha_detected = False
-        captcha_div = soup.find('div', {'id': 'captchacharacters'})
-        recaptcha_div = soup.find('div', {'class': re.compile('g-recaptcha')})
-        
-        if 'captcha' in content.lower() or captcha_div or recaptcha_div:
-            logger.warning("⚠️ Captcha detectado")
-            captcha_detected = True
-            
-            if recaptcha_div:
-                site_key = recaptcha_div.get('data-sitekey')
-                if site_key:
-                    logger.debug(f"   🔑 Sitekey encontrado: {site_key}")
-                    captcha_solution = solve_captcha(site_key, page.url)
-                    if captcha_solution:
-                        logger.debug("   ✅ Captcha resuelto, enviando solución...")
-                        await page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML="{captcha_solution}";')
-                        await page.click('input[type="submit"]')
-                        await page.wait_for_load_state('networkidle', timeout=20000)
-                        last_screenshot = await take_screenshot(page, "despues_captcha")
-                    else:
-                        logger.error("   ❌ No se pudo resolver captcha")
-                        last_screenshot = await take_screenshot(page, "error_captcha")
-                        return None, "No se pudo resolver captcha", last_screenshot
-            elif captcha_div:
-                img = captcha_div.find('img')
-                if img and img.get('src'):
-                    img_url = urljoin(page.url, img['src'])
-                    logger.debug(f"   🖼️ Captcha de imagen detectado: {img_url}")
-                    
-                    img_resp = requests.get(img_url, timeout=10)
-                    if img_resp.status_code == 200:
-                        with open('temp_captcha.jpg', 'wb') as f:
-                            f.write(img_resp.content)
-                        solution = solve_captcha(None, page.url, is_image_captcha=True, image_path='temp_captcha.jpg')
-                        if solution:
-                            logger.debug("   ✅ Captcha de imagen resuelto")
-                            await page.fill('input[name="cvf_captcha_input"]', solution)
-                            await page.click('input[type="submit"]')
-                            await page.wait_for_load_state('networkidle', timeout=20000)
-                            last_screenshot = await take_screenshot(page, "despues_captcha_imagen")
-                        else:
-                            logger.error("   ❌ No se pudo resolver captcha de imagen")
-                            last_screenshot = await take_screenshot(page, "error_captcha_imagen")
-                            return None, "No se pudo resolver captcha de imagen", last_screenshot
+        captcha_type = None
+        site_key = None
+        captcha_image_url = None
 
-        # ===== PASO 13: Botón de registro final =====
-        logger.debug("🎯 [PASO 13] Buscando botón de registro final...")
+        # 1. Buscar reCAPTCHA
+        recaptcha_div = await page.query_selector('div.g-recaptcha')
+        if recaptcha_div:
+            site_key = await recaptcha_div.get_attribute('data-sitekey')
+            if site_key:
+                captcha_detected = True
+                captcha_type = 'recaptcha'
+                logger.debug(f"✅ reCAPTCHA detectado con sitekey: {site_key}")
 
-        final_button_selectors = [
-            'input#continue',
-            'input.a-button-input',
-            'button[type="submit"]',
-            'input[type="submit"]',
-            'input[value*="registrarse" i]',
-            'input[value*="crear" i]',
-            'input[value*="create" i]',
-            'button:has-text("Registrarse")',
-            'button:has-text("Crear cuenta")',
-            'button:has-text("Create account")'
-        ]
+        # 2. Buscar captcha de imagen de Amazon (típico)
+        if not captcha_detected:
+            # Buscar un div con id="captcha" o similares
+            captcha_container = await page.query_selector('#captcha, .captcha, .a-row captcha')
+            if captcha_container:
+                # Buscar una imagen dentro
+                img = await captcha_container.query_selector('img')
+                if img:
+                    captcha_image_url = await img.get_attribute('src')
+                    if captcha_image_url:
+                        captcha_detected = True
+                        captcha_type = 'image_captcha'
+                        logger.debug(f"✅ Captcha de imagen detectado: {captcha_image_url}")
 
-        button_clicked = False
-        for selector in final_button_selectors:
-            try:
-                button = await page.wait_for_selector(selector, state='visible', timeout=3000)
-                if button:
-                    await button.click()
-                    logger.debug(f"   ✅ Botón final clickeado con selector: {selector}")
-                    button_clicked = True
+        # 3. Buscar por texto "captcha" en la URL o en el contenido
+        if not captcha_detected and ('captcha' in current_url or 'captcha' in content.lower()):
+            # Podría ser un captcha no estándar, intentamos buscar cualquier imagen
+            all_images = await page.query_selector_all('img')
+            for img in all_images:
+                src = await img.get_attribute('src')
+                if src and ('captcha' in src.lower() or 'captcha' in (await img.get_attribute('alt') or '').lower()):
+                    captcha_image_url = src
+                    captcha_detected = True
+                    captcha_type = 'image_captcha_alt'
+                    logger.debug(f"✅ Captcha de imagen alternativo detectado: {captcha_image_url}")
                     break
-            except:
-                continue
 
-        if not button_clicked:
-            logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
+        if captcha_detected:
+            logger.warning(f"⚠️ Captcha detectado (tipo: {captcha_type})")
+            last_screenshot = await take_screenshot(page, "captcha_detectado")
+            
+            if captcha_type == 'recaptcha' and site_key:
+                captcha_solution = solve_captcha(site_key, page.url, is_image_captcha=False)
+                if captcha_solution:
+                    logger.debug("✅ reCAPTCHA resuelto, enviando...")
+                    # Insertar solución en el textarea de reCAPTCHA
+                    await page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML="{captcha_solution}";')
+                    # Hacer clic en el botón de enviar (puede ser diferente)
+                    submit_btn = await page.query_selector('input[type="submit"], button[type="submit"]')
+                    if submit_btn:
+                        await submit_btn.click()
+                    else:
+                        # A veces el formulario se envía automáticamente
+                        pass
+                else:
+                    logger.error("❌ No se pudo resolver reCAPTCHA")
+                    return None, "No se pudo resolver reCAPTCHA", last_screenshot
 
-        await page.wait_for_load_state('networkidle', timeout=30000)
-        last_screenshot = await take_screenshot(page, "despues_registro")
+            elif captcha_type in ['image_captcha', 'image_captcha_alt'] and captcha_image_url:
+                # Descargar la imagen
+                img_data = requests.get(captcha_image_url, timeout=10).content
+                with open('temp_captcha.jpg', 'wb') as f:
+                    f.write(img_data)
+                captcha_solution = solve_captcha(None, page.url, is_image_captcha=True, image_path='temp_captcha.jpg')
+                if captcha_solution:
+                    logger.debug(f"✅ Captcha de imagen resuelto: {captcha_solution}")
+                    # Buscar el campo de entrada para el código
+                    input_field = await page.query_selector('input[name="cvf_captcha_input"], input[name="captcha"], input[type="text"]')
+                    if input_field:
+                        await input_field.fill(captcha_solution)
+                        submit_btn = await page.query_selector('input[type="submit"], button[type="submit"]')
+                        if submit_btn:
+                            await submit_btn.click()
+                    else:
+                        logger.error("❌ No se encontró campo para ingresar el captcha")
+                        return None, "No se encontró campo de captcha", last_screenshot
+                else:
+                    logger.error("❌ No se pudo resolver captcha de imagen")
+                    return None, "No se pudo resolver captcha de imagen", last_screenshot
+
+            # Esperar a que la página procese el captcha
+            await page.wait_for_load_state('networkidle', timeout=30000)
+            last_screenshot = await take_screenshot(page, "despues_captcha")
+
+            # Verificar si aún hay mensaje de error (como JavaScript deshabilitado)
+            content = await page.content()
+            if "JavaScript se ha deshabilitado" in content:
+                logger.error("❌ JavaScript deshabilitado después de captcha")
+                return None, "JavaScript deshabilitado después de captcha", last_screenshot
+
+        else:
+            logger.debug("✅ No se detectó captcha, continuando...")
+
+        logger.debug("📧 Verificando si se requiere confirmación de correo...")
+
+
+
+        # ===== PASO 13: Verificación de correo electrónico =====
+        await page.wait_for_timeout(3000)  # Esperar a que la página se estabilice
+        content = await page.content()
+
+        # Detectar la página de verificación de correo
+        if "Verifica la dirección de correo electrónico" in content or "verify your email" in content.lower():
+            logger.debug("✅ Página de verificación de correo detectada")
+            
+            # Buscar el campo para ingresar el código
+            code_input = await page.query_selector('input[name="code"], input[type="text"]')
+            if code_input:
+                # Obtener el código de verificación del correo temporal
+                verification_code = await get_verification_code(email, token, service)
+                if verification_code:
+                    await code_input.fill(verification_code)
+                    logger.debug(f"✅ Código ingresado: {verification_code}")
+                    
+                    # Buscar el botón de confirmación (puede ser "Crear cuenta", "Verificar", etc.)
+                    submit_btn = await page.query_selector('input[type="submit"], button[type="submit"]')
+                    if submit_btn:
+                        await submit_btn.click()
+                        await page.wait_for_load_state('networkidle', timeout=30000)
+                        last_screenshot = await take_screenshot(page, "despues_verificacion_correo")
+                        logger.debug("✅ Código enviado, esperando respuesta...")
+                    else:
+                        logger.warning("⚠️ No se encontró botón de verificación")
+                else:
+                    logger.error("❌ No se pudo obtener código de verificación del correo")
+                    last_screenshot = await take_screenshot(page, "error_verificacion_correo")
+                    return None, "No se pudo obtener código de verificación", last_screenshot
+            else:
+                logger.warning("⚠️ No se encontró campo para ingresar el código")
+                last_screenshot = await take_screenshot(page, "error_sin_campo_codigo")
+                # No necesariamente es un error, puede que ya esté verificado
+        else:
+            logger.debug("✅ No se requiere verificación de correo, continuando...")
 
         # ===== PASO 14: Verificar si pide verificación de número =====
         logger.debug("📱 [PASO 14] Verificando si pide verificación de número...")
