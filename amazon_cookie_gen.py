@@ -855,6 +855,24 @@ async def take_screenshot(page, step_name):
         return None
 
 # -------------------------------------------------------------------
+# FUNCIÓN AUXILIAR PARA OBTENER CONTENIDO DE FORMA SEGURA
+# -------------------------------------------------------------------
+async def safe_get_content(page, timeout=10):
+    """Obtiene el contenido de la página asegurando que no esté navegando."""
+    try:
+        # Esperar a que la página esté completamente cargada
+        await page.wait_for_function('document.readyState === "complete"', timeout=timeout*1000)
+        # Pequeña pausa adicional para evitar condiciones de carrera
+        await page.wait_for_timeout(500)
+        return await page.content()
+    except Exception as e:
+        logger.warning(f"⚠️ Error en safe_get_content: {e}")
+        # Reintentar una vez después de esperar
+        await page.wait_for_timeout(2000)
+        return await page.content()
+    
+    
+# -------------------------------------------------------------------
 # CREACIÓN DE CUENTA PRINCIPAL (con capturas)
 # -------------------------------------------------------------------
 # -------------------------------------------------------------------
@@ -1235,7 +1253,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                 logger.error(f"   ❌ No apareció el campo de nombre: {e}")
                 last_screenshot = await take_screenshot(page, "error_no_customer_name")
                 # Verificar si hay algún mensaje de error (como JavaScript deshabilitado)
-                content = await page.content()
+                content = await safe_get_content(page) 
                 if "JavaScript se ha deshabilitado" in content:
                     return None, "Error: JavaScript deshabilitado detectado por Amazon", last_screenshot
                 return None, f"Timeout esperando campo de nombre: {e}", last_screenshot
@@ -1256,7 +1274,7 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         # Asegurar que la página esté estable antes de obtener contenido
         await page.wait_for_load_state('networkidle', timeout=10000)
         
-        content = await page.content()
+        content = await safe_get_content(page)
         soup = BeautifulSoup(content, 'html.parser')
         
         captcha_detected = False
@@ -1458,7 +1476,8 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
         logger.debug("📱 [PASO 14] Verificando si pide verificación de número...")
         
         await page.wait_for_load_state('networkidle', timeout=10000)
-        content = await page.content()
+        content = await safe_get_content(page)
+
         soup = BeautifulSoup(content, 'html.parser')
         
         if 'verify' in page.url.lower() or 'cvf' in page.url.lower():
