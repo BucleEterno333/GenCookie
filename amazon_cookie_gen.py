@@ -1273,63 +1273,8 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
             except:
                 logger.warning("   ⚠️ No se encontró campo de nombre, puede que la página sea diferente")
 
-        # ===== PASO 11: Verificar captcha (solo si no estamos en navegación) =====
-        logger.debug("🔍 [PASO 11] Verificando captcha...")
-        
-        # Asegurar que la página esté estable antes de obtener contenido
-        await page.wait_for_load_state('networkidle', timeout=20000)
-        
-        content = await safe_get_content(page)
-        soup = BeautifulSoup(content, 'html.parser')
-        
-        captcha_detected = False
-        captcha_div = soup.find('div', {'id': 'captchacharacters'})
-        recaptcha_div = soup.find('div', {'class': re.compile('g-recaptcha')})
-        
-        if 'captcha' in content.lower() or captcha_div or recaptcha_div:
-            logger.warning("⚠️ Captcha detectado")
-            captcha_detected = True
-            site_key = recaptcha_div.get('data-sitekey')
-            logger.debug(f"site_key extraído: {site_key}")
 
-            if recaptcha_div:
-                site_key = recaptcha_div.get('data-sitekey')
-                if site_key:
-                    logger.debug(f"   🔑 Sitekey encontrado: {site_key}")
-                    captcha_solution = solve_captcha(site_key, page.url)
-                    if captcha_solution:
-                        logger.debug("   ✅ Captcha resuelto, enviando solución...")
-                        await page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML="{captcha_solution}";')
-                        await page.click('input[type="submit"]')
-                        await page.wait_for_load_state('networkidle', timeout=20000)
-                        last_screenshot = await take_screenshot(page, "despues_captcha")
-                    else:
-                        logger.error("   ❌ No se pudo resolver captcha")
-                        last_screenshot = await take_screenshot(page, "error_captcha")
-                        return None, "No se pudo resolver captcha", last_screenshot
-            elif captcha_div:
-                img = captcha_div.find('img')
-                if img and img.get('src'):
-                    img_url = urljoin(page.url, img['src'])
-                    logger.debug(f"   🖼️ Captcha de imagen detectado: {img_url}")
-                    
-                    img_resp = requests.get(img_url, timeout=10)
-                    if img_resp.status_code == 200:
-                        with open('temp_captcha.jpg', 'wb') as f:
-                            f.write(img_resp.content)
-                        solution = solve_captcha(None, page.url, is_image_captcha=True, image_path='temp_captcha.jpg')
-                        if solution:
-                            logger.debug("   ✅ Captcha de imagen resuelto")
-                            await page.fill('input[name="cvf_captcha_input"]', solution)
-                            await page.click('input[type="submit"]')
-                            await page.wait_for_load_state('networkidle', timeout=20000)
-                            last_screenshot = await take_screenshot(page, "despues_captcha_imagen")
-                        else:
-                            logger.error("   ❌ No se pudo resolver captcha de imagen")
-                            last_screenshot = await take_screenshot(page, "error_captcha_imagen")
-                            return None, "No se pudo resolver captcha de imagen", last_screenshot
-
-        # ===== PASO 12: Llenar formulario de registro =====
+        # ===== PASO 11: Llenar formulario de registro =====
         logger.debug("📝 [PASO 12] Llenando formulario completo...")
         last_screenshot = await take_screenshot(page, "formulario_antes_llenar")
 
@@ -1437,13 +1382,61 @@ async def create_amazon_account(domain, email=None, token=None, service=None, ad
                     account_data['phone'] = phone_number
                     logger.debug(f"   ✅ Número real obtenido: {phone_number}")
 
-        # 12.6 Aceptar términos
-        terms_checkbox = await page.query_selector('input[name="agreement"], input[type="checkbox"]')
-        if terms_checkbox:
-            await terms_checkbox.check()
-            logger.debug("   ✅ Checkbox de términos marcado")
+        # ===== PASO 11: Verificar captcha (solo si no estamos en navegación) =====
+        logger.debug("🔍 [PASO 12] Verificando captcha...")
+        
+        # Asegurar que la página esté estable antes de obtener contenido
+        await page.wait_for_load_state('networkidle', timeout=20000)
+        
+        content = await safe_get_content(page)
+        soup = BeautifulSoup(content, 'html.parser')
+        
+        captcha_detected = False
+        captcha_div = soup.find('div', {'id': 'captchacharacters'})
+        recaptcha_div = soup.find('div', {'class': re.compile('g-recaptcha')})
+        
+        if 'captcha' in content.lower() or captcha_div or recaptcha_div:
+            logger.warning("⚠️ Captcha detectado")
+            captcha_detected = True
+            site_key = recaptcha_div.get('data-sitekey')
+            logger.debug(f"site_key extraído: {site_key}")
 
-        last_screenshot = await take_screenshot(page, "formulario_llenado")
+            if recaptcha_div:
+                site_key = recaptcha_div.get('data-sitekey')
+                if site_key:
+                    logger.debug(f"   🔑 Sitekey encontrado: {site_key}")
+                    captcha_solution = solve_captcha(site_key, page.url)
+                    if captcha_solution:
+                        logger.debug("   ✅ Captcha resuelto, enviando solución...")
+                        await page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML="{captcha_solution}";')
+                        await page.click('input[type="submit"]')
+                        await page.wait_for_load_state('networkidle', timeout=20000)
+                        last_screenshot = await take_screenshot(page, "despues_captcha")
+                    else:
+                        logger.error("   ❌ No se pudo resolver captcha")
+                        last_screenshot = await take_screenshot(page, "error_captcha")
+                        return None, "No se pudo resolver captcha", last_screenshot
+            elif captcha_div:
+                img = captcha_div.find('img')
+                if img and img.get('src'):
+                    img_url = urljoin(page.url, img['src'])
+                    logger.debug(f"   🖼️ Captcha de imagen detectado: {img_url}")
+                    
+                    img_resp = requests.get(img_url, timeout=10)
+                    if img_resp.status_code == 200:
+                        with open('temp_captcha.jpg', 'wb') as f:
+                            f.write(img_resp.content)
+                        solution = solve_captcha(None, page.url, is_image_captcha=True, image_path='temp_captcha.jpg')
+                        if solution:
+                            logger.debug("   ✅ Captcha de imagen resuelto")
+                            await page.fill('input[name="cvf_captcha_input"]', solution)
+                            await page.click('input[type="submit"]')
+                            await page.wait_for_load_state('networkidle', timeout=20000)
+                            last_screenshot = await take_screenshot(page, "despues_captcha_imagen")
+                        else:
+                            logger.error("   ❌ No se pudo resolver captcha de imagen")
+                            last_screenshot = await take_screenshot(page, "error_captcha_imagen")
+                            return None, "No se pudo resolver captcha de imagen", last_screenshot
 
         # ===== PASO 13: Botón de registro final =====
         logger.debug("🎯 [PASO 13] Buscando botón de registro final...")
