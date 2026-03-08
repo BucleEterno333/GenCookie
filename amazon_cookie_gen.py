@@ -1581,7 +1581,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-
             # ----- PASO 17: Verificar si se requiere agregar y verificar número de teléfono -----
             logger.debug("📱 [PASO 17] Verificando si se requiere agregar número de teléfono...")
             await page.wait_for_timeout(3000)
@@ -1598,23 +1597,53 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     logger.error("❌ No se encontró campo para número de teléfono")
                     raise Exception("No se encontró campo de teléfono en la página de verificación")
 
-                # Seleccionar país (si hay dropdown)
-                country_select = await page.query_selector('select[name*="country"], select[id*="country"]')
+                # --- Selección de país (mejorada) ---
+                # Primero intentamos con el select nativo (oculto)
+                country_select = await page.query_selector('select#cvf_phone_cc_native')
                 if country_select:
-                    # Intentar seleccionar el país por valor o texto
-                    option_value = country_code  # Ej: 'MX'
-                    try:
-                        await country_select.select_option(value=option_value)
-                        logger.debug(f"   ✅ País seleccionado por valor: {option_value}")
-                    except:
+                    # Mapa de códigos de país a códigos numéricos (ej. MX -> 52)
+                    country_code_num = {
+                        'MX': '52', 'US': '1', 'CA': '1', 'UK': '44', 'DE': '49',
+                        'FR': '33', 'IT': '39', 'ES': '34', 'JP': '81', 'AU': '61', 'IN': '91'
+                    }.get(country_code, '')
+                    if country_code_num:
                         try:
-                            await country_select.select_option(label=option_value)
-                            logger.debug(f"   ✅ País seleccionado por texto: {option_value}")
-                        except Exception as e:
-                            logger.warning(f"   ⚠️ No se pudo seleccionar país: {e}")
-                    await asyncio.sleep(1)
+                            await country_select.select_option(value=country_code_num)
+                            logger.debug(f"   ✅ País seleccionado por valor numérico: {country_code_num}")
+                        except:
+                            try:
+                                await country_select.select_option(label=country_code)
+                                logger.debug(f"   ✅ País seleccionado por label: {country_code}")
+                            except:
+                                logger.warning(f"   ⚠️ No se pudo seleccionar país en el select nativo")
+                    else:
+                        logger.warning(f"   ⚠️ No se encontró código numérico para {country_code}")
+                else:
+                    logger.debug("   ℹ️ No se encontró select nativo, intentando con dropdown personalizado")
+                    # Hacer clic en el botón del dropdown
+                    dropdown_button = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
+                    if dropdown_button:
+                        await dropdown_button.click()
+                        await page.wait_for_timeout(1000)
+                        # Construir el texto de la opción (ej. "MX +52")
+                        country_code_num = {
+                            'MX': '52', 'US': '1', 'CA': '1', 'UK': '44', 'DE': '49',
+                            'FR': '33', 'IT': '39', 'ES': '34', 'JP': '81', 'AU': '61', 'IN': '91'
+                        }.get(country_code, '')
+                        option_text = f"{country_code} +{country_code_num}" if country_code_num else country_code
+                        # Buscar la opción por texto
+                        option = await page.query_selector(f'li:has-text("{option_text}")')
+                        if option:
+                            await option.click()
+                            logger.debug(f"   ✅ País seleccionado desde dropdown personalizado: {option_text}")
+                        else:
+                            logger.warning(f"   ⚠️ No se encontró la opción para {option_text}")
+                    else:
+                        logger.warning("   ⚠️ No se pudo encontrar el dropdown de país")
 
-                                # Obtener número de teléfono real de 5sim
+                await asyncio.sleep(1)  # Esperar a que se aplique el cambio
+
+                # --- Obtener número de 5sim ---
                 phone_number = None
                 order_id = None
                 if FIVESIM_API_KEY:
@@ -1656,78 +1685,89 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 await phone_input.fill(phone_number)
                 logger.debug(f"   ✅ Número ingresado: {phone_number}")
 
-                # Hacer clic en botón de continuar (generalmente "Agregar número" o "Continuar")
-                submit_btn = await page.query_selector('input[type="submit"], button:has-text("Agregar"), button:has-text("Continue"), button:has-text("Continuar")')
-                if submit_btn:
-                    await submit_btn.click()
+                # Guardar referencia al botón de agregar número
+                add_number_button = await page.query_selector('input[type="submit"], button:has-text("Agregar"), button:has-text("Continue"), button:has-text("Continuar")')
+                if add_number_button:
+                    await add_number_button.click()
                     logger.debug("   ✅ Clic en botón de agregar número")
-                    # Esperar a que la página procese la solicitud
                     await page.wait_for_load_state('networkidle', timeout=15000)
                     last_screenshot = await take_screenshot(page, "despues_enviar_numero")
                 else:
                     logger.warning("   ⚠️ No se encontró botón de envío, puede que se envíe automáticamente")
-                add_number_button = submit_btn
 
-            # Guardar referencia al botón de agregar número por si necesitamos reintentar
-            add_number_button = submit_btn
-
-            try:
-                # Esperar hasta 30 segundos a que aparezca el campo de código
-                code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
-                logger.debug("   📱 Página de ingreso de código SMS detectada")
-                sms_code = await get_fivesim_code(order_id)
-                if sms_code:
-                    await code_input.fill(sms_code)
-                    logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
-                    verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
-                    if verify_btn:
-                        await verify_btn.click()
-                        await page.wait_for_load_state('networkidle', timeout=15000)
-                        last_screenshot = await take_screenshot(page, "despues_verificacion_sms")
+                # --- Esperar campo de código SMS ---
+                try:
+                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                    logger.debug("   📱 Página de ingreso de código SMS detectada")
+                    sms_code = await get_fivesim_code(order_id)
+                    if sms_code:
+                        await code_input.fill(sms_code)
+                        logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
+                        verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
+                        if verify_btn:
+                            await verify_btn.click()
+                            await page.wait_for_load_state('networkidle', timeout=15000)
+                            last_screenshot = await take_screenshot(page, "despues_verificacion_sms")
+                        else:
+                            logger.warning("   ⚠️ No se encontró botón de verificar")
                     else:
-                        logger.warning("   ⚠️ No se encontró botón de verificar")
-                else:
-                    logger.error("❌ No se pudo obtener código SMS")
-                    raise Exception("No se pudo obtener código de verificación SMS")
-            except Exception as e:
-                # Si no aparece el campo de código, verificar si hay mensaje de error
-                error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
-                if error_msg:
-                    error_text = await error_msg.text_content()
-                    logger.warning(f"⚠️ Error al agregar número: {error_text}")
-                    # Reintentar una vez haciendo clic en el botón de agregar número nuevamente
-                    if add_number_button and await add_number_button.is_visible():
-                        logger.debug("   🔄 Reintentando clic en botón de agregar número...")
-                        await add_number_button.click()
-                        await page.wait_for_load_state('networkidle', timeout=15000)
-                        # Volver a esperar el campo de código
-                        try:
-                            code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
-                            logger.debug("   📱 Página de ingreso de código SMS detectada (segundo intento)")
-                            sms_code = await get_hero_sms_code(activation_id)
-                            if sms_code:
-                                await code_input.fill(sms_code)
-                                logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
-                                verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
-                                if verify_btn:
-                                    await verify_btn.click()
-                                    await page.wait_for_load_state('networkidle', timeout=15000)
-                                    last_screenshot = await take_screenshot(page, "despues_verificacion_sms_segundo")
+                        logger.error("❌ No se pudo obtener código SMS")
+                        raise Exception("No se pudo obtener código de verificación SMS")
+                except Exception as e:
+                    # Si no aparece el campo de código, verificar si hay mensaje de error
+                    error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
+                    if error_msg:
+                        error_text = await error_msg.text_content()
+                        logger.warning(f"⚠️ Error al agregar número: {error_text}")
+                        # Reintentar una vez haciendo clic en el botón de agregar número nuevamente
+                        if add_number_button and await add_number_button.is_visible():
+                            logger.debug("   🔄 Reintentando clic en botón de agregar número...")
+                            await add_number_button.click()
+                            await page.wait_for_load_state('networkidle', timeout=15000)
+                            try:
+                                code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                                logger.debug("   📱 Página de ingreso de código SMS detectada (segundo intento)")
+                                sms_code = await get_fivesim_code(order_id)
+                                if sms_code:
+                                    await code_input.fill(sms_code)
+                                    logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
+                                    verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
+                                    if verify_btn:
+                                        await verify_btn.click()
+                                        await page.wait_for_load_state('networkidle', timeout=15000)
+                                        last_screenshot = await take_screenshot(page, "despues_verificacion_sms_segundo")
+                                    else:
+                                        logger.warning("   ⚠️ No se encontró botón de verificar")
                                 else:
-                                    logger.warning("   ⚠️ No se encontró botón de verificar")
-                            else:
-                                logger.error("❌ No se pudo obtener código SMS")
-                                raise Exception("No se pudo obtener código de verificación SMS")
-                        except Exception as e2:
-                            logger.error("❌ Reintento fallido también")
-                            raise Exception(f"Error persistente al agregar número: {error_text}")
+                                    logger.error("❌ No se pudo obtener código SMS")
+                                    raise Exception("No se pudo obtener código de verificación SMS")
+                            except Exception as e2:
+                                logger.error("❌ Reintento fallido también")
+                                raise Exception(f"Error persistente al agregar número: {error_text}")
+                        else:
+                            logger.error("❌ No se pudo reintentar porque el botón ya no está visible")
+                            raise Exception(f"Error al agregar número: {error_text}")
                     else:
-                        logger.error("❌ No se pudo reintentar porque el botón ya no está visible")
-                        raise Exception(f"Error al agregar número: {error_text}")
-                else:
-                    # Si no hay error ni campo, puede que la verificación no sea necesaria
-                    logger.warning("⚠️ No se encontró campo de código ni mensaje de error, continuando...")
-                    last_screenshot = await take_screenshot(page, "sin_codigo_ni_error")
+                        logger.warning("⚠️ No se encontró campo de código ni mensaje de error, continuando...")
+                        last_screenshot = await take_screenshot(page, "sin_codigo_ni_error")
+            else:
+                logger.debug("   ✅ No se requiere agregar número de teléfono")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
