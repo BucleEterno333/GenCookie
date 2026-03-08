@@ -1118,6 +1118,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             # Detectar captcha de selección de imágenes (tipo "elige las sillas") - puede ser canvas o img
             if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content or "Elija todo" in content:
                 logger.warning("⚠️ Captcha de selección de imágenes detectado")
+                await page.wait_for_timeout(4000)
                 last_screenshot = await take_screenshot(page, "captcha_seleccion")
 
                 # Buscar el canvas (es lo más común)
