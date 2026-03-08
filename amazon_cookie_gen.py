@@ -897,46 +897,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             logger.debug(f"   📍 URL después de login: {page.url}")
             last_screenshot = await take_screenshot(page, "after_login_click")
 
-            # ----- PASO 9: Hacer clic en "Crear cuenta nueva" (consumidor) -----
-            logger.debug("🆕 [PASO 9] Buscando enlace para crear cuenta (consumidor)...")
-            create_selectors = [
-                'a#createAccountSubmit',
-                'a[href*="ap/register"]',
-                'a:has-text("Crear tu cuenta de Amazon")',
-                'a:has-text("Create your Amazon account")',
-                'a:has-text("Crear cuenta nueva")'
-            ]
-            create_link = None
-            for selector in create_selectors:
-                try:
-                    link = await page.wait_for_selector(selector, state='visible', timeout=5000)
-                    if link:
-                        create_link = link
-                        logger.debug(f"   ✅ Enlace de creación (consumidor) encontrado con selector: {selector}")
-                        break
-                except:
-                    continue
-            if not create_link:
-                raise Exception("No se encontró enlace para crear cuenta (consumidor)")
-
-            await create_link.click()
-            await page.wait_for_load_state('networkidle', timeout=15000)
-            await page.wait_for_timeout(2000)
-            logger.debug(f"   📍 URL después de crear cuenta: {page.url}")
-            last_screenshot = await take_screenshot(page, "after_create_click")
-
-            # Si la URL contiene "business", redirigir manualmente
-            if "business" in page.url:
-                logger.warning("⚠️ Redirigido a registro empresarial, navegando a registro estándar...")
-                standard_register_url = f"{base_urls[country_code]}/ap/register"
-                try:
-                    await page.goto(standard_register_url, wait_until='domcontentloaded', timeout=30000)
-                    await page.wait_for_timeout(3000)
-                    logger.debug(f"   📍 Nueva URL tras navegación manual: {page.url}")
-                    last_screenshot = await take_screenshot(page, "after_manual_register")
-                except Exception as e:
-                    raise Exception(f"Error al navegar a registro estándar: {e}")
-
             # ----- PASO 10: Verificar página de registro y campo de email -----
             logger.debug("📧 [PASO 10] Verificando página de registro...")
             email_field = None
