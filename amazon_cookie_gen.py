@@ -1110,18 +1110,27 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
+
+
+
+
+
+
+
             # ----- PASO 15: Detectar captcha después del envío -----
             logger.debug("🔍 [PASO 15] Verificando captcha después del envío...")
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
 
-            # Detectar captcha de selección de imágenes (tipo "elige las sillas") - puede ser canvas o img
+            # Detectar captcha de selección de imágenes (tipo "elige las sillas")
             if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content or "Elija todo" in content:
                 logger.warning("⚠️ Captcha de selección de imágenes detectado")
+                # Esperar a que el canvas termine de cargar (puede tardar unos segundos)
+                logger.debug("   ⏳ Esperando 4 segundos adicionales para que cargue el canvas...")
                 await page.wait_for_timeout(4000)
                 last_screenshot = await take_screenshot(page, "captcha_seleccion")
 
-                # Buscar el canvas (es lo más común)
+                # Buscar el canvas (es lo más común) o una imagen
                 canvas_element = await page.query_selector('canvas')
                 img_element = await page.query_selector('img[src*="captcha"]')
                 
@@ -1144,8 +1153,30 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         f.write(img_data)
                     click_element = img_element
                 else:
-                    logger.error("❌ No se encontró canvas ni imagen de captcha")
-                    return None, "No se encontró elemento de captcha", last_screenshot
+                    # Si aún no aparece, esperar un poco más y reintentar una vez
+                    logger.warning("   ⚠️ No se encontró canvas ni imagen, esperando 2 segundos más...")
+                    await page.wait_for_timeout(2000)
+                    canvas_element = await page.query_selector('canvas')
+                    img_element = await page.query_selector('img[src*="captcha"]')
+                    if canvas_element:
+                        logger.debug("   ✅ Captcha (canvas) apareció después de espera adicional")
+                        screenshot_bytes = await canvas_element.screenshot()
+                        img_path = 'temp_canvas_captcha.png'
+                        with open(img_path, 'wb') as f:
+                            f.write(screenshot_bytes)
+                        click_element = canvas_element
+                    elif img_element:
+                        img_src = await img_element.get_attribute('src')
+                        if not img_src:
+                            return None, "La imagen del captcha no tiene src", last_screenshot
+                        img_data = requests.get(img_src, timeout=10).content
+                        img_path = 'temp_image_captcha.jpg'
+                        with open(img_path, 'wb') as f:
+                            f.write(img_data)
+                        click_element = img_element
+                    else:
+                        logger.error("❌ No se encontró canvas ni imagen de captcha después de reintentar")
+                        return None, "No se encontró elemento de captcha", last_screenshot
 
                 # Extraer texto de instrucción (mejorado)
                 hint_text = None
@@ -1180,46 +1211,110 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 else:
                     logger.debug(f"   📝 Instrucción extraída: {hint_text}")
 
-                # --- Resolver coordenadas con 2captcha o anticaptcha ---
+                # --- Resolver coordenadas usando API HTTP directamente ---
                 coordinates = None
+
+                # Función para llamar a 2captcha API
+                def solve_2captcha_coordinates(image_path, hint):
+                    import base64
+                    with open(image_path, 'rb') as f:
+                        img_base64 = base64.b64encode(f.read()).decode('utf-8')
+                    url = "http://2captcha.com/in.php"
+                    data = {
+                        'key': API_KEY_2CAPTCHA,
+                        'method': 'base64',
+                        'body': img_base64,
+                        'coordinatescaptcha': 1,
+                        'textinstructions': hint,
+                        'json': 1
+                    }
+                    try:
+                        resp = requests.post(url, data=data, timeout=30)
+                        if resp.status_code == 200:
+                            result = resp.json()
+                            if result.get('status') == 1:
+                                captcha_id = result['request']
+                                logger.debug(f"   2captcha ID: {captcha_id}, esperando resultado...")
+                                time.sleep(15)  # espera inicial
+                                for _ in range(30):  # hasta 30 intentos
+                                    res_url = f"http://2captcha.com/res.php?key={API_KEY_2CAPTCHA}&action=get&id={captcha_id}&json=1"
+                                    res_resp = requests.get(res_url, timeout=10)
+                                    if res_resp.status_code == 200:
+                                        res_data = res_resp.json()
+                                        if res_data.get('status') == 1:
+                                            # Formato: "x1,y1;x2,y2"
+                                            coord_str = res_data['request']
+                                            points = []
+                                            for pair in coord_str.split(';'):
+                                                if pair:
+                                                    x, y = pair.split(',')
+                                                    points.append({'x': int(x), 'y': int(y)})
+                                            return points
+                                        elif res_data.get('request') == 'CAPCHA_NOT_READY':
+                                            time.sleep(5)
+                                            continue
+                                        else:
+                                            break
+                        return None
+                    except Exception as e:
+                        logger.warning(f"Error en 2captcha HTTP: {e}")
+                        return None
+
+                # Función para llamar a anticaptcha API
+                def solve_anticaptcha_coordinates(image_path, hint):
+                    import base64
+                    with open(image_path, 'rb') as f:
+                        img_base64 = base64.b64encode(f.read()).decode('utf-8')
+                    url = "https://api.anti-captcha.com/createTask"
+                    data = {
+                        "clientKey": API_KEY_ANTICAPTCHA,
+                        "task": {
+                            "type": "ImageToCoordinatesTask",
+                            "body": img_base64,
+                            "comment": hint
+                        }
+                    }
+                    try:
+                        resp = requests.post(url, json=data, timeout=30)
+                        if resp.status_code == 200:
+                            result = resp.json()
+                            if result.get('errorId') == 0:
+                                task_id = result['taskId']
+                                logger.debug(f"   anticaptcha task ID: {task_id}, esperando resultado...")
+                                time.sleep(5)
+                                for _ in range(30):
+                                    res_url = "https://api.anti-captcha.com/getTaskResult"
+                                    res_data = {"clientKey": API_KEY_ANTICAPTCHA, "taskId": task_id}
+                                    res_resp = requests.post(res_url, json=res_data, timeout=10)
+                                    if res_resp.status_code == 200:
+                                        res_result = res_resp.json()
+                                        if res_result.get('status') == 'ready':
+                                            # Las coordenadas vienen en solution.coordinates
+                                            coords = res_result['solution']['coordinates']
+                                            points = [{'x': c['x'], 'y': c['y']} for c in coords]
+                                            return points
+                                        elif res_result.get('status') == 'processing':
+                                            time.sleep(5)
+                                            continue
+                                        else:
+                                            break
+                        return None
+                    except Exception as e:
+                        logger.warning(f"Error en anticaptcha HTTP: {e}")
+                        return None
 
                 # Intentar con 2captcha
                 if API_KEY_2CAPTCHA:
-                    try:
-                        from twocaptcha import TwoCaptcha
-                        solver = TwoCaptcha(API_KEY_2CAPTCHA)
-                        # El método 'coordinates' recibe la ruta de la imagen y el texto de instrucción
-                        result = solver.coordinates(img_path, textinstructions=hint_text)
-                        if result and 'code' in result:
-                            coord_str = result['code']
-                            # El formato suele ser "coordinates=x1,y1;x2,y2"
-                            if coord_str.startswith('coordinates='):
-                                coord_str = coord_str.replace('coordinates=', '')
-                            points = []
-                            for pair in coord_str.split(';'):
-                                if pair:
-                                    x, y = pair.split(',')
-                                    points.append({'x': int(x), 'y': int(y)})
-                            coordinates = points
-                            logger.debug(f"✅ 2captcha resolvió coordenadas: {coordinates}")
-                    except Exception as e:
-                        logger.warning(f"⚠️ 2captcha falló: {e}")
+                    logger.debug("   Intentando con 2captcha API HTTP...")
+                    coordinates = solve_2captcha_coordinates(img_path, hint_text)
+                    if coordinates:
+                        logger.debug(f"✅ 2captcha resolvió coordenadas: {coordinates}")
 
-                # Si falló, intentar con anticaptcha (versión corregida)
                 if not coordinates and API_KEY_ANTICAPTCHA:
-                    try:
-                        from anticaptchaofficial.imagecoordinates import imagecoordinates
-                        solver = imagecoordinates()
-                        solver.set_api_key(API_KEY_ANTICAPTCHA)
-                        solver.set_comment(hint_text)
-                        solver.set_image_path(img_path)
-                        coordinates = solver.solve_and_return_solution()
-                        if coordinates:
-                            logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
-                        else:
-                            logger.warning("⚠️ anticaptcha no devolvió coordenadas")
-                    except Exception as e:
-                        logger.warning(f"⚠️ anticaptcha falló: {e}")
+                    logger.debug("   Intentando con anticaptcha API HTTP...")
+                    coordinates = solve_anticaptcha_coordinates(img_path, hint_text)
+                    if coordinates:
+                        logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
 
                 if not coordinates:
                     return None, "No se pudo resolver captcha de coordenadas", last_screenshot
@@ -1249,6 +1344,17 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 # Después de resolver, esperar un poco y actualizar contenido
                 await page.wait_for_timeout(5000)
                 content = await safe_get_content(page)
+
+
+
+
+
+
+
+
+
+
+
 
 
 
