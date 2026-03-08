@@ -6,6 +6,7 @@ Amazon Cookie Generator - Versión API REST con navegación dinámica
 - Incluye registro, verificación de correo, captcha, agregar dirección y wallet
 - Logs detallados en cada paso (visibles en Northflank y en consola)
 - Capturas de pantalla en base64 para el frontend
+- Soporte para captchas de selección de imágenes (coordenadas) con 2Captcha y Anti-Captcha
 """
 
 import os
@@ -155,7 +156,67 @@ def get_str(string, start, end, occurrence=1):
         return None
 
 # -------------------------------------------------------------------
-# CAPTCHA RESOLUTION
+# CAPTCHA RESOLUTION (coordenadas)
+# -------------------------------------------------------------------
+def solve_coordinates_captcha(image_path, hint_text=None):
+    """
+    Resuelve un captcha de selección de imágenes (coordenadas) usando 2captcha o anticaptcha.
+    Retorna una lista de puntos [{'x': int, 'y': int}] o None si falla.
+    """
+    solution = None
+    logger.debug(f"🔍 Intentando resolver captcha de coordenadas con imagen: {image_path}")
+
+    # Intentar con 2captcha
+    if API_KEY_2CAPTCHA:
+        try:
+            from twocaptcha import TwoCaptcha
+            from twocaptcha import ValidationException, NetworkException, ApiException, TimeoutException
+            solver = TwoCaptcha(API_KEY_2CAPTCHA)
+            params = {'file': image_path}
+            if hint_text:
+                params['textinstructions'] = hint_text
+            result = solver.coordinates(**params)
+            if result and 'code' in result:
+                coord_str = result['code']
+                # Formato típico: "coordinates=x1,y1;x2,y2"
+                if coord_str.startswith('coordinates='):
+                    coord_str = coord_str.replace('coordinates=', '')
+                points = []
+                for pair in coord_str.split(';'):
+                    if pair:
+                        x, y = pair.split(',')
+                        points.append({'x': int(x), 'y': int(y)})
+                logger.debug(f"✅ 2captcha resolvió coordenadas: {points}")
+                return points
+            else:
+                logger.warning("⚠️ 2captcha no devolvió coordenadas")
+        except Exception as e:
+            logger.warning(f"⚠️ 2captcha falló: {e}")
+
+    # Intentar con anticaptcha
+    if not solution and API_KEY_ANTICAPTCHA:
+        try:
+            from anticaptchaofficial.imagecoordinates import imagecoordinates
+            solver = imagecoordinates()
+            solver.set_api_key(API_KEY_ANTICAPTCHA)
+            solver.set_comment(hint_text or "Click on all images that match the description")
+            solver.set_image_path(image_path)
+            # Ejecutar y obtener coordenadas
+            coordinates = solver.solve_and_return_solution()
+            if coordinates:
+                # Anticaptcha devuelve una lista de diccionarios con 'x' e 'y'
+                logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
+                return coordinates
+            else:
+                logger.warning("⚠️ anticaptcha no devolvió coordenadas")
+        except Exception as e:
+            logger.warning(f"⚠️ anticaptcha falló: {e}")
+
+    logger.error("❌ No se pudo resolver captcha de coordenadas")
+    return None
+
+# -------------------------------------------------------------------
+# CAPTCHA RESOLUTION (reCAPTCHA e imagen simple)
 # -------------------------------------------------------------------
 def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
     """Resuelve captcha usando 2captcha o anticaptcha."""
@@ -249,8 +310,6 @@ async def get_hero_sms_code(request_id, timeout=120):
     return None
 
 # -------------------------------------------------------------------
-# CORREO TEMPORAL
-# -------------------------------------------------------------------
 # CORREO TEMPORAL (MEJORADO)
 # -------------------------------------------------------------------
 async def generate_temp_email():
@@ -261,11 +320,10 @@ async def generate_temp_email():
         ('tempmail.plus', 'https://api.tempmail.plus/generate')
     ]
     for service_name, api_url in services:
-        for attempt in range(3):  # Reintentar cada servicio hasta 3 veces
+        for attempt in range(3):
             try:
                 logger.debug(f"📧 Intentando {service_name} (intento {attempt+1}/3)...")
                 if service_name == 'mail.tm':
-                    # Obtener dominios
                     resp = requests.get(f"{api_url}/domains", timeout=30)
                     if resp.status_code != 200:
                         logger.warning(f"   mail.tm dominios respondió {resp.status_code}")
@@ -278,7 +336,6 @@ async def generate_temp_email():
                     domain = domains_list[0]['domain']
                     email = f"{uuid.uuid4().hex[:8]}@{domain}"
                     password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
-                    # Crear cuenta
                     acc_resp = requests.post(
                         f"{api_url}/accounts",
                         json={"address": email, "password": password},
@@ -290,7 +347,6 @@ async def generate_temp_email():
                         return email, token, service_name
                     else:
                         logger.warning(f"   mail.tm creación falló: {acc_resp.status_code}")
-
                 elif service_name == 'guerrillamail':
                     resp = requests.get(
                         f"{api_url}?f=get_email_address&ip=127.0.0.1",
@@ -305,7 +361,6 @@ async def generate_temp_email():
                             return email, token, service_name
                     else:
                         logger.warning(f"   guerrillamail respondió {resp.status_code}")
-
                 elif service_name == 'tempmail.plus':
                     resp = requests.get(api_url, timeout=30)
                     if resp.status_code == 200:
@@ -317,19 +372,18 @@ async def generate_temp_email():
                             return email, token, service_name
                     else:
                         logger.warning(f"   tempmail.plus respondió {resp.status_code}")
-
             except requests.exceptions.Timeout:
                 logger.warning(f"⚠️ Timeout en {service_name}")
             except requests.exceptions.ConnectionError as e:
                 logger.warning(f"⚠️ Error de conexión en {service_name}: {e}")
             except Exception as e:
                 logger.warning(f"⚠️ Error inesperado en {service_name}: {e}")
-            await asyncio.sleep(2)  # Espera entre reintentos
+            await asyncio.sleep(2)
     logger.error("❌ Todos los servicios de correo fallaron")
     return None, None, None
 
 async def get_verification_code(email, token, service, max_attempts=20, wait_time=10):
-    """Obtiene el código de verificación del correo temporal con más intentos y pausas."""
+    """Obtiene el código de verificación del correo temporal."""
     logger.debug(f"📧 Esperando código de verificación para {email} (servicio: {service})...")
     for attempt in range(max_attempts):
         try:
@@ -376,53 +430,6 @@ async def get_verification_code(email, token, service, max_attempts=20, wait_tim
     logger.error("❌ No se pudo obtener código de verificación")
     return None
 
-async def get_verification_code(email, token, service, max_attempts=15, wait_time=8):
-    logger.debug(f"📧 Esperando código de verificación para {email} (servicio: {service})...")
-    for attempt in range(max_attempts):
-        try:
-            if service == 'mail.tm' and token:
-                resp = requests.get(
-                    "https://api.mail.tm/messages",
-                    headers={'Authorization': f'Bearer {token}'},
-                    timeout=10
-                )
-                if resp.status_code == 200:
-                    emails = resp.json().get('hydra:member', [])
-                    for mail in emails:
-                        text = mail.get('text', '') or mail.get('html', '') or mail.get('intro', '')
-                        code = get_str(text, 'Your verification code is ', '\n')
-                        if code:
-                            logger.debug(f"📧 Código obtenido de mail.tm: {code}")
-                            return code
-            elif service == 'guerrillamail' and token:
-                resp = requests.get(
-                    f"https://api.guerrillamail.com/ajax.php?f=check_email&seq=0&sid_token={token}",
-                    timeout=10
-                )
-                if resp.status_code == 200:
-                    emails = resp.json().get('list', [])
-                    for mail in emails:
-                        body = mail.get('mail_body', '') or mail.get('mail_body_ex', '')
-                        code = get_str(body, 'Your verification code is ', '\n')
-                        if code:
-                            logger.debug(f"📧 Código obtenido de guerrillamail: {code}")
-                            return code
-            elif service == 'tempmail.plus' and token:
-                resp = requests.get(f"https://api.tempmail.plus/messages/{token}", timeout=10)
-                if resp.status_code == 200:
-                    emails = resp.json().get('messages', [])
-                    for mail in emails:
-                        text = mail.get('text', '') or mail.get('html', '')
-                        code = get_str(text, 'Your verification code is ', '\n')
-                        if code:
-                            logger.debug(f"📧 Código obtenido de tempmail.plus: {code}")
-                            return code
-        except Exception as e:
-            logger.debug(f"📧 Intento {attempt+1} falló: {e}")
-        await asyncio.sleep(wait_time)
-    logger.error("❌ No se pudo obtener código de verificación")
-    return None
-
 # -------------------------------------------------------------------
 # FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA
 # -------------------------------------------------------------------
@@ -450,7 +457,7 @@ async def safe_get_content(page, timeout=20):
         return await page.content()
 
 # -------------------------------------------------------------------
-# FUNCIÓN PARA AGREGAR DIRECCIÓN (usando URLs fijas por simplicidad)
+# FUNCIÓN PARA AGREGAR DIRECCIÓN
 # -------------------------------------------------------------------
 async def add_address(session, country_code, email, password, token=None, service=None):
     """Agrega una dirección por defecto a la cuenta."""
@@ -462,20 +469,15 @@ async def add_address(session, country_code, email, password, token=None, servic
         "Viewport-Width": "1536"
     }
 
-    # Primero vamos a la página de direcciones
     resp = session.get(address_book_urls[country_code], headers=headers, timeout=15, allow_redirects=True)
     if resp.status_code != 200:
         logger.warning("⚠️ No se pudo acceder a address book")
         return False
 
-    # Si redirige a login, intentamos reautenticar
     if 'signin' in resp.url.lower():
-        logger.debug("🔑 Sesión expirada, intentando reautenticar...")
-        # Aquí deberías tener una función login_again (simplificada)
-        # Por ahora, asumimos que la sesión sigue viva si llegamos hasta aquí
-        pass
+        logger.debug("🔑 Sesión expirada, intentando reautenticar... (no implementado, se asume éxito)")
+        # Aquí podrías implementar login_again si es necesario
 
-    # Vamos a la página de agregar dirección
     resp = session.get(add_address_urls[country_code], headers=headers, timeout=15, allow_redirects=True)
     if resp.status_code != 200:
         logger.warning("⚠️ No se pudo acceder a add address")
@@ -487,7 +489,6 @@ async def add_address(session, country_code, email, password, token=None, servic
         logger.warning("⚠️ No se encontró formulario de dirección")
         return False
 
-    # Datos de dirección según país
     address_data = {
         'CA': {'countryCode': 'CA', 'fullName': 'Mark O. Montanez', 'phone': f'1{random.randint(1000000000,9999999999)}',
                'line1': '456 Bloor Street West', 'city': 'Toronto', 'state': 'ON', 'postalCode': 'M5S 1X8'},
@@ -757,15 +758,15 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
         last_screenshot = await take_screenshot(page, "home_page")
         logger.debug(f"   📍 URL actual: {page.url}")
 
-        # ----- PASO 8: Hacer clic en "Hola, identifícate" (o similar) -----
+        # ----- PASO 8: Hacer clic en "Hola, identifícate" -----
         logger.debug("👤 [PASO 8] Buscando enlace de inicio de sesión...")
         login_selectors = [
-            'a[data-nav-role="signin"]',                     # más confiable (presente en tu HTML)
-            'a.nav-a[data-nav-role="signin"]',               # combinación de clase y atributo
-            'a[data-csa-c-slot-id="nav-link-accountList"]',  # por el data-csa-c-slot-id
-            'a:has-text("Hola, identifícate")',              # por texto (Playwright lo soporta)
-            'a:has-text("Hello, Sign in")',                  # inglés
-            'a:has-text("Identifícate")'                     # versión corta
+            'a[data-nav-role="signin"]',
+            'a.nav-a[data-nav-role="signin"]',
+            'a[data-csa-c-slot-id="nav-link-accountList"]',
+            'a:has-text("Hola, identifícate")',
+            'a:has-text("Hello, Sign in")',
+            'a:has-text("Identifícate")'
         ]
         login_link = None
         for selector in login_selectors:
@@ -787,8 +788,36 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
         logger.debug(f"   📍 URL después de login: {page.url}")
         last_screenshot = await take_screenshot(page, "after_login_click")
 
-        # ----- A partir de aquí, ya estamos en la página de registro (primera página: email) -----
-        # ----- PASO 10: Ingresar email -----
+        # ----- PASO 9: Hacer clic en "Crear cuenta nueva" -----
+        logger.debug("🆕 [PASO 9] Buscando enlace para crear cuenta...")
+        create_selectors = [
+            'a#createAccountSubmit',
+            'a[href*="register"]',
+            'a:has-text("Crear cuenta nueva")',
+            'a:has-text("Create your Amazon account")',
+            'a:has-text("Crear tu cuenta de Amazon")'
+        ]
+        create_link = None
+        for selector in create_selectors:
+            try:
+                link = await page.wait_for_selector(selector, state='visible', timeout=5000)
+                if link:
+                    create_link = link
+                    logger.debug(f"   ✅ Enlace de creación encontrado con selector: {selector}")
+                    break
+            except:
+                continue
+        if not create_link:
+            last_screenshot = await take_screenshot(page, "error_no_create_link")
+            return None, "No se encontró enlace para crear cuenta", last_screenshot
+
+        await create_link.click()
+        await page.wait_for_load_state('networkidle', timeout=15000)
+        await page.wait_for_timeout(2000)
+        logger.debug(f"   📍 URL después de crear cuenta: {page.url}")
+        last_screenshot = await take_screenshot(page, "after_create_click")
+
+        # ----- PASO 10: Ingresar email en primera página -----
         logger.debug("📧 [PASO 10] Ingresando email en primera página...")
         email_field = None
         email_selectors = ['input#ap_email', 'input[name="email"]', 'input[type="email"]']
@@ -860,14 +889,13 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             last_screenshot = await take_screenshot(page, "despues_proceder")
         else:
             logger.debug("   ℹ️ No se detectó página intermedia, continuando")
-            # Verificar si ya estamos en el formulario
             try:
                 await page.wait_for_selector('#ap_customer_name', state='visible', timeout=10000)
                 logger.debug("   ✅ Campo de nombre visible directamente")
             except:
                 logger.warning("   ⚠️ No se encontró campo de nombre, puede que la página sea diferente")
 
-        # ----- PASO 13: Llenar formulario de registro (nombre, contraseña, teléfono) -----
+        # ----- PASO 13: Llenar formulario de registro -----
         logger.debug("📝 [PASO 13] Llenando formulario completo...")
         last_screenshot = await take_screenshot(page, "formulario_antes_llenar")
 
@@ -925,7 +953,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 phone_field = field
                 break
         if phone_field:
-            # Generar número según país
             country_codes = {'CA': '1', 'MX': '52', 'US': '1', 'UK': '44', 'DE': '49',
                              'FR': '33', 'IT': '39', 'ES': '34', 'JP': '81', 'AU': '61', 'IN': '91'}
             code = country_codes.get(country_code, '1')
@@ -940,6 +967,14 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     await phone_field.fill(phone_number)
                     account_data['phone'] = phone_number
                     logger.debug(f"   ✅ Número real Hero SMS: {phone_number}")
+
+        # Términos (si existe)
+        terms = await page.query_selector('input[name="agreement"], input[type="checkbox"]')
+        if terms:
+            await terms.check()
+            logger.debug("   ✅ Checkbox de términos marcado")
+
+        last_screenshot = await take_screenshot(page, "formulario_llenado")
 
         # ----- PASO 14: Botón de registro final -----
         logger.debug("🎯 [PASO 14] Buscando botón de registro final...")
@@ -971,6 +1006,66 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
         current_url = page.url.lower()
         content = await safe_get_content(page)
 
+        # Detectar captcha de selección de imágenes (tipo "elige las sillas")
+        if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content:
+            logger.warning("⚠️ Captcha de selección de imágenes detectado")
+            last_screenshot = await take_screenshot(page, "captcha_seleccion")
+
+            # Buscar la imagen del captcha
+            img_element = await page.query_selector('.captcha img, #captcha img, img[src*="captcha"]')
+            if not img_element:
+                # Intentar con cualquier imagen dentro de un contenedor sospechoso
+                container = await page.query_selector('div:has-text("Resuelve esta adivinanza") img')
+                if container:
+                    img_element = container
+            if img_element:
+                img_src = await img_element.get_attribute('src')
+                if img_src:
+                    img_data = requests.get(img_src, timeout=10).content
+                    img_path = 'temp_coordinates_captcha.jpg'
+                    with open(img_path, 'wb') as f:
+                        f.write(img_data)
+
+                    # Extraer texto de instrucción
+                    hint_text = "Haz clic en todas las sillas"  # Por defecto, se puede mejorar
+
+                    # Resolver coordenadas
+                    coordinates = solve_coordinates_captcha(img_path, hint_text)
+                    if coordinates:
+                        # Obtener el contenedor donde hacer clic (puede ser la misma imagen o un div)
+                        click_container = img_element
+                        box = await click_container.bounding_box()
+                        if box:
+                            for point in coordinates:
+                                abs_x = box['x'] + point['x']
+                                abs_y = box['y'] + point['y']
+                                await page.mouse.click(abs_x, abs_y)
+                                await asyncio.sleep(0.5)
+                            # Buscar botón de confirmar
+                            confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"]')
+                            if confirm_btn:
+                                await confirm_btn.click()
+                                logger.debug("✅ Clic en botón de confirmar")
+                                await page.wait_for_load_state('networkidle', timeout=30000)
+                                last_screenshot = await take_screenshot(page, "despues_captcha_coordenadas")
+                            else:
+                                logger.warning("⚠️ No se encontró botón de confirmar")
+                        else:
+                            logger.error("❌ No se pudo obtener bounding box del contenedor")
+                            return None, "No se pudo obtener posición del captcha", last_screenshot
+                    else:
+                        return None, "No se pudo resolver captcha de selección", last_screenshot
+                else:
+                    logger.error("❌ No se encontró URL de imagen en el captcha")
+                    return None, "No se encontró imagen de captcha", last_screenshot
+            else:
+                logger.error("❌ No se encontró elemento img en el captcha")
+                return None, "No se encontró elemento img", last_screenshot
+
+            # Después de resolver, continuar con el flujo normal (re-obtener contenido)
+            content = await safe_get_content(page)
+
+        # Detectar otros tipos de captcha (reCAPTCHA, imagen simple)
         captcha_detected = False
         captcha_type = None
         site_key = None
