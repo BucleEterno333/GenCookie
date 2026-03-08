@@ -1601,8 +1601,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 if FIVESIM_API_KEY:
                     # Nota: el producto puede ser 'amazon' o 'amazonmx' según el país
                     # Para México usamos 'amazonmx', para otros países 'amazon' genérico
-                    product = 'amazonmx' if country_code == 'MX' else 'amazon'
-                    sms_info = await get_fivesim_number(country_code, product=product)
+                    sms_info = await get_fivesim_number(country_code, product='amazon')
                     if sms_info:
                         full_phone, order_id = sms_info
                         logger.debug(f"   ✅ Número completo obtenido: {full_phone}")
