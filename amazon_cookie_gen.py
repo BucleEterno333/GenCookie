@@ -1125,11 +1125,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
 
-            # Detectar bloqueo por JavaScript deshabilitado
-            if "JavaScript se ha deshabilitado" in content:
-                logger.warning("⚠️ Detectado bloqueo por JavaScript deshabilitado, reintentando...")
-                raise Exception("JavaScript deshabilitado - bloqueo detectado")
-
             # Detectar captcha de selección de imágenes (tipo "elige las sillas")
             if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content or "Elija todo" in content:
                 logger.warning("⚠️ Captcha de selección de imágenes detectado")
