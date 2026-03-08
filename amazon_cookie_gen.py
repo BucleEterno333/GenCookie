@@ -7,6 +7,7 @@ Amazon Cookie Generator - Versión API REST con navegación dinámica
 - Logs detallados en cada paso (visibles en Northflank y en consola)
 - Capturas de pantalla en base64 para el frontend
 - Soporte para captchas de selección de imágenes (coordenadas) con 2Captcha y Anti-Captcha
+- Correo temporal mejorado con múltiples servicios: mail.tm, guerrillamail, tempmail.plus, mailinator, 10minutemail
 """
 
 import os
@@ -201,10 +202,8 @@ def solve_coordinates_captcha(image_path, hint_text=None):
             solver.set_api_key(API_KEY_ANTICAPTCHA)
             solver.set_comment(hint_text or "Click on all images that match the description")
             solver.set_image_path(image_path)
-            # Ejecutar y obtener coordenadas
             coordinates = solver.solve_and_return_solution()
             if coordinates:
-                # Anticaptcha devuelve una lista de diccionarios con 'x' e 'y'
                 logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
                 return coordinates
             else:
@@ -310,20 +309,23 @@ async def get_hero_sms_code(request_id, timeout=120):
     return None
 
 # -------------------------------------------------------------------
-# CORREO TEMPORAL (MEJORADO)
+# CORREO TEMPORAL (MEJORADO CON MÚLTIPLES SERVICIOS)
 # -------------------------------------------------------------------
 async def generate_temp_email():
-    """Genera una dirección de correo temporal con reintentos y timeouts más largos."""
+    """Genera una dirección de correo temporal usando múltiples servicios con reintentos."""
     services = [
         ('mail.tm', 'https://api.mail.tm'),
         ('guerrillamail', 'https://api.guerrillamail.com/ajax.php'),
-        ('tempmail.plus', 'https://api.tempmail.plus/generate')
+        ('tempmail.plus', 'https://api.tempmail.plus/generate'),
+        ('mailinator', 'https://api.mailinator.com/v2/domains/public'),  # Mailinator requiere un dominio público
+        ('10minutemail', 'https://10minutemail.net/api/1.1/')  # 10MinuteMail
     ]
     for service_name, api_url in services:
         for attempt in range(3):
             try:
                 logger.debug(f"📧 Intentando {service_name} (intento {attempt+1}/3)...")
                 if service_name == 'mail.tm':
+                    # Obtener dominios
                     resp = requests.get(f"{api_url}/domains", timeout=30)
                     if resp.status_code != 200:
                         logger.warning(f"   mail.tm dominios respondió {resp.status_code}")
@@ -336,17 +338,29 @@ async def generate_temp_email():
                     domain = domains_list[0]['domain']
                     email = f"{uuid.uuid4().hex[:8]}@{domain}"
                     password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
+                    # Crear cuenta
                     acc_resp = requests.post(
                         f"{api_url}/accounts",
                         json={"address": email, "password": password},
                         timeout=30
                     )
                     if acc_resp.status_code == 201:
-                        token = acc_resp.json().get('token')
-                        logger.debug(f"✅ mail.tm: {email}, token={token[:10]}...")
-                        return email, token, service_name
+                        # Autenticarse para obtener el token
+                        token_resp = requests.post(
+                            f"{api_url}/token",
+                            json={"address": email, "password": password},
+                            timeout=30
+                        )
+                        if token_resp.status_code == 200:
+                            token_data = token_resp.json()
+                            token = token_data.get('token')
+                            logger.debug(f"✅ mail.tm: {email}, token obtenido")
+                            return email, token, service_name
+                        else:
+                            logger.warning(f"   mail.tm autenticación falló: {token_resp.status_code}")
                     else:
                         logger.warning(f"   mail.tm creación falló: {acc_resp.status_code}")
+
                 elif service_name == 'guerrillamail':
                     resp = requests.get(
                         f"{api_url}?f=get_email_address&ip=127.0.0.1",
@@ -361,6 +375,7 @@ async def generate_temp_email():
                             return email, token, service_name
                     else:
                         logger.warning(f"   guerrillamail respondió {resp.status_code}")
+
                 elif service_name == 'tempmail.plus':
                     resp = requests.get(api_url, timeout=30)
                     if resp.status_code == 200:
@@ -372,6 +387,28 @@ async def generate_temp_email():
                             return email, token, service_name
                     else:
                         logger.warning(f"   tempmail.plus respondió {resp.status_code}")
+
+                elif service_name == 'mailinator':
+                    # Mailinator tiene dominios públicos como 'mailinator.com', 'mailinator.org', etc.
+                    domain = 'mailinator.com'
+                    email = f"{uuid.uuid4().hex[:8]}@{domain}"
+                    # No necesitamos token, usaremos la API de inbox pública
+                    logger.debug(f"✅ mailinator: {email} (sin token)")
+                    return email, None, service_name
+
+                elif service_name == '10minutemail':
+                    # Crear una dirección de 10 minutos
+                    resp = requests.get(f"{api_url}new", timeout=30)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        email = data.get('email')
+                        token = data.get('token')  # Algunas versiones devuelven token
+                        if email:
+                            logger.debug(f"✅ 10minutemail: {email}")
+                            return email, token, service_name
+                    else:
+                        logger.warning(f"   10minutemail respondió {resp.status_code}")
+
             except requests.exceptions.Timeout:
                 logger.warning(f"⚠️ Timeout en {service_name}")
             except requests.exceptions.ConnectionError as e:
@@ -383,7 +420,10 @@ async def generate_temp_email():
     return None, None, None
 
 async def get_verification_code(email, token, service, max_attempts=20, wait_time=10):
-    """Obtiene el código de verificación del correo temporal."""
+    """
+    Obtiene el código de verificación del correo temporal.
+    Para mailinator, se usa la API pública de inbox.
+    """
     logger.debug(f"📧 Esperando código de verificación para {email} (servicio: {service})...")
     for attempt in range(max_attempts):
         try:
@@ -423,6 +463,37 @@ async def get_verification_code(email, token, service, max_attempts=20, wait_tim
                         code = get_str(text, 'Your verification code is ', '\n')
                         if code:
                             logger.debug(f"📧 Código obtenido de tempmail.plus: {code}")
+                            return code
+            elif service == 'mailinator':
+                # Extraer el nombre de usuario de la dirección (antes de @)
+                username = email.split('@')[0]
+                resp = requests.get(f"https://api.mailinator.com/v2/domains/public/inboxes/{username}", timeout=30)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    messages = data.get('msgs', [])
+                    for msg in messages:
+                        # Obtener el mensaje completo
+                        msg_id = msg.get('id')
+                        if msg_id:
+                            msg_resp = requests.get(f"https://api.mailinator.com/v2/domains/public/messages/{msg_id}", timeout=30)
+                            if msg_resp.status_code == 200:
+                                msg_data = msg_resp.json()
+                                part = msg_data.get('parts', [{}])[0]
+                                body = part.get('body', '')
+                                code = get_str(body, 'Your verification code is ', '\n')
+                                if code:
+                                    logger.debug(f"📧 Código obtenido de mailinator: {code}")
+                                    return code
+            elif service == '10minutemail' and token:
+                # 10MinuteMail tiene un endpoint para obtener correos
+                resp = requests.get(f"https://10minutemail.net/api/1.1/messages/{token}", timeout=30)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for mail in data.get('messages', []):
+                        text = mail.get('body_text', '') or mail.get('body_html', '')
+                        code = get_str(text, 'Your verification code is ', '\n')
+                        if code:
+                            logger.debug(f"📧 Código obtenido de 10minutemail: {code}")
                             return code
         except Exception as e:
             logger.debug(f"📧 Intento {attempt+1} falló: {e}")
