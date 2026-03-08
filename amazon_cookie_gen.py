@@ -1070,60 +1070,95 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
         content = await safe_get_content(page)
 
         # Detectar captcha de selección de imágenes (tipo "elige las sillas")
-        if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content:
+        if "Resuelve esta adivinanza" in content:
             logger.warning("⚠️ Captcha de selección de imágenes detectado")
             last_screenshot = await take_screenshot(page, "captcha_seleccion")
 
-            # Buscar la imagen del captcha
-            img_element = await page.query_selector('.captcha img, #captcha img, img[src*="captcha"]')
-            if not img_element:
-                # Intentar con cualquier imagen dentro de un contenedor sospechoso
-                container = await page.query_selector('div:has-text("Resuelve esta adivinanza") img')
-                if container:
-                    img_element = container
-            if img_element:
-                img_src = await img_element.get_attribute('src')
-                if img_src:
-                    img_data = requests.get(img_src, timeout=10).content
-                    img_path = 'temp_coordinates_captcha.jpg'
-                    with open(img_path, 'wb') as f:
-                        f.write(img_data)
-
-                    # Extraer texto de instrucción
-                    hint_text = "Haz clic en todas las sillas"  # Por defecto, se puede mejorar
-
-                    # Resolver coordenadas
-                    coordinates = solve_coordinates_captcha(img_path, hint_text)
-                    if coordinates:
-                        # Obtener el contenedor donde hacer clic (puede ser la misma imagen o un div)
-                        click_container = img_element
-                        box = await click_container.bounding_box()
-                        if box:
-                            for point in coordinates:
-                                abs_x = box['x'] + point['x']
-                                abs_y = box['y'] + point['y']
-                                await page.mouse.click(abs_x, abs_y)
-                                await asyncio.sleep(0.5)
-                            # Buscar botón de confirmar
-                            confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"]')
-                            if confirm_btn:
-                                await confirm_btn.click()
-                                logger.debug("✅ Clic en botón de confirmar")
-                                await page.wait_for_load_state('networkidle', timeout=30000)
-                                last_screenshot = await take_screenshot(page, "despues_captcha_coordenadas")
-                            else:
-                                logger.warning("⚠️ No se encontró botón de confirmar")
-                        else:
-                            logger.error("❌ No se pudo obtener bounding box del contenedor")
-                            return None, "No se pudo obtener posición del captcha", last_screenshot
-                    else:
-                        return None, "No se pudo resolver captcha de selección", last_screenshot
-                else:
-                    logger.error("❌ No se encontró URL de imagen en el captcha")
+            # Esperar a que la imagen del captcha esté visible
+            try:
+                # Intentar varios selectores para la imagen
+                img_selectors = [
+                    '.captcha img',
+                    '#captcha img',
+                    'img[src*="captcha"]',
+                    'div:has-text("Resuelve esta adivinanza") img',
+                    'div.a-row img'  # Un contenedor común en Amazon
+                ]
+                img_element = None
+                for selector in img_selectors:
+                    try:
+                        img_element = await page.wait_for_selector(selector, state='visible', timeout=5000)
+                        if img_element:
+                            logger.debug(f"   ✅ Imagen de captcha encontrada con selector: {selector}")
+                            break
+                    except:
+                        continue
+                if not img_element:
+                    # Último intento: buscar cualquier imagen en la página
+                    all_images = await page.query_selector_all('img')
+                    for img in all_images:
+                        if await img.is_visible():
+                            # Verificar si la imagen podría ser el captcha (por ejemplo, tamaño inusual)
+                            box = await img.bounding_box()
+                            if box and box['width'] > 100 and box['height'] > 50:  # heuristic
+                                img_element = img
+                                logger.debug("   ✅ Imagen de captcha encontrada por heurística")
+                                break
+                if not img_element:
+                    logger.error("❌ No se encontró elemento img en el captcha")
                     return None, "No se encontró imagen de captcha", last_screenshot
-            else:
-                logger.error("❌ No se encontró elemento img en el captcha")
-                return None, "No se encontró elemento img", last_screenshot
+
+                # Obtener el src de la imagen
+                img_src = await img_element.get_attribute('src')
+                if not img_src:
+                    # Esperar un poco más y reintentar
+                    await page.wait_for_timeout(2000)
+                    img_src = await img_element.get_attribute('src')
+                if not img_src:
+                    logger.error("❌ La imagen de captcha no tiene atributo src")
+                    return None, "La imagen de captcha no tiene src", last_screenshot
+
+                # Descargar la imagen
+                img_data = requests.get(img_src, timeout=10).content
+                img_path = 'temp_coordinates_captcha.jpg'
+                with open(img_path, 'wb') as f:
+                    f.write(img_data)
+
+                # Extraer texto de instrucción
+                hint_text = "Haz clic en todas las sillas"  # Por defecto, se puede mejorar
+
+                # Resolver coordenadas
+                coordinates = solve_coordinates_captcha(img_path, hint_text)
+                if not coordinates:
+                    return None, "No se pudo resolver captcha de selección", last_screenshot
+
+                # Obtener el contenedor donde hacer clic (puede ser la misma imagen o un div)
+                click_container = img_element
+                box = await click_container.bounding_box()
+                if not box:
+                    logger.error("❌ No se pudo obtener bounding box del contenedor")
+                    return None, "No se pudo obtener posición del captcha", last_screenshot
+
+                # Hacer clic en las coordenadas
+                for point in coordinates:
+                    abs_x = box['x'] + point['x']
+                    abs_y = box['y'] + point['y']
+                    await page.mouse.click(abs_x, abs_y)
+                    await asyncio.sleep(0.5)
+
+                # Buscar botón de confirmar
+                confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"]')
+                if confirm_btn:
+                    await confirm_btn.click()
+                    logger.debug("✅ Clic en botón de confirmar")
+                    await page.wait_for_load_state('networkidle', timeout=30000)
+                    last_screenshot = await take_screenshot(page, "despues_captcha_coordenadas")
+                else:
+                    logger.warning("⚠️ No se encontró botón de confirmar")
+
+            except Exception as e:
+                logger.error(f"❌ Error al procesar captcha de selección: {e}")
+                return None, f"Error procesando captcha: {e}", last_screenshot
 
             # Después de resolver, continuar con el flujo normal (re-obtener contenido)
             content = await safe_get_content(page)
