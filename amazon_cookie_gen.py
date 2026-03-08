@@ -1579,8 +1579,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-
-
             # ----- PASO 17: Verificar si se requiere agregar y verificar número de teléfono -----
             logger.debug("📱 [PASO 17] Verificando si se requiere agregar número de teléfono...")
             await page.wait_for_timeout(3000)
@@ -1597,57 +1595,14 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     logger.error("❌ No se encontró campo para número de teléfono")
                     raise Exception("No se encontró campo de teléfono en la página de verificación")
 
-                # --- Selección de país (mejorada) ---
-                # Primero intentamos con el select nativo (oculto)
-                country_select = await page.query_selector('select#cvf_phone_cc_native')
-                if country_select:
-                    # Mapa de códigos de país a códigos numéricos (ej. MX -> 52)
-                    country_code_num = {
-                        'MX': '52', 'US': '1', 'CA': '1', 'UK': '44', 'DE': '49',
-                        'FR': '33', 'IT': '39', 'ES': '34', 'JP': '81', 'AU': '61', 'IN': '91'
-                    }.get(country_code, '')
-                    if country_code_num:
-                        try:
-                            await country_select.select_option(value=country_code_num)
-                            logger.debug(f"   ✅ País seleccionado por valor numérico: {country_code_num}")
-                        except:
-                            try:
-                                await country_select.select_option(label=country_code)
-                                logger.debug(f"   ✅ País seleccionado por label: {country_code}")
-                            except:
-                                logger.warning(f"   ⚠️ No se pudo seleccionar país en el select nativo")
-                    else:
-                        logger.warning(f"   ⚠️ No se encontró código numérico para {country_code}")
-                else:
-                    logger.debug("   ℹ️ No se encontró select nativo, intentando con dropdown personalizado")
-                    # Hacer clic en el botón del dropdown
-                    dropdown_button = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
-                    if dropdown_button:
-                        await dropdown_button.click()
-                        await page.wait_for_timeout(1000)
-                        # Construir el texto de la opción (ej. "MX +52")
-                        country_code_num = {
-                            'MX': '52', 'US': '1', 'CA': '1', 'UK': '44', 'DE': '49',
-                            'FR': '33', 'IT': '39', 'ES': '34', 'JP': '81', 'AU': '61', 'IN': '91'
-                        }.get(country_code, '')
-                        option_text = f"{country_code} +{country_code_num}" if country_code_num else country_code
-                        # Buscar la opción por texto
-                        option = await page.query_selector(f'li:has-text("{option_text}")')
-                        if option:
-                            await option.click()
-                            logger.debug(f"   ✅ País seleccionado desde dropdown personalizado: {option_text}")
-                        else:
-                            logger.warning(f"   ⚠️ No se encontró la opción para {option_text}")
-                    else:
-                        logger.warning("   ⚠️ No se pudo encontrar el dropdown de país")
-
-                await asyncio.sleep(1)  # Esperar a que se aplique el cambio
-
                 # --- Obtener número de 5sim ---
                 phone_number = None
                 order_id = None
                 if FIVESIM_API_KEY:
-                    sms_info = await get_fivesim_number(country_code, product='amazon')
+                    # Nota: el producto puede ser 'amazon' o 'amazonmx' según el país
+                    # Para México usamos 'amazonmx', para otros países 'amazon' genérico
+                    product = 'amazonmx' if country_code == 'MX' else 'amazon'
+                    sms_info = await get_fivesim_number(country_code, product=product)
                     if sms_info:
                         full_phone, order_id = sms_info
                         logger.debug(f"   ✅ Número completo obtenido: {full_phone}")
@@ -1669,6 +1624,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         prefix_len = country_prefix_length.get(country_code, 0)
                         if prefix_len and len(full_phone) > prefix_len:
                             phone_number = full_phone[prefix_len:]
+                            # Asegurar que solo sean dígitos (eliminar cualquier carácter no numérico)
                             phone_number = re.sub(r'\D', '', phone_number)
                             logger.debug(f"   ✅ Número local (sin código): {phone_number}")
                         else:
@@ -1752,18 +1708,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         last_screenshot = await take_screenshot(page, "sin_codigo_ni_error")
             else:
                 logger.debug("   ✅ No se requiere agregar número de teléfono")
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
