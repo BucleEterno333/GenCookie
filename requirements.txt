@@ -4,6 +4,6 @@ requests==2.31.0
 playwright==1.40.0
 beautifulsoup4==4.12.2
 bs4==0.0.1
-2captcha-python==1.1.0
-anticaptchaofficial==1.0.4
+2captcha-python==1.2.0
+anticaptchaofficial==1.0.5
 gunicorn==21.2.

@@ -1110,18 +1110,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
             # ----- PASO 15: Detectar captcha después del envío -----
             logger.debug("🔍 [PASO 15] Verificando captcha después del envío...")
             await page.wait_for_timeout(5000)
@@ -1191,27 +1179,21 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 else:
                     logger.debug(f"   📝 Instrucción extraída: {hint_text}")
 
-                # Resolver coordenadas
+                # --- Resolver coordenadas con 2captcha o anticaptcha ---
                 coordinates = None
 
-                # Intentar con 2captcha usando el método genérico (más compatible)
+                # Intentar con 2captcha
                 if API_KEY_2CAPTCHA:
                     try:
-                        import twocaptcha
-                        solver = twocaptcha.TwoCaptcha(API_KEY_2CAPTCHA)
-                        # Enviar la imagen como base64
-                        with open(img_path, 'rb') as f:
-                            img_base64 = base64.b64encode(f.read()).decode('utf-8')
-                        # Crear tarea de coordenadas manualmente
-                        result = solver.solve_captcha({
-                            'method': 'post',
-                            'body': img_base64,
-                            'coordinatescaptcha': 1,
-                            'textinstructions': hint_text
-                        })
-                        if result and result.get('code'):
-                            # El resultado viene como "x1,y1;x2,y2"
+                        from twocaptcha import TwoCaptcha
+                        solver = TwoCaptcha(API_KEY_2CAPTCHA)
+                        # El método 'coordinates' recibe la ruta de la imagen y el texto de instrucción
+                        result = solver.coordinates(img_path, textinstructions=hint_text)
+                        if result and 'code' in result:
                             coord_str = result['code']
+                            # El formato suele ser "coordinates=x1,y1;x2,y2"
+                            if coord_str.startswith('coordinates='):
+                                coord_str = coord_str.replace('coordinates=', '')
                             points = []
                             for pair in coord_str.split(';'):
                                 if pair:
@@ -1219,12 +1201,10 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                     points.append({'x': int(x), 'y': int(y)})
                             coordinates = points
                             logger.debug(f"✅ 2captcha resolvió coordenadas: {coordinates}")
-                        else:
-                            logger.warning("⚠️ 2captcha no devolvió coordenadas")
                     except Exception as e:
                         logger.warning(f"⚠️ 2captcha falló: {e}")
 
-                # Si falló, intentar con anticaptcha (clase correcta)
+                # Si falló, intentar con anticaptcha (versión corregida)
                 if not coordinates and API_KEY_ANTICAPTCHA:
                     try:
                         from anticaptchaofficial.imagecoordinates import imagecoordinates
@@ -1243,7 +1223,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 if not coordinates:
                     return None, "No se pudo resolver captcha de coordenadas", last_screenshot
 
-                # Obtener el bounding box del elemento donde hacer clic
+                # --- Realizar los clics en las coordenadas ---
                 box = await click_element.bounding_box()
                 if not box:
                     logger.error("❌ No se pudo obtener bounding box del contenedor")
@@ -1255,7 +1235,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     await page.mouse.click(abs_x, abs_y)
                     await asyncio.sleep(0.5)
 
-                # Buscar botón de confirmar (varios posibles)
+                # Buscar botón de confirmar
                 confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"], button[type="submit"]')
                 if confirm_btn:
                     await confirm_btn.click()
@@ -1268,13 +1248,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 # Después de resolver, esperar un poco y actualizar contenido
                 await page.wait_for_timeout(5000)
                 content = await safe_get_content(page)
-
-
-
-
-
-
-
 
 
 
