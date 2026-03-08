@@ -313,10 +313,9 @@ FIVESIM_COUNTRY_MAP = {
     'AU': 'australia',
     'IN': 'india',
 }
-
-async def get_fivesim_number(country_code, product='amazonmx'):
+async def get_fivesim_number(country_code, product='amazon'):
     """
-    Compra un número de teléfono temporal en 5sim.
+    Compra un número de teléfono temporal en 5sim (usando GET).
     Retorna (phone_number, order_id) o None si falla.
     """
     if not FIVESIM_API_KEY:
@@ -335,7 +334,9 @@ async def get_fivesim_number(country_code, product='amazonmx'):
     }
     try:
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, timeout=30))
+        # Usar GET en lugar de POST
+        response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))
+        logger.debug(f"📡 5sim respuesta HTTP {response.status_code}")
         if response.status_code == 200:
             data = response.json()
             phone = data.get('phone')
@@ -351,7 +352,7 @@ async def get_fivesim_number(country_code, product='amazonmx'):
     except Exception as e:
         logger.warning(f"⚠️ Error comprando número 5sim: {e}")
         return None
-
+    
 async def get_fivesim_code(order_id, timeout=180):
     """
     Espera y obtiene el código SMS de 5sim.
@@ -1617,7 +1618,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 phone_number = None
                 order_id = None
                 if FIVESIM_API_KEY:
-                    sms_info = await get_fivesim_number(country_code, product='amazonmx')
+                    sms_info = await get_fivesim_number(country_code, product='amazon')
                     if sms_info:
                         full_phone, order_id = sms_info
                         logger.debug(f"   ✅ Número completo obtenido: {full_phone}")
