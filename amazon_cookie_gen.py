@@ -271,90 +271,93 @@ def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
 # -------------------------------------------------------------------
 # HERO SMS
 # -------------------------------------------------------------------
-async def get_hero_sms_number(country_code, service):
-    """Alquila un número de teléfono temporal de Hero SMS.
-    country_code: código de país según Hero SMS (ej. '54' para México)
-    service: código de servicio según Hero SMS (ej. 'am' para Amazon)
+# Mapeo de códigos de país (tuyos) a códigos numéricos de Hero SMS
+HERO_COUNTRY_CODES = {
+    'MX': 54,   # México
+    'US': 187,    # Estados Unidos (verificar)
+    'CA': 36,    # Canadá
+    'UK': 16,   # Reino Unido
+    'DE': 43,   # Alemania
+    'FR': 78,   # Francia
+    'IT': 86,   # Italia
+    'ES': 56,   # España
+    'JP': 182,   # Japón
+    'AU': 175,   # Australia
+    'IN': 22,   # India
+}
+
+async def get_hero_sms_number(country_code, service='am'):
+    """
+    Alquila un número de teléfono temporal de Hero SMS usando la API compatible con SMS-Activate.
+    Retorna (phone_number, activation_id) o None si falla.
     """
     if not HERO_SMS_API_KEY:
         logger.warning("⚠️ No hay API key de Hero SMS")
         return None
-    url = "https://hero-sms.com/api/v1/numbers/rent"
-    headers = {"Authorization": f"Bearer {HERO_SMS_API_KEY}"}
-    # Mapeo de códigos de país a códigos de Hero SMS (usualmente códigos de dos letras en minúsculas)
-    payload = {
-        "country": country_code,
-        "operator": "any",
-        "service": service
+
+    hero_country = HERO_COUNTRY_CODES.get(country_code)
+    if not hero_country:
+        logger.error(f"❌ No hay código Hero SMS para el país {country_code}")
+        return None
+
+    url = "https://hero-sms.com/stubs/handler_api.php"
+    params = {
+        'api_key': HERO_SMS_API_KEY,
+        'action': 'getNumberV2',
+        'service': service,      # 'am' para Amazon
+        'country': hero_country,
+        'operator': 'any'        # opcional
     }
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response = requests.get(url, params=params, timeout=30)
         if response.status_code == 200:
             data = response.json()
-            phone = data.get('phone_number')
-            request_id = data.get('request_id')
-            if phone and request_id:
-                logger.debug(f"📱 Número Hero SMS alquilado: {phone} (request_id: {request_id})")
-                return phone, request_id
-        logger.warning(f"⚠️ Respuesta inesperada de Hero SMS: {response.text}")
-        return None
-    except Exception as e:
-        logger.warning(f"⚠️ Error alquilando número Hero SMS: {e}")
-        return None
-async def get_hero_sms_number(country_code='mx', service='amazon'):
-    """Alquila un número de teléfono temporal de Hero SMS."""
-    if not HERO_SMS_API_KEY:
-        logger.warning("⚠️ No hay API key de Hero SMS")
-        return None
-    url = "https://hero-sms.com/api/v1/numbers/rent"
-    headers = {"Authorization": f"Bearer {HERO_SMS_API_KEY}"}
-    # Mapeo de códigos de país a códigos de Hero SMS (usualmente códigos de dos letras en minúsculas)
-    country_map = {'MX': 'mx', 'US': 'us', 'CA': 'ca', 'UK': 'gb', 'DE': 'de', 'FR': 'fr', 'IT': 'it', 'ES': 'es', 'JP': 'jp', 'AU': 'au', 'IN': 'in'}
-    hero_country = country_map.get(country_code, 'us')
-    payload = {
-        "country": hero_country,
-        "operator": "any",
-        "service": service
-    }
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            phone = data.get('phone_number')
-            request_id = data.get('request_id')
-            if phone and request_id:
-                logger.debug(f"📱 Número Hero SMS alquilado: {phone} (request_id: {request_id})")
-                return phone, request_id
-        logger.warning(f"⚠️ Respuesta inesperada de Hero SMS: {response.text}")
+            # La respuesta exitosa contiene activationId y phoneNumber
+            if 'activationId' in data and 'phoneNumber' in data:
+                phone = data['phoneNumber']
+                activation_id = data['activationId']
+                logger.debug(f"📱 Número Hero SMS alquilado: {phone} (activationId: {activation_id})")
+                return phone, activation_id
+            else:
+                logger.warning(f"⚠️ Respuesta inesperada de Hero SMS: {data}")
+        else:
+            logger.warning(f"⚠️ Error HTTP {response.status_code} de Hero SMS: {response.text}")
         return None
     except Exception as e:
         logger.warning(f"⚠️ Error alquilando número Hero SMS: {e}")
         return None
 
-async def get_hero_sms_code(request_id, timeout=180):
-    """Espera y obtiene el código SMS de Hero SMS."""
-    url = f"https://hero-sms.com/api/v1/numbers/wait/{request_id}"
-    headers = {"Authorization": f"Bearer {HERO_SMS_API_KEY}"}
+async def get_hero_sms_code(activation_id, timeout=180):
+    """
+    Espera y obtiene el código SMS de Hero SMS usando getStatusV2.
+    Retorna el código como string o None si no se obtiene.
+    """
+    url = "https://hero-sms.com/stubs/handler_api.php"
+    params = {
+        'api_key': HERO_SMS_API_KEY,
+        'action': 'getStatusV2',
+        'id': activation_id
+    }
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            response = requests.get(url, headers=headers, timeout=30)
+            response = requests.get(url, params=params, timeout=30)
             if response.status_code == 200:
                 data = response.json()
-                if data.get('status') == 'received':
-                    message = data.get('message', '')
-                    # Buscar código de 5-6 dígitos
-                    code_match = re.search(r'\b(\d{5,6})\b', message)
-                    if code_match:
-                        code = code_match.group(1)
-                        logger.debug(f"📱 Código SMS recibido: {code}")
-                        return code
+                # Si hay código, está en data['sms']['code']
+                if data.get('sms') and data['sms'].get('code'):
+                    code = data['sms']['code']
+                    logger.debug(f"📱 Código SMS recibido: {code}")
+                    return code
+                # Si no, puede que aún no haya llegado
             await asyncio.sleep(5)
         except Exception as e:
             logger.debug(f"📱 Error esperando código: {e}")
             await asyncio.sleep(5)
     logger.error("❌ Tiempo de espera agotado para código SMS")
     return None
+
+
 
 # -------------------------------------------------------------------
 # CORREO TEMPORAL (MEJORADO CON MÚLTIPLES SERVICIOS)
@@ -1523,7 +1526,13 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-            # ----- PASO 17: Verificar si se requiere agregar y verificar número de teléfono -----
+
+
+
+
+
+
+        # ----- PASO 17: Verificar si se requiere agregar y verificar número de teléfono -----
             logger.debug("📱 [PASO 17] Verificando si se requiere agregar número de teléfono...")
             await page.wait_for_timeout(3000)
             content = await safe_get_content(page)
@@ -1542,42 +1551,33 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 # Seleccionar país (si hay dropdown)
                 country_select = await page.query_selector('select[name*="country"], select[id*="country"]')
                 if country_select:
-                    # Buscar opción que coincida con el código del país (ej. MX)
-                    # El valor de la opción puede ser el código de país (MX, US, etc.) o el código de marcación (+52)
-                    # Intentamos seleccionar por valor visible o por atributo
+                    # Intentar seleccionar el país por valor o texto
                     option_value = country_code  # Ej: 'MX'
                     try:
                         await country_select.select_option(value=option_value)
                         logger.debug(f"   ✅ País seleccionado por valor: {option_value}")
                     except:
-                        # Si no funciona, intentar por texto visible
-                        await country_select.select_option(label=option_value)
-                        logger.debug(f"   ✅ País seleccionado por texto: {option_value}")
+                        try:
+                            await country_select.select_option(label=option_value)
+                            logger.debug(f"   ✅ País seleccionado por texto: {option_value}")
+                        except Exception as e:
+                            logger.warning(f"   ⚠️ No se pudo seleccionar país: {e}")
                     await asyncio.sleep(1)
 
                 # Obtener número de teléfono real de Hero SMS
                 phone_number = None
-                request_id = None
+                activation_id = None
                 if HERO_SMS_API_KEY:
-                    hero_country_map = {
-                        'MX': '54',
-                        'US': '187',  
-                        'CA': '36',
-                        'UK': '16',
-                        # Agrega más según necesites
-                    }
-                    hero_country = hero_country_map.get(country_code)
-                    if not hero_country:
-                        logger.error(f"❌ No hay mapeo de país para {country_code} en Hero SMS")
-                        raise Exception(f"País {country_code} no soportado por Hero SMS")
-                    
-                    service_code = 'am'
-                    sms_info = await get_hero_sms_number(hero_country, service_code)
+                    sms_info = await get_hero_sms_number(country_code, service='am')
                     if sms_info:
-                        phone_number, request_id = sms_info
+                        phone_number, activation_id = sms_info
                         logger.debug(f"   ✅ Número real obtenido: {phone_number}")
                     else:
-                        logger.warning("   ⚠️ No se pudo obtener número de Hero SMS")
+                        logger.error("❌ No se pudo obtener número de Hero SMS")
+                        raise Exception("No se pudo obtener número de teléfono real para verificación SMS")
+                else:
+                    logger.error("❌ No hay API key de Hero SMS configurada")
+                    raise Exception("Se requiere número de teléfono pero no hay API de SMS")
 
                 # Ingresar número
                 await phone_input.fill(phone_number)
@@ -1598,13 +1598,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 code_input = await page.query_selector('input[name="code"], input[type="text"]')
                 if code_input:
                     logger.debug("   📱 Página de ingreso de código SMS detectada")
-                    sms_code = None
-                    if request_id:
-                        sms_code = await get_hero_sms_code(request_id)
-                    else:
-                        logger.error("   ❌ No hay request_id, no se puede obtener código SMS")
-                        raise Exception("No se pudo obtener código de verificación SMS (falta request_id)")
-
+                    sms_code = await get_hero_sms_code(activation_id)
                     if sms_code:
                         await code_input.fill(sms_code)
                         logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
@@ -1616,18 +1610,12 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         else:
                             logger.warning("   ⚠️ No se encontró botón de verificar")
                     else:
-                        logger.error("   ❌ No se pudo obtener código SMS")
+                        logger.error("❌ No se pudo obtener código SMS")
                         raise Exception("No se pudo obtener código de verificación SMS")
                 else:
                     logger.warning("   ⚠️ No se encontró campo para código SMS, puede que no se requiera")
             else:
                 logger.debug("   ✅ No se requiere agregar número de teléfono")
-
-
-
-
-
-
 
 
 
