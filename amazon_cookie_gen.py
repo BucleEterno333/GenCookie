@@ -43,6 +43,8 @@ HERO_SMS_OPERATOR = os.getenv('HERO_SMS_OPERATOR', 'any')
 API_HOST = os.getenv('API_HOST', '0.0.0.0')
 API_PORT = int(os.getenv('API_PORT', '8080'))
 API_KEY = os.getenv('API_KEY', '')
+FIVESIM_API_KEY = os.getenv('FIVESIM_API_KEY', '')
+
 
 # Proxy
 PROXY_AUTH = None
@@ -267,97 +269,105 @@ def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
     if not solution:
         logger.error("❌ No se obtuvo solución de captcha")
     return solution
+# -------------------------------------------------------------------
+# 5SIM SMS
+# -------------------------------------------------------------------
+FIVESIM_BASE_URL = "https://5sim.net/v1"
 
-# -------------------------------------------------------------------
-# HERO SMS
-# -------------------------------------------------------------------
-# Mapeo de códigos de país (tuyos) a códigos numéricos de Hero SMS
-HERO_COUNTRY_CODES = {
-    'MX': 54,   # México
-    'US': 187,    # Estados Unidos (verificar)
-    'CA': 36,    # Canadá
-    'UK': 16,   # Reino Unido
-    'DE': 43,   # Alemania
-    'FR': 78,   # Francia
-    'IT': 86,   # Italia
-    'ES': 56,   # España
-    'JP': 182,   # Japón
-    'AU': 175,   # Australia
-    'IN': 22,   # India
+# Mapeo de códigos de país (tuyos) a los códigos de 5sim
+FIVESIM_COUNTRY_MAP = {
+    'MX': 'mexico',
+    'US': 'usa',
+    'CA': 'canada',
+    'UK': 'uk',
+    'DE': 'germany',
+    'FR': 'france',
+    'IT': 'italy',
+    'ES': 'spain',
+    'JP': 'japan',
+    'AU': 'australia',
+    'IN': 'india',
 }
 
-async def get_hero_sms_number(country_code, service='am'):
+async def get_fivesim_number(country_code, product='amazon'):
     """
-    Alquila un número de teléfono temporal de Hero SMS usando la API compatible con SMS-Activate.
-    Retorna (phone_number, activation_id) o None si falla.
+    Compra un número de teléfono temporal en 5sim.
+    Retorna (phone_number, order_id) o None si falla.
     """
-    if not HERO_SMS_API_KEY:
-        logger.warning("⚠️ No hay API key de Hero SMS")
+    if not FIVESIM_API_KEY:
+        logger.warning("⚠️ No hay API key de 5sim")
         return None
 
-    hero_country = HERO_COUNTRY_CODES.get(country_code)
-    if not hero_country:
-        logger.error(f"❌ No hay código Hero SMS para el país {country_code}")
+    country = FIVESIM_COUNTRY_MAP.get(country_code)
+    if not country:
+        logger.error(f"❌ No hay mapeo de país 5sim para {country_code}")
         return None
 
-    url = "https://hero-sms.com/stubs/handler_api.php"
-    params = {
-        'api_key': HERO_SMS_API_KEY,
-        'action': 'getNumberV2',
-        'service': service,      # 'am' para Amazon
-        'country': hero_country,
-        'operator': 'any'        # opcional
+    url = f"{FIVESIM_BASE_URL}/user/buy/activation/{country}/any/{product}"
+    headers = {
+        'Authorization': f'Bearer {FIVESIM_API_KEY}',
+        'Accept': 'application/json'
     }
     try:
-        response = requests.get(url, params=params, timeout=30)
+        # Usar asyncio.to_thread para no bloquear el event loop
+        response = await asyncio.to_thread(requests.post, url, headers=headers, timeout=30)
         if response.status_code == 200:
             data = response.json()
-            # La respuesta exitosa contiene activationId y phoneNumber
-            if 'activationId' in data and 'phoneNumber' in data:
-                phone = data['phoneNumber']
-                activation_id = data['activationId']
-                logger.debug(f"📱 Número Hero SMS alquilado: {phone} (activationId: {activation_id})")
-                return phone, activation_id
+            phone = data.get('phone')
+            order_id = data.get('id')
+            if phone and order_id:
+                logger.debug(f"📱 Número 5sim comprado: {phone} (order_id: {order_id})")
+                return phone, order_id
             else:
-                logger.warning(f"⚠️ Respuesta inesperada de Hero SMS: {data}")
+                logger.warning(f"⚠️ Respuesta inesperada de 5sim: {data}")
         else:
-            logger.warning(f"⚠️ Error HTTP {response.status_code} de Hero SMS: {response.text}")
+            logger.warning(f"⚠️ Error HTTP {response.status_code} de 5sim: {response.text}")
         return None
     except Exception as e:
-        logger.warning(f"⚠️ Error alquilando número Hero SMS: {e}")
+        logger.warning(f"⚠️ Error comprando número 5sim: {e}")
         return None
 
-async def get_hero_sms_code(activation_id, timeout=180):
+async def get_fivesim_code(order_id, timeout=180):
     """
-    Espera y obtiene el código SMS de Hero SMS usando getStatusV2.
+    Espera y obtiene el código SMS de 5sim.
     Retorna el código como string o None si no se obtiene.
     """
-    url = "https://hero-sms.com/stubs/handler_api.php"
-    params = {
-        'api_key': HERO_SMS_API_KEY,
-        'action': 'getStatusV2',
-        'id': activation_id
+    url = f"{FIVESIM_BASE_URL}/user/check/{order_id}"
+    headers = {
+        'Authorization': f'Bearer {FIVESIM_API_KEY}',
+        'Accept': 'application/json'
     }
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            response = requests.get(url, params=params, timeout=30)
+            response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=30)
             if response.status_code == 200:
                 data = response.json()
-                # Si hay código, está en data['sms']['code']
-                if data.get('sms') and data['sms'].get('code'):
-                    code = data['sms']['code']
-                    logger.debug(f"📱 Código SMS recibido: {code}")
-                    return code
-                # Si no, puede que aún no haya llegado
+                status = data.get('status')
+                if status == 'RECEIVED':
+                    sms = data.get('sms', [])
+                    if sms:
+                        # El código puede estar en el campo 'code' o dentro del texto
+                        code = sms[0].get('code')
+                        if not code:
+                            text = sms[0].get('text', '')
+                            import re
+                            codes = re.findall(r'\b(\d{5,6})\b', text)
+                            if codes:
+                                code = codes[0]
+                        if code:
+                            logger.debug(f"📱 Código SMS recibido de 5sim: {code}")
+                            return code
+                elif status == 'PENDING':
+                    pass
+                else:
+                    logger.warning(f"⚠️ Estado inesperado de 5sim: {status}")
             await asyncio.sleep(5)
         except Exception as e:
             logger.debug(f"📱 Error esperando código: {e}")
             await asyncio.sleep(5)
     logger.error("❌ Tiempo de espera agotado para código SMS")
     return None
-
-
 
 # -------------------------------------------------------------------
 # CORREO TEMPORAL (MEJORADO CON MÚLTIPLES SERVICIOS)
@@ -1564,13 +1574,13 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             logger.warning(f"   ⚠️ No se pudo seleccionar país: {e}")
                     await asyncio.sleep(1)
 
-                # Obtener número de teléfono real de Hero SMS
+                # Obtener número de teléfono real de 5sim
                 phone_number = None
-                activation_id = None
-                if HERO_SMS_API_KEY:
-                    sms_info = await get_hero_sms_number(country_code, service='am')
+                order_id = None
+                if FIVESIM_API_KEY:
+                    sms_info = await get_fivesim_number(country_code, product='amazon')
                     if sms_info:
-                        full_phone, activation_id = sms_info
+                        full_phone, order_id = sms_info
                         logger.debug(f"   ✅ Número completo obtenido: {full_phone}")
                         
                         # Definir cuántos dígitos quitar según el código de país
@@ -1589,20 +1599,17 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         }
                         prefix_len = country_prefix_length.get(country_code, 0)
                         if prefix_len and len(full_phone) > prefix_len:
-                            # Extraer solo los dígitos locales
                             phone_number = full_phone[prefix_len:]
-                            # Asegurar que solo sean dígitos (por si acaso)
                             phone_number = re.sub(r'\D', '', phone_number)
                             logger.debug(f"   ✅ Número local (sin código): {phone_number}")
                         else:
-                            # Si no se puede quitar, usar el original (puede fallar)
                             phone_number = full_phone
                             logger.warning(f"   ⚠️ No se pudo quitar el código de país, se usará el número completo")
                     else:
-                        logger.error("❌ No se pudo obtener número de Hero SMS")
+                        logger.error("❌ No se pudo obtener número de 5sim")
                         raise Exception("No se pudo obtener número de teléfono real para verificación SMS")
                 else:
-                    logger.error("❌ No hay API key de Hero SMS configurada")
+                    logger.error("❌ No hay API key de 5sim configurada")
                     raise Exception("Se requiere número de teléfono pero no hay API de SMS")
 
                 # Ingresar número
@@ -1628,7 +1635,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 # Esperar hasta 30 segundos a que aparezca el campo de código
                 code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
                 logger.debug("   📱 Página de ingreso de código SMS detectada")
-                sms_code = await get_hero_sms_code(activation_id)
+                sms_code = await get_fivesim_code(order_id)
                 if sms_code:
                     await code_input.fill(sms_code)
                     logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
@@ -1864,6 +1871,7 @@ def diagnostic():
             'has_2captcha': bool(API_KEY_2CAPTCHA),
             'has_anticaptcha': bool(API_KEY_ANTICAPTCHA),
             'hero_sms': bool(HERO_SMS_API_KEY),
+            'fivesim': bool(FIVESIM_API_KEY),
             'supported_countries': list(base_urls.keys())
         }
     })
