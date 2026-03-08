@@ -291,15 +291,11 @@ def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
 
 
 
-
-
-
 # -------------------------------------------------------------------
-# 5SIM SMS
+# 5SIM SMS (versión mejorada con manejo de errores)
 # -------------------------------------------------------------------
 FIVESIM_BASE_URL = "https://5sim.net/v1"
 
-# Mapeo de códigos de país (tuyos) a los códigos de 5sim
 FIVESIM_COUNTRY_MAP = {
     'MX': 'mexico',
     'US': 'usa',
@@ -313,6 +309,7 @@ FIVESIM_COUNTRY_MAP = {
     'AU': 'australia',
     'IN': 'india',
 }
+
 async def get_fivesim_number(country_code, product='amazon'):
     """
     Compra un número de teléfono temporal en 5sim (usando GET).
@@ -334,25 +331,28 @@ async def get_fivesim_number(country_code, product='amazon'):
     }
     try:
         loop = asyncio.get_running_loop()
-        # Usar GET en lugar de POST
         response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))
         logger.debug(f"📡 5sim respuesta HTTP {response.status_code}")
         if response.status_code == 200:
-            data = response.json()
-            phone = data.get('phone')
-            order_id = data.get('id')
-            if phone and order_id:
-                logger.debug(f"📱 Número 5sim comprado: {phone} (order_id: {order_id})")
-                return phone, order_id
-            else:
-                logger.warning(f"⚠️ Respuesta inesperada de 5sim: {data}")
+            # Intentar parsear JSON
+            try:
+                data = response.json()
+                phone = data.get('phone')
+                order_id = data.get('id')
+                if phone and order_id:
+                    logger.debug(f"📱 Número 5sim comprado: {phone} (order_id: {order_id})")
+                    return phone, order_id
+                else:
+                    logger.warning(f"⚠️ Respuesta inesperada de 5sim (faltan campos): {data}")
+            except ValueError as e:
+                logger.warning(f"⚠️ Respuesta no JSON de 5sim: {response.text[:200]}")
         else:
-            logger.warning(f"⚠️ Error HTTP {response.status_code} de 5sim: {response.text}")
+            logger.warning(f"⚠️ Error HTTP {response.status_code} de 5sim: {response.text[:200]}")
         return None
     except Exception as e:
         logger.warning(f"⚠️ Error comprando número 5sim: {e}")
         return None
-    
+
 async def get_fivesim_code(order_id, timeout=180):
     """
     Espera y obtiene el código SMS de 5sim.
@@ -369,7 +369,12 @@ async def get_fivesim_code(order_id, timeout=180):
         try:
             response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))
             if response.status_code == 200:
-                data = response.json()
+                try:
+                    data = response.json()
+                except ValueError:
+                    logger.warning(f"⚠️ Respuesta no JSON de 5sim: {response.text[:200]}")
+                    await asyncio.sleep(5)
+                    continue
                 status = data.get('status')
                 if status == 'RECEIVED':
                     sms = data.get('sms', [])
@@ -394,15 +399,6 @@ async def get_fivesim_code(order_id, timeout=180):
             await asyncio.sleep(5)
     logger.error("❌ Tiempo de espera agotado para código SMS")
     return None
-
-
-
-
-
-
-
-
-
 
 
 
@@ -1578,7 +1574,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-
             # ----- PASO 17: Verificar si se requiere agregar y verificar número de teléfono -----
             logger.debug("📱 [PASO 17] Verificando si se requiere agregar número de teléfono...")
             await page.wait_for_timeout(3000)
@@ -1599,8 +1594,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 phone_number = None
                 order_id = None
                 if FIVESIM_API_KEY:
-                    # Nota: el producto puede ser 'amazon' o 'amazonmx' según el país
-                    # Para México usamos 'amazonmx', para otros países 'amazon' genérico
                     sms_info = await get_fivesim_number(country_code, product='amazon')
                     if sms_info:
                         full_phone, order_id = sms_info
@@ -1622,8 +1615,9 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         }
                         prefix_len = country_prefix_length.get(country_code, 0)
                         if prefix_len and len(full_phone) > prefix_len:
+                            # Extraer solo los dígitos locales (sin el código de país)
                             phone_number = full_phone[prefix_len:]
-                            # Asegurar que solo sean dígitos (eliminar cualquier carácter no numérico)
+                            # Asegurar que solo sean dígitos
                             phone_number = re.sub(r'\D', '', phone_number)
                             logger.debug(f"   ✅ Número local (sin código): {phone_number}")
                         else:
@@ -1707,6 +1701,38 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         last_screenshot = await take_screenshot(page, "sin_codigo_ni_error")
             else:
                 logger.debug("   ✅ No se requiere agregar número de teléfono")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
