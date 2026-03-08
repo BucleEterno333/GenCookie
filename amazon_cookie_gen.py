@@ -892,7 +892,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 raise Exception("No se encontró enlace de inicio de sesión")
 
             await login_link.click()
-            await page.wait_for_load_state('networkidle', timeout=15000)
+            await page.wait_for_load_state('networkidle', timeout=20000)
             await page.wait_for_timeout(2000)
             logger.debug(f"   📍 URL después de login: {page.url}")
             last_screenshot = await take_screenshot(page, "after_login_click")
