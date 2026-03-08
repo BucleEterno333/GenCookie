@@ -967,14 +967,8 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 await page.wait_for_timeout(2000)
                 last_screenshot = await take_screenshot(page, "despues_proceder")
             else:
-                logger.debug("   ℹ️ No se detectó página intermedia, continuando")
-                try:
-                    await page.wait_for_selector('#ap_customer_name', state='visible', timeout=10000)
-                    logger.debug("   ✅ Campo de nombre visible directamente")
-                except:
-                    logger.warning("   ⚠️ No se encontró campo de nombre, puede que la página sea diferente")
-                    # Si no hay campo de nombre, puede ser que el formulario ya no tenga ese campo o estemos en otra página
-                    # No lanzamos excepción aquí, dejamos que continue pero estaremos atentos a errores posteriores
+                raise Exception("No se pudo acceder al formulario de registro después de Continuar, por msj de Lo sentimos")
+
 
             # ----- PASO 13: Llenar formulario de registro -----
             logger.debug("📝 [PASO 13] Llenando formulario completo...")
@@ -1205,11 +1199,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     div = soup.find('div', string=re.compile(r'Elija todo|Resuelve esta adivinanza'))
                     if div:
                         hint_text = div.get_text(strip=True)
-                if not hint_text:
-                    # Último recurso: usar regex sobre todo el HTML
-                    match = re.search(r'Elija todo (.*?)\.', content)
-                    if match:
-                        hint_text = match.group(0)
                 if not hint_text:
                     hint_text = "Haz clic en todas las imágenes que correspondan"
                     logger.debug("   ℹ️ No se pudo extraer instrucción, usando texto por defecto")
