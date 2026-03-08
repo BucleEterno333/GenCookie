@@ -269,6 +269,31 @@ def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
     if not solution:
         logger.error("❌ No se obtuvo solución de captcha")
     return solution
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # -------------------------------------------------------------------
 # 5SIM SMS
 # -------------------------------------------------------------------
@@ -289,7 +314,7 @@ FIVESIM_COUNTRY_MAP = {
     'IN': 'india',
 }
 
-async def get_fivesim_number(country_code, product='amazon'):
+async def get_fivesim_number(country_code, product='amazonmx'):
     """
     Compra un número de teléfono temporal en 5sim.
     Retorna (phone_number, order_id) o None si falla.
@@ -309,8 +334,8 @@ async def get_fivesim_number(country_code, product='amazon'):
         'Accept': 'application/json'
     }
     try:
-        # Usar asyncio.to_thread para no bloquear el event loop
-        response = await asyncio.to_thread(requests.post, url, headers=headers, timeout=30)
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, timeout=30))
         if response.status_code == 200:
             data = response.json()
             phone = data.get('phone')
@@ -338,16 +363,16 @@ async def get_fivesim_code(order_id, timeout=180):
         'Accept': 'application/json'
     }
     start_time = time.time()
+    loop = asyncio.get_running_loop()
     while time.time() - start_time < timeout:
         try:
-            response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=30)
+            response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))
             if response.status_code == 200:
                 data = response.json()
                 status = data.get('status')
                 if status == 'RECEIVED':
                     sms = data.get('sms', [])
                     if sms:
-                        # El código puede estar en el campo 'code' o dentro del texto
                         code = sms[0].get('code')
                         if not code:
                             text = sms[0].get('text', '')
@@ -368,6 +393,20 @@ async def get_fivesim_code(order_id, timeout=180):
             await asyncio.sleep(5)
     logger.error("❌ Tiempo de espera agotado para código SMS")
     return None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # -------------------------------------------------------------------
 # CORREO TEMPORAL (MEJORADO CON MÚLTIPLES SERVICIOS)
@@ -1574,11 +1613,11 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             logger.warning(f"   ⚠️ No se pudo seleccionar país: {e}")
                     await asyncio.sleep(1)
 
-                # Obtener número de teléfono real de 5sim
+                                # Obtener número de teléfono real de 5sim
                 phone_number = None
                 order_id = None
                 if FIVESIM_API_KEY:
-                    sms_info = await get_fivesim_number(country_code, product='amazon')
+                    sms_info = await get_fivesim_number(country_code, product='amazonmx')
                     if sms_info:
                         full_phone, order_id = sms_info
                         logger.debug(f"   ✅ Número completo obtenido: {full_phone}")
