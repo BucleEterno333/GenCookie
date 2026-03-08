@@ -1120,12 +1120,15 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-
-
             # ----- PASO 15: Detectar captcha después del envío -----
             logger.debug("🔍 [PASO 15] Verificando captcha después del envío...")
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
+
+            # Detectar bloqueo por JavaScript deshabilitado
+            if "JavaScript se ha deshabilitado" in content:
+                logger.warning("⚠️ Detectado bloqueo por JavaScript deshabilitado, reintentando...")
+                raise Exception("JavaScript deshabilitado - bloqueo detectado")
 
             # Detectar captcha de selección de imágenes (tipo "elige las sillas")
             if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content or "Elija todo" in content:
@@ -1208,7 +1211,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 # --- Resolver coordenadas usando API HTTP directamente ---
                 coordinates = None
 
-                # Función para llamar a 2captcha API
+                # Función para llamar a 2captcha API (maneja tanto string como lista)
                 def solve_2captcha_coordinates(image_path, hint):
                     import base64
                     with open(image_path, 'rb') as f:
@@ -1229,39 +1232,50 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             if result.get('status') == 1:
                                 captcha_id = result['request']
                                 logger.debug(f"   2captcha ID: {captcha_id}, esperando resultado...")
-                                time.sleep(15)  # espera inicial
-                                for _ in range(30):  # hasta 30 intentos
+                                start_time = time.time()
+                                while time.time() - start_time < 120:  # timeout 2 minutos
+                                    time.sleep(5)
                                     res_url = f"http://2captcha.com/res.php?key={API_KEY_2CAPTCHA}&action=get&id={captcha_id}&json=1"
                                     res_resp = requests.get(res_url, timeout=10)
                                     if res_resp.status_code == 200:
                                         try:
                                             res_data = res_resp.json()
                                         except:
-                                            logger.warning("   Respuesta no JSON de 2captcha")
-                                            time.sleep(5)
                                             continue
                                         if res_data.get('status') == 1:
-                                            coord_str = res_data['request']
-                                            if isinstance(coord_str, str):
+                                            coord_data = res_data['request']
+                                            # Puede ser string "x1,y1;x2,y2" o lista directa de puntos
+                                            if isinstance(coord_data, str):
                                                 points = []
-                                                for pair in coord_str.split(';'):
+                                                for pair in coord_data.split(';'):
                                                     if pair:
                                                         x, y = pair.split(',')
                                                         points.append({'x': int(x), 'y': int(y)})
                                                 return points
+                                            elif isinstance(coord_data, list):
+                                                # Asumimos que es una lista de listas o diccionarios
+                                                points = []
+                                                for item in coord_data:
+                                                    if isinstance(item, dict) and 'x' in item and 'y' in item:
+                                                        points.append(item)
+                                                    elif isinstance(item, (list, tuple)) and len(item) == 2:
+                                                        points.append({'x': item[0], 'y': item[1]})
+                                                if points:
+                                                    return points
+                                                else:
+                                                    logger.warning("   Formato de lista de coordenadas no reconocido")
                                             else:
-                                                logger.warning(f"   Coordenadas en formato inesperado: {type(coord_str)}")
+                                                logger.warning(f"   Formato inesperado: {type(coord_data)}")
                                         elif res_data.get('request') == 'CAPCHA_NOT_READY':
-                                            time.sleep(5)
                                             continue
                                         else:
                                             break
-                        return None
+                            return None
                     except Exception as e:
                         logger.warning(f"Error en 2captcha HTTP: {e}")
                         return None
 
-                # Función para llamar a anticaptcha API
+                # Función para llamar a anticaptcha API (maneja formato de coordenadas)
                 def solve_anticaptcha_coordinates(image_path, hint):
                     import base64
                     with open(image_path, 'rb') as f:
@@ -1282,27 +1296,38 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             if result.get('errorId') == 0:
                                 task_id = result['taskId']
                                 logger.debug(f"   anticaptcha task ID: {task_id}, esperando resultado...")
-                                time.sleep(5)
-                                for _ in range(60):  # hasta 60 intentos (5 minutos)
+                                start_time = time.time()
+                                while time.time() - start_time < 300:  # timeout 5 minutos
+                                    time.sleep(5)
                                     res_url = "https://api.anti-captcha.com/getTaskResult"
                                     res_data = {"clientKey": API_KEY_ANTICAPTCHA, "taskId": task_id}
                                     res_resp = requests.post(res_url, json=res_data, timeout=10)
                                     if res_resp.status_code == 200:
                                         res_result = res_resp.json()
                                         if res_result.get('status') == 'ready':
-                                            coords = res_result['solution'].get('coordinates')
+                                            solution = res_result.get('solution', {})
+                                            coords = solution.get('coordinates')
                                             if coords:
-                                                points = [{'x': c['x'], 'y': c['y']} for c in coords]
-                                                return points
+                                                # Puede ser lista de diccionarios o lista de listas
+                                                points = []
+                                                for item in coords:
+                                                    if isinstance(item, dict) and 'x' in item and 'y' in item:
+                                                        points.append(item)
+                                                    elif isinstance(item, (list, tuple)) and len(item) == 2:
+                                                        points.append({'x': item[0], 'y': item[1]})
+                                                if points:
+                                                    return points
+                                                else:
+                                                    logger.warning("   anticaptcha devolvió coordenadas en formato no reconocido")
+                                                    return None
                                             else:
                                                 logger.warning("   anticaptcha devolvió solución sin coordenadas")
                                                 return None
                                         elif res_result.get('status') == 'processing':
-                                            time.sleep(5)
                                             continue
                                         else:
                                             break
-                        return None
+                            return None
                     except Exception as e:
                         logger.warning(f"Error en anticaptcha HTTP: {e}")
                         return None
@@ -1362,18 +1387,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 # Después de resolver, esperar un poco y actualizar contenido
                 await page.wait_for_timeout(5000)
                 content = await safe_get_content(page)
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
