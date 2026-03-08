@@ -821,10 +821,31 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
         page = await context.new_page()
         logger.debug("   ✅ Contexto y página creados con evasión")
 
-        # ----- PASO 7: Navegar a la URL base del país -----
+        # ----- PASO 7: Navegar a la URL base del país (con reintentos) -----
         base_url = base_urls[country_code]
         logger.debug(f"🌐 [PASO 7] Navegando a URL base: {base_url}")
-        await page.goto(base_url, wait_until='networkidle', timeout=60000)
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Intentar con 'domcontentloaded' primero (menos estricto)
+                await page.goto(base_url, wait_until='domcontentloaded', timeout=120000)
+                await page.wait_for_timeout(5000)  # espera adicional para que carguen recursos
+                # Verificar que la página tenga contenido
+                body = await page.query_selector('body')
+                if body:
+                    logger.debug(f"   ✅ Página cargada en intento {attempt+1}")
+                    break
+                else:
+                    logger.warning(f"   ⚠️ Intento {attempt+1}: no se detectó body")
+            except Exception as e:
+                logger.warning(f"   ⚠️ Intento {attempt+1} falló: {e}")
+                if attempt == max_retries - 1:
+                    # Si todos fallan, capturar pantalla y salir
+                    last_screenshot = await take_screenshot(page, "error_carga_pagina")
+                    return None, "No se pudo cargar la página de Amazon después de reintentos", last_screenshot
+                await asyncio.sleep(5)
+        
         await page.wait_for_timeout(3000)
         last_screenshot = await take_screenshot(page, "home_page")
         logger.debug(f"   📍 URL actual: {page.url}")
