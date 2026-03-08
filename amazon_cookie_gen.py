@@ -2,7 +2,7 @@
 """
 Amazon Cookie Generator - Versión API REST con navegación dinámica
 - Parte desde la URL base del país
-- Navega haciendo clic en elementos: "Hola, identifícate" → "Crear cuenta nueva"
+- Navega haciendo clic en elementos: "Hola, identifícate" 
 - Incluye registro, verificación de correo, captcha, agregar dirección y wallet
 - Logs detallados en cada paso (visibles en Northflank y en consola)
 - Capturas de pantalla en base64 para el frontend
@@ -1570,8 +1570,34 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 if HERO_SMS_API_KEY:
                     sms_info = await get_hero_sms_number(country_code, service='am')
                     if sms_info:
-                        phone_number, activation_id = sms_info
-                        logger.debug(f"   ✅ Número real obtenido: {phone_number}")
+                        full_phone, activation_id = sms_info
+                        logger.debug(f"   ✅ Número completo obtenido: {full_phone}")
+                        
+                        # Definir cuántos dígitos quitar según el código de país
+                        country_prefix_length = {
+                            'MX': 2,   # 52
+                            'US': 1,   # 1
+                            'CA': 1,   # 1
+                            'UK': 2,   # 44
+                            'DE': 2,   # 49
+                            'FR': 2,   # 33
+                            'IT': 2,   # 39
+                            'ES': 2,   # 34
+                            'JP': 2,   # 81
+                            'AU': 2,   # 61
+                            'IN': 2,   # 91
+                        }
+                        prefix_len = country_prefix_length.get(country_code, 0)
+                        if prefix_len and len(full_phone) > prefix_len:
+                            # Extraer solo los dígitos locales
+                            phone_number = full_phone[prefix_len:]
+                            # Asegurar que solo sean dígitos (por si acaso)
+                            phone_number = re.sub(r'\D', '', phone_number)
+                            logger.debug(f"   ✅ Número local (sin código): {phone_number}")
+                        else:
+                            # Si no se puede quitar, usar el original (puede fallar)
+                            phone_number = full_phone
+                            logger.warning(f"   ⚠️ No se pudo quitar el código de país, se usará el número completo")
                     else:
                         logger.error("❌ No se pudo obtener número de Hero SMS")
                         raise Exception("No se pudo obtener número de teléfono real para verificación SMS")
