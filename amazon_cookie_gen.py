@@ -1084,20 +1084,60 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             await page.wait_for_load_state('networkidle', timeout=30000)
             last_screenshot = await take_screenshot(page, "despues_registro")
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
             # ----- PASO 15: Detectar captcha después del envío -----
             logger.debug("🔍 [PASO 15] Verificando captcha después del envío...")
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
 
             # Detectar captcha de selección de imágenes (tipo "elige las sillas") - puede ser canvas o img
-            if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content:
+            if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content or "Elija todo" in content:
                 logger.warning("⚠️ Captcha de selección de imágenes detectado")
                 last_screenshot = await take_screenshot(page, "captcha_seleccion")
 
-                # Buscar el canvas o la imagen
+                # Buscar el canvas (es lo más común)
                 canvas_element = await page.query_selector('canvas')
                 img_element = await page.query_selector('img[src*="captcha"]')
-
+                
                 if canvas_element:
                     logger.debug("   ✅ Captcha es un canvas, tomando screenshot del elemento")
                     screenshot_bytes = await canvas_element.screenshot()
@@ -1105,37 +1145,64 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     with open(img_path, 'wb') as f:
                         f.write(screenshot_bytes)
                     logger.debug(f"   ✅ Canvas capturado, tamaño: {len(screenshot_bytes)} bytes")
+                    click_element = canvas_element
                 elif img_element:
                     logger.debug("   ✅ Captcha es una imagen, descargando...")
                     img_src = await img_element.get_attribute('src')
                     if not img_src:
-                        raise Exception("La imagen del captcha no tiene src")
+                        return None, "La imagen del captcha no tiene src", last_screenshot
                     img_data = requests.get(img_src, timeout=10).content
                     img_path = 'temp_image_captcha.jpg'
                     with open(img_path, 'wb') as f:
                         f.write(img_data)
+                    click_element = img_element
                 else:
-                    raise Exception("No se encontró canvas ni imagen de captcha")
+                    logger.error("❌ No se encontró canvas ni imagen de captcha")
+                    return None, "No se encontró elemento de captcha", last_screenshot
 
-                # Extraer texto de instrucción
-                instruction_elem = await page.query_selector('div:has-text("Elija todo"), div:has-text("Resuelve esta adivinanza")')
-                hint_text = "Haz clic en todas las imágenes que correspondan"
-                if instruction_elem:
-                    hint_text = await instruction_elem.text_content()
-                    logger.debug(f"   📝 Instrucción extraída: {hint_text}")
+                # Extraer texto de instrucción (mejorado)
+                hint_text = None
+                # Intentar con diferentes selectores
+                instruction_selectors = [
+                    'div:has-text("Elija todo")',
+                    'div:has-text("Resuelve esta adivinanza")',
+                    'div em'  # a veces la palabra clave está en <em>
+                ]
+                for sel in instruction_selectors:
+                    elem = await page.query_selector(sel)
+                    if elem:
+                        hint_text = await elem.text_content()
+                        if hint_text:
+                            break
+                # Si no se encontró, intentar extraer del contenido HTML usando BeautifulSoup
+                if not hint_text:
+                    soup = BeautifulSoup(content, 'html.parser')
+                    # Buscar un div que contenga "Elija todo" o similar
+                    div = soup.find('div', string=re.compile(r'Elija todo|Resuelve esta adivinanza'))
+                    if div:
+                        hint_text = div.get_text(strip=True)
+                    else:
+                        # Último recurso: buscar cualquier texto que parezca instrucción
+                        match = re.search(r'Elija todo (.*?)\.', content)
+                        if match:
+                            hint_text = match.group(0)
+                
+                if not hint_text:
+                    hint_text = "Haz clic en todas las imágenes que correspondan"
+                    logger.debug("   ℹ️ No se pudo extraer instrucción, usando texto por defecto")
                 else:
-                    logger.debug("   ℹ️ Usando instrucción por defecto")
+                    logger.debug(f"   📝 Instrucción extraída: {hint_text}")
 
                 # Resolver coordenadas
                 coordinates = solve_coordinates_captcha(img_path, hint_text)
                 if not coordinates:
-                    raise Exception("No se pudo resolver captcha de coordenadas")
+                    return None, "No se pudo resolver captcha de coordenadas", last_screenshot
 
-                # Obtener el contenedor donde hacer clic
-                click_container = canvas_element or img_element
-                box = await click_container.bounding_box()
+                # Obtener el bounding box del elemento donde hacer clic
+                box = await click_element.bounding_box()
                 if not box:
-                    raise Exception("No se pudo obtener bounding box del contenedor")
+                    logger.error("❌ No se pudo obtener bounding box del contenedor")
+                    return None, "No se pudo obtener posición del captcha", last_screenshot
 
                 for point in coordinates:
                     abs_x = box['x'] + point['x']
@@ -1143,18 +1210,47 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     await page.mouse.click(abs_x, abs_y)
                     await asyncio.sleep(0.5)
 
-                # Buscar botón de confirmar
-                confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"]')
+                # Buscar botón de confirmar (varios posibles)
+                confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"], button[type="submit"]')
                 if confirm_btn:
                     await confirm_btn.click()
                     logger.debug("✅ Clic en botón de confirmar")
                     await page.wait_for_load_state('networkidle', timeout=30000)
                     last_screenshot = await take_screenshot(page, "despues_captcha_coordenadas")
                 else:
-                    logger.warning("⚠️ No se encontró botón de confirmar")
+                    logger.warning("⚠️ No se encontró botón de confirmar, puede que se envíe automáticamente")
 
-                # Después de resolver, continuar
+                # Después de resolver, esperar un poco y actualizar contenido
+                await page.wait_for_timeout(5000)
                 content = await safe_get_content(page)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
             # Detectar otros tipos de captcha (reCAPTCHA, imagen simple)
             captcha_detected = False
