@@ -880,35 +880,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
         logger.debug(f"   📍 URL después de login: {page.url}")
         last_screenshot = await take_screenshot(page, "after_login_click")
 
-        # ----- PASO 9: Hacer clic en "Crear cuenta nueva" -----
-        logger.debug("🆕 [PASO 9] Buscando enlace para crear cuenta...")
-        create_selectors = [
-            'a#createAccountSubmit',
-            'a[href*="register"]',
-            'a:has-text("Crear cuenta nueva")',
-            'a:has-text("Create your Amazon account")',
-            'a:has-text("Crear tu cuenta de Amazon")'
-        ]
-        create_link = None
-        for selector in create_selectors:
-            try:
-                link = await page.wait_for_selector(selector, state='visible', timeout=5000)
-                if link:
-                    create_link = link
-                    logger.debug(f"   ✅ Enlace de creación encontrado con selector: {selector}")
-                    break
-            except:
-                continue
-        if not create_link:
-            last_screenshot = await take_screenshot(page, "error_no_create_link")
-            return None, "No se encontró enlace para crear cuenta", last_screenshot
-
-        await create_link.click()
-        await page.wait_for_load_state('networkidle', timeout=15000)
-        await page.wait_for_timeout(2000)
-        logger.debug(f"   📍 URL después de crear cuenta: {page.url}")
-        last_screenshot = await take_screenshot(page, "after_create_click")
-
         # ----- PASO 10: Ingresar email en primera página -----
         logger.debug("📧 [PASO 10] Ingresando email en primera página...")
         email_field = None
