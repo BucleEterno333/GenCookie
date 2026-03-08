@@ -1211,113 +1211,145 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 else:
                     logger.debug(f"   📝 Instrucción extraída: {hint_text}")
 
-                # --- Resolver coordenadas usando API HTTP directamente ---
-                coordinates = None
+                            # --- Resolver coordenadas usando API HTTP directamente ---
+            coordinates = None
 
-                # Función para llamar a 2captcha API
-                def solve_2captcha_coordinates(image_path, hint):
-                    import base64
-                    with open(image_path, 'rb') as f:
-                        img_base64 = base64.b64encode(f.read()).decode('utf-8')
-                    url = "http://2captcha.com/in.php"
-                    data = {
-                        'key': API_KEY_2CAPTCHA,
-                        'method': 'base64',
-                        'body': img_base64,
-                        'coordinatescaptcha': 1,
-                        'textinstructions': hint,
-                        'json': 1
-                    }
-                    try:
-                        resp = requests.post(url, data=data, timeout=30)
-                        if resp.status_code == 200:
-                            result = resp.json()
-                            if result.get('status') == 1:
-                                captcha_id = result['request']
-                                logger.debug(f"   2captcha ID: {captcha_id}, esperando resultado...")
-                                time.sleep(15)  # espera inicial
-                                for _ in range(30):  # hasta 30 intentos
-                                    res_url = f"http://2captcha.com/res.php?key={API_KEY_2CAPTCHA}&action=get&id={captcha_id}&json=1"
-                                    res_resp = requests.get(res_url, timeout=10)
-                                    if res_resp.status_code == 200:
-                                        res_data = res_resp.json()
-                                        if res_data.get('status') == 1:
-                                            # Formato: "x1,y1;x2,y2"
-                                            coord_str = res_data['request']
-                                            points = []
-                                            for pair in coord_str.split(';'):
-                                                if pair:
-                                                    x, y = pair.split(',')
-                                                    points.append({'x': int(x), 'y': int(y)})
+            # Función para llamar a 2captcha API
+            def solve_2captcha_coordinates(image_path, hint):
+                import base64
+                import time
+                with open(image_path, 'rb') as f:
+                    img_base64 = base64.b64encode(f.read()).decode('utf-8')
+                url = "http://2captcha.com/in.php"
+                data = {
+                    'key': API_KEY_2CAPTCHA,
+                    'method': 'base64',
+                    'body': img_base64,
+                    'coordinatescaptcha': 1,
+                    'textinstructions': hint,
+                    'json': 1
+                }
+                try:
+                    resp = requests.post(url, data=data, timeout=30)
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        if result.get('status') == 1:
+                            captcha_id = result['request']
+                            logger.debug(f"   2captcha ID: {captcha_id}, esperando resultado...")
+                            time.sleep(15)  # espera inicial
+                            for _ in range(30):
+                                res_url = f"http://2captcha.com/res.php?key={API_KEY_2CAPTCHA}&action=get&id={captcha_id}&json=1"
+                                res_resp = requests.get(res_url, timeout=10)
+                                if res_resp.status_code == 200:
+                                    res_data = res_resp.json()
+                                    if res_data.get('status') == 1:
+                                        coord_str = res_data['request']
+                                        # El formato puede ser "coordinates=x1,y1;x2,y2" o directamente "x1,y1;x2,y2"
+                                        if coord_str.startswith('coordinates='):
+                                            coord_str = coord_str.replace('coordinates=', '')
+                                        points = []
+                                        for pair in coord_str.split(';'):
+                                            if pair:
+                                                parts = pair.split(',')
+                                                if len(parts) == 2:
+                                                    points.append({'x': int(parts[0]), 'y': int(parts[1])})
+                                        if points:
                                             return points
-                                        elif res_data.get('request') == 'CAPCHA_NOT_READY':
-                                            time.sleep(5)
-                                            continue
                                         else:
-                                            break
-                        return None
-                    except Exception as e:
-                        logger.warning(f"Error en 2captcha HTTP: {e}")
-                        return None
+                                            logger.warning(f"   Formato de coordenadas inesperado: {coord_str}")
+                                            return None
+                                    elif res_data.get('request') == 'CAPCHA_NOT_READY':
+                                        time.sleep(5)
+                                        continue
+                                    else:
+                                        logger.warning(f"   Error de 2captcha: {res_data.get('request')}")
+                                        return None
+                                else:
+                                    logger.warning(f"   Error HTTP al consultar resultado: {res_resp.status_code}")
+                                    return None
+                    else:
+                        logger.warning(f"   Error HTTP al crear tarea: {resp.status_code}")
+                    return None
+                except Exception as e:
+                    logger.warning(f"Error en 2captcha HTTP: {e}")
+                    return None
 
-                # Función para llamar a anticaptcha API
-                def solve_anticaptcha_coordinates(image_path, hint):
-                    import base64
-                    with open(image_path, 'rb') as f:
-                        img_base64 = base64.b64encode(f.read()).decode('utf-8')
-                    url = "https://api.anti-captcha.com/createTask"
-                    data = {
-                        "clientKey": API_KEY_ANTICAPTCHA,
-                        "task": {
-                            "type": "ImageToCoordinatesTask",
-                            "body": img_base64,
-                            "comment": hint
-                        }
+            # Función para llamar a anticaptcha API
+            def solve_anticaptcha_coordinates(image_path, hint):
+                import base64
+                import time
+                with open(image_path, 'rb') as f:
+                    img_base64 = base64.b64encode(f.read()).decode('utf-8')
+                url = "https://api.anti-captcha.com/createTask"
+                data = {
+                    "clientKey": API_KEY_ANTICAPTCHA,
+                    "task": {
+                        "type": "ImageToCoordinatesTask",
+                        "body": img_base64,
+                        "comment": hint
                     }
-                    try:
-                        resp = requests.post(url, json=data, timeout=30)
-                        if resp.status_code == 200:
-                            result = resp.json()
-                            if result.get('errorId') == 0:
-                                task_id = result['taskId']
-                                logger.debug(f"   anticaptcha task ID: {task_id}, esperando resultado...")
-                                time.sleep(5)
-                                for _ in range(30):
-                                    res_url = "https://api.anti-captcha.com/getTaskResult"
-                                    res_data = {"clientKey": API_KEY_ANTICAPTCHA, "taskId": task_id}
-                                    res_resp = requests.post(res_url, json=res_data, timeout=10)
-                                    if res_resp.status_code == 200:
-                                        res_result = res_resp.json()
-                                        if res_result.get('status') == 'ready':
-                                            # Las coordenadas vienen en solution.coordinates
+                }
+                try:
+                    resp = requests.post(url, json=data, timeout=30)
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        if result.get('errorId') == 0:
+                            task_id = result['taskId']
+                            logger.debug(f"   anticaptcha task ID: {task_id}, esperando resultado...")
+                            time.sleep(5)
+                            for _ in range(30):
+                                res_url = "https://api.anti-captcha.com/getTaskResult"
+                                res_data = {"clientKey": API_KEY_ANTICAPTCHA, "taskId": task_id}
+                                res_resp = requests.post(res_url, json=res_data, timeout=10)
+                                if res_resp.status_code == 200:
+                                    res_result = res_resp.json()
+                                    if res_result.get('status') == 'ready':
+                                        # Las coordenadas vienen en solution.coordinates
+                                        if 'solution' in res_result and 'coordinates' in res_result['solution']:
                                             coords = res_result['solution']['coordinates']
-                                            points = [{'x': c['x'], 'y': c['y']} for c in coords]
-                                            return points
-                                        elif res_result.get('status') == 'processing':
-                                            time.sleep(5)
-                                            continue
+                                            points = []
+                                            for c in coords:
+                                                if 'x' in c and 'y' in c:
+                                                    points.append({'x': c['x'], 'y': c['y']})
+                                            if points:
+                                                return points
+                                            else:
+                                                logger.warning("   anticaptcha devolvió coordenadas vacías")
+                                                return None
                                         else:
-                                            break
+                                            logger.warning("   anticaptcha respuesta sin coordinates: " + str(res_result))
+                                            return None
+                                    elif res_result.get('status') == 'processing':
+                                        time.sleep(5)
+                                        continue
+                                    else:
+                                        logger.warning(f"   anticaptcha error: {res_result}")
+                                        return None
+                                else:
+                                    logger.warning(f"   Error HTTP al consultar resultado anticaptcha: {res_resp.status_code}")
+                                    return None
+                        else:
+                            logger.warning(f"   anticaptcha error al crear tarea: {result.get('errorDescription')}")
+                            return None
+                    else:
+                        logger.warning(f"   Error HTTP al crear tarea anticaptcha: {resp.status_code}")
                         return None
-                    except Exception as e:
-                        logger.warning(f"Error en anticaptcha HTTP: {e}")
-                        return None
+                except Exception as e:
+                    logger.warning(f"Error en anticaptcha HTTP: {e}")
+                    return None
 
-                # Intentar con 2captcha
-                if API_KEY_2CAPTCHA:
-                    logger.debug("   Intentando con 2captcha API HTTP...")
-                    coordinates = solve_2captcha_coordinates(img_path, hint_text)
-                    if coordinates:
-                        logger.debug(f"✅ 2captcha resolvió coordenadas: {coordinates}")
+            # Intentar con 2captcha
+            if API_KEY_2CAPTCHA:
+                logger.debug("   Intentando con 2captcha API HTTP...")
+                coordinates = solve_2captcha_coordinates(img_path, hint_text)
+                if coordinates:
+                    logger.debug(f"✅ 2captcha resolvió coordenadas: {coordinates}")
 
-                if not coordinates and API_KEY_ANTICAPTCHA:
-                    logger.debug("   Intentando con anticaptcha API HTTP...")
-                    coordinates = solve_anticaptcha_coordinates(img_path, hint_text)
-                    if coordinates:
-                        logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
-
-                if not coordinates:
-                    return None, "No se pudo resolver captcha de coordenadas", last_screenshot
+            if not coordinates and API_KEY_ANTICAPTCHA:
+                logger.debug("   Intentando con anticaptcha API HTTP...")
+                coordinates = solve_anticaptcha_coordinates(img_path, hint_text)
+                if coordinates:
+                    logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
 
                 # --- Realizar los clics en las coordenadas ---
                 box = await click_element.bounding_box()
