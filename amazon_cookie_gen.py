@@ -271,18 +271,19 @@ def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
 # -------------------------------------------------------------------
 # HERO SMS
 # -------------------------------------------------------------------
-async def get_hero_sms_number(country_code='mx', service='amazon'):
-    """Alquila un número de teléfono temporal de Hero SMS."""
+async def get_hero_sms_number(country_code, service):
+    """Alquila un número de teléfono temporal de Hero SMS.
+    country_code: código de país según Hero SMS (ej. '54' para México)
+    service: código de servicio según Hero SMS (ej. 'am' para Amazon)
+    """
     if not HERO_SMS_API_KEY:
         logger.warning("⚠️ No hay API key de Hero SMS")
         return None
     url = "https://hero-sms.com/api/v1/numbers/rent"
     headers = {"Authorization": f"Bearer {HERO_SMS_API_KEY}"}
     # Mapeo de códigos de país a códigos de Hero SMS (usualmente códigos de dos letras en minúsculas)
-    country_map = {'MX': 'mx', 'US': 'us', 'CA': 'ca', 'UK': 'gb', 'DE': 'de', 'FR': 'fr', 'IT': 'it', 'ES': 'es', 'JP': 'jp', 'AU': 'au', 'IN': 'in'}
-    hero_country = country_map.get(country_code, 'us')
     payload = {
-        "country": hero_country,
+        "country": country_code,
         "operator": "any",
         "service": service
     }
@@ -1558,20 +1559,25 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 phone_number = None
                 request_id = None
                 if HERO_SMS_API_KEY:
-                    sms_info = await get_hero_sms_number(country_code, service='amazon')
+                    hero_country_map = {
+                        'MX': '54',
+                        'US': '187',  
+                        'CA': '36',
+                        'UK': '16',
+                        # Agrega más según necesites
+                    }
+                    hero_country = hero_country_map.get(country_code)
+                    if not hero_country:
+                        logger.error(f"❌ No hay mapeo de país para {country_code} en Hero SMS")
+                        raise Exception(f"País {country_code} no soportado por Hero SMS")
+                    
+                    service_code = 'am'
+                    sms_info = await get_hero_sms_number(hero_country, service_code)
                     if sms_info:
                         phone_number, request_id = sms_info
                         logger.debug(f"   ✅ Número real obtenido: {phone_number}")
                     else:
-                        logger.warning("   ⚠️ No se pudo obtener número real, se usará uno aleatorio (no funcionará)")
-
-                # Si no se pudo obtener número real, generar uno aleatorio (solo para pruebas, no recibirá SMS)
-                if not phone_number:
-                    # Generar número ficticio (solo para pruebas, no recibirá SMS)
-                    country_codes = {'MX': '52', 'US': '1', 'CA': '1', 'UK': '44', 'DE': '49', 'FR': '33', 'IT': '39', 'ES': '34', 'JP': '81', 'AU': '61', 'IN': '91'}
-                    code = country_codes.get(country_code, '1')
-                    phone_number = f"+{code}{random.randint(1000000000, 9999999999)}"
-                    logger.warning(f"   ⚠️ Usando número aleatorio (no recibirá SMS): {phone_number}")
+                        logger.warning("   ⚠️ No se pudo obtener número de Hero SMS")
 
                 # Ingresar número
                 await phone_input.fill(phone_number)
