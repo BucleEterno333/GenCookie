@@ -1063,69 +1063,144 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
         await page.wait_for_load_state('networkidle', timeout=30000)
         last_screenshot = await take_screenshot(page, "despues_registro")
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         # ----- PASO 15: Detectar captcha después del envío -----
         logger.debug("🔍 [PASO 15] Verificando captcha después del envío...")
         await page.wait_for_timeout(5000)
         content = await safe_get_content(page)
 
-        # Detectar captcha de selección de imágenes (tipo canvas)
-        if "Resuelve esta adivinanza" in content or "Elija todo" in content:
-            logger.warning("⚠️ Captcha de selección de imágenes (canvas) detectado")
+        # Detectar captcha de selección de imágenes (tipo "elige las sillas") - puede ser canvas o img
+        if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content:
+            logger.warning("⚠️ Captcha de selección de imágenes detectado")
             last_screenshot = await take_screenshot(page, "captcha_seleccion")
 
-            # Buscar el canvas
-            canvas = await page.query_selector('canvas')
-            if not canvas:
-                logger.error("❌ No se encontró el canvas del captcha")
-                return None, "No se encontró el canvas del captcha", last_screenshot
-
-            # Obtener el bounding box del canvas
-            box = await canvas.bounding_box()
-            if not box:
-                logger.error("❌ No se pudo obtener el bounding box del canvas")
-                return None, "No se pudo obtener la posición del canvas", last_screenshot
-
-            # Capturar la imagen del canvas (como screenshot del elemento)
-            # Playwright permite tomar screenshot de un elemento específico
-            canvas_screenshot_bytes = await canvas.screenshot()
-            canvas_screenshot_b64 = base64.b64encode(canvas_screenshot_bytes).decode('utf-8')
-            # Guardar temporalmente para enviar al servicio
-            canvas_img_path = 'temp_canvas_captcha.png'
-            with open(canvas_img_path, 'wb') as f:
-                f.write(canvas_screenshot_bytes)
+            # Buscar el canvas o la imagen
+            canvas_element = await page.query_selector('canvas')
+            img_element = await page.query_selector('img[src*="captcha"]')
+            
+            if canvas_element:
+                logger.debug("   ✅ Captcha es un canvas, tomando screenshot del elemento")
+                # Tomar screenshot del canvas (como imagen)
+                screenshot_bytes = await canvas_element.screenshot()
+                img_path = 'temp_canvas_captcha.png'
+                with open(img_path, 'wb') as f:
+                    f.write(screenshot_bytes)
+                logger.debug(f"   ✅ Canvas capturado, tamaño: {len(screenshot_bytes)} bytes")
+            elif img_element:
+                logger.debug("   ✅ Captcha es una imagen, descargando...")
+                img_src = await img_element.get_attribute('src')
+                if not img_src:
+                    return None, "La imagen del captcha no tiene src", last_screenshot
+                img_data = requests.get(img_src, timeout=10).content
+                img_path = 'temp_image_captcha.jpg'
+                with open(img_path, 'wb') as f:
+                    f.write(img_data)
+            else:
+                logger.error("❌ No se encontró canvas ni imagen de captcha")
+                return None, "No se encontró elemento de captcha", last_screenshot
 
             # Extraer texto de instrucción
             instruction_elem = await page.query_selector('div:has-text("Elija todo"), div:has-text("Resuelve esta adivinanza")')
-            hint_text = "Haz clic en todos los elementos que coincidan"
+            hint_text = "Haz clic en todas las imágenes que correspondan"  # default
             if instruction_elem:
-                full_text = await instruction_elem.text_content()
-                # Extraer la palabra clave (lo que está en <em>)
-                em = await instruction_elem.query_selector('em')
-                if em:
-                    keyword = await em.text_content()
-                    hint_text = f"Haz clic en todos los {keyword}"
-                else:
-                    hint_text = full_text
+                hint_text = await instruction_elem.text_content()
                 logger.debug(f"   📝 Instrucción extraída: {hint_text}")
             else:
                 logger.debug("   ℹ️ Usando instrucción por defecto")
 
-            # Resolver coordenadas usando la imagen del canvas
-            coordinates = solve_coordinates_captcha(canvas_img_path, hint_text)
-            if not coordinates:
-                return None, "No se pudo resolver captcha de selección", last_screenshot
+            # Resolver coordenadas
+            coordinates = None
+            # Intentar con 2captcha (más fiable)
+            if API_KEY_2CAPTCHA:
+                try:
+                    from twocaptcha import TwoCaptcha
+                    solver = TwoCaptcha(API_KEY_2CAPTCHA)
+                    # El método coordinates recibe la ruta de la imagen
+                    result = solver.coordinates(img_path, textinstructions=hint_text)
+                    if result and 'code' in result:
+                        coord_str = result['code']
+                        if coord_str.startswith('coordinates='):
+                            coord_str = coord_str.replace('coordinates=', '')
+                        points = []
+                        for pair in coord_str.split(';'):
+                            if pair:
+                                x, y = pair.split(',')
+                                points.append({'x': int(x), 'y': int(y)})
+                        coordinates = points
+                        logger.debug(f"✅ 2captcha resolvió coordenadas: {coordinates}")
+                except Exception as e:
+                    logger.warning(f"⚠️ 2captcha falló: {e}")
 
-            # Hacer clic en las coordenadas dentro del canvas
+            # Si falló, intentar con anticaptcha
+            if not coordinates and API_KEY_ANTICAPTCHA:
+                try:
+                    from anticaptchaofficial.imagecoordinates import imagecoordinates
+                    solver = imagecoordinates()
+                    solver.set_api_key(API_KEY_ANTICAPTCHA)  # Esto sí existe en la clase correcta
+                    solver.set_comment(hint_text)
+                    solver.set_image_path(img_path)
+                    coordinates = solver.solve_and_return_solution()
+                    if coordinates:
+                        logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
+                except Exception as e:
+                    logger.warning(f"⚠️ anticaptcha falló: {e}")
+
+            if not coordinates:
+                return None, "No se pudo resolver captcha de coordenadas", last_screenshot
+
+            # Obtener el contenedor donde hacer clic (puede ser el canvas o un div)
+            click_container = canvas_element or img_element
+            box = await click_container.bounding_box()
+            if not box:
+                logger.error("❌ No se pudo obtener bounding box del contenedor")
+                return None, "No se pudo obtener posición del captcha", last_screenshot
+
             for point in coordinates:
-                # Las coordenadas son relativas a la imagen (0,0 en esquina superior izquierda)
-                # Las convertimos a coordenadas absolutas de la página sumando la posición del canvas
                 abs_x = box['x'] + point['x']
                 abs_y = box['y'] + point['y']
                 await page.mouse.click(abs_x, abs_y)
                 await asyncio.sleep(0.5)
 
             # Buscar botón de confirmar
-            confirm_btn = await page.query_selector('#amzn-btn-verify-internal, button:has-text("Confirmar")')
+            confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"]')
             if confirm_btn:
                 await confirm_btn.click()
                 logger.debug("✅ Clic en botón de confirmar")
@@ -1134,8 +1209,50 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             else:
                 logger.warning("⚠️ No se encontró botón de confirmar")
 
-            # Después de resolver, continuar con el flujo normal (re-obtener contenido)
+            # Después de resolver, continuar con el flujo normal
             content = await safe_get_content(page)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
         # Detectar otros tipos de captcha (reCAPTCHA, imagen simple)
         captcha_detected = False
