@@ -427,9 +427,10 @@ async def generate_temp_email():
 async def get_verification_code(email, token, service, max_attempts=20, wait_time=10):
     """
     Obtiene el código de verificación del correo temporal.
-    Para mailinator, se usa la API pública de inbox.
+    Busca cualquier número de 5 o 6 dígitos en el texto del mensaje.
     """
     logger.debug(f"📧 Esperando código de verificación para {email} (servicio: {service})...")
+    
     for attempt in range(max_attempts):
         try:
             if service == 'mail.tm' and token:
@@ -439,68 +440,25 @@ async def get_verification_code(email, token, service, max_attempts=20, wait_tim
                     timeout=30
                 )
                 if resp.status_code == 200:
-                    emails = resp.json().get('hydra:member', [])
-                    for mail in emails:
-                        text = mail.get('text', '') or mail.get('html', '') or mail.get('intro', '')
-                        code = get_str(text, 'Your verification code is ', '\n')
-                        if code:
+                    data = resp.json()
+                    messages = data.get('hydra:member', [])
+                    for msg in messages:
+                        # Obtener el texto del mensaje (puede estar en varios campos)
+                        text = msg.get('text', '') or msg.get('html', '') or msg.get('intro', '')
+                        # Buscar cualquier número de 5 o 6 dígitos
+                        import re
+                        codes = re.findall(r'\b(\d{5,6})\b', text)
+                        if codes:
+                            code = codes[0]
                             logger.debug(f"📧 Código obtenido de mail.tm: {code}")
                             return code
-            elif service == 'guerrillamail' and token:
-                resp = requests.get(
-                    f"https://api.guerrillamail.com/ajax.php?f=check_email&seq=0&sid_token={token}",
-                    timeout=30
-                )
-                if resp.status_code == 200:
-                    emails = resp.json().get('list', [])
-                    for mail in emails:
-                        body = mail.get('mail_body', '') or mail.get('mail_body_ex', '')
-                        code = get_str(body, 'Your verification code is ', '\n')
-                        if code:
-                            logger.debug(f"📧 Código obtenido de guerrillamail: {code}")
-                            return code
-            elif service == 'tempmail.plus' and token:
-                resp = requests.get(f"https://api.tempmail.plus/messages/{token}", timeout=30)
-                if resp.status_code == 200:
-                    emails = resp.json().get('messages', [])
-                    for mail in emails:
-                        text = mail.get('text', '') or mail.get('html', '')
-                        code = get_str(text, 'Your verification code is ', '\n')
-                        if code:
-                            logger.debug(f"📧 Código obtenido de tempmail.plus: {code}")
-                            return code
-            elif service == 'mailinator':
-                username = email.split('@')[0]
-                resp = requests.get(f"https://api.mailinator.com/v2/domains/public/inboxes/{username}", timeout=30)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    messages = data.get('msgs', [])
-                    for msg in messages:
-                        msg_id = msg.get('id')
-                        if msg_id:
-                            msg_resp = requests.get(f"https://api.mailinator.com/v2/domains/public/messages/{msg_id}", timeout=30)
-                            if msg_resp.status_code == 200:
-                                msg_data = msg_resp.json()
-                                part = msg_data.get('parts', [{}])[0]
-                                body = part.get('body', '')
-                                code = get_str(body, 'Your verification code is ', '\n')
-                                if code:
-                                    logger.debug(f"📧 Código obtenido de mailinator: {code}")
-                                    return code
-            elif service == '10minutemail' and token:
-                resp = requests.get(f"https://10minutemail.net/api/1.1/messages/{token}", timeout=30)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    for mail in data.get('messages', []):
-                        text = mail.get('body_text', '') or mail.get('body_html', '')
-                        code = get_str(text, 'Your verification code is ', '\n')
-                        if code:
-                            logger.debug(f"📧 Código obtenido de 10minutemail: {code}")
-                            return code
+            # Aquí puedes agregar otros servicios (guerrillamail, etc.) con la misma lógica
         except Exception as e:
             logger.debug(f"📧 Intento {attempt+1} falló: {e}")
+        
         await asyncio.sleep(wait_time)
-    logger.error("❌ No se pudo obtener código de verificación")
+    
+    logger.error("❌ No se pudo obtener código de verificación después de múltiples intentos")
     return None
 
 # -------------------------------------------------------------------
@@ -1500,6 +1458,10 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         else:
                             logger.warning("   ⚠️ No se encontró botón de verificación")
                     else:
+                        logger.error("   ❌ No se pudo obtener código de verificación después de múltiples intentos")
+                        # Tomar captura del estado actual
+                        last_screenshot = await take_screenshot(page, "error_verificacion_correo")
+                        # Lanzar excepción para reintentar global
                         raise Exception("No se pudo obtener código de verificación")
                 else:
                     logger.warning("   ⚠️ No se encontró campo para código")
