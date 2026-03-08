@@ -1120,10 +1120,15 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
+
+
+
+
             # ----- PASO 15: Detectar captcha después del envío -----
             logger.debug("🔍 [PASO 15] Verificando captcha después del envío...")
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
+
 
             # Detectar captcha de selección de imágenes (tipo "elige las sillas")
             if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content or "Elija todo" in content:
@@ -1182,31 +1187,12 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         return None, "No se encontró elemento de captcha", last_screenshot
 
                 # Extraer texto de instrucción (mejorado)
-                hint_text = None
-                # Intentar obtener el texto de la instrucción directamente desde elementos visibles
-                instruction_elem = await page.query_selector('div:has-text("Elija todo")')
-                if instruction_elem:
-                    hint_text = await instruction_elem.text_content()
-                if not hint_text:
-                    instruction_elem = await page.query_selector('div:has-text("Resuelve esta adivinanza")')
-                    if instruction_elem:
-                        hint_text = await instruction_elem.text_content()
-                if not hint_text:
-                    # Intentar con BeautifulSoup
-                    soup = BeautifulSoup(content, 'html.parser')
-                    div = soup.find('div', string=re.compile(r'Elija todo|Resuelve esta adivinanza'))
-                    if div:
-                        hint_text = div.get_text(strip=True)
-                if not hint_text:
-                    hint_text = "Haz clic en todas las imágenes que correspondan"
-                    logger.debug("   ℹ️ No se pudo extraer instrucción, usando texto por defecto")
-                else:
-                    logger.debug(f"   📝 Instrucción extraída: {hint_text}")
+                hint_text = "Haz clic en todas las imágenes que correspondan"
 
                 # --- Resolver coordenadas usando API HTTP directamente ---
                 coordinates = None
 
-                # Función para llamar a 2captcha API (maneja tanto string como lista)
+                # Función para llamar a 2captcha API (versión robusta)
                 def solve_2captcha_coordinates(image_path, hint):
                     import base64
                     with open(image_path, 'rb') as f:
@@ -1236,10 +1222,11 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                         try:
                                             res_data = res_resp.json()
                                         except:
+                                            logger.warning("   Respuesta no JSON de 2captcha")
                                             continue
                                         if res_data.get('status') == 1:
                                             coord_data = res_data['request']
-                                            # Puede ser string "x1,y1;x2,y2" o lista directa de puntos
+                                            # Puede ser string "x1,y1;x2,y2" o una lista de puntos
                                             if isinstance(coord_data, str):
                                                 points = []
                                                 for pair in coord_data.split(';'):
@@ -1248,19 +1235,16 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                                         points.append({'x': int(x), 'y': int(y)})
                                                 return points
                                             elif isinstance(coord_data, list):
-                                                # Asumimos que es una lista de listas o diccionarios
+                                                # Formato: [{"x":290,"y":69}, ...] o [ [290,69], ... ]
                                                 points = []
                                                 for item in coord_data:
-                                                    if isinstance(item, dict) and 'x' in item and 'y' in item:
-                                                        points.append(item)
-                                                    elif isinstance(item, (list, tuple)) and len(item) == 2:
-                                                        points.append({'x': item[0], 'y': item[1]})
-                                                if points:
-                                                    return points
-                                                else:
-                                                    logger.warning("   Formato de lista de coordenadas no reconocido")
+                                                    if isinstance(item, dict):
+                                                        points.append({'x': int(item['x']), 'y': int(item['y'])})
+                                                    elif isinstance(item, list) and len(item) == 2:
+                                                        points.append({'x': int(item[0]), 'y': int(item[1])})
+                                                return points
                                             else:
-                                                logger.warning(f"   Formato inesperado: {type(coord_data)}")
+                                                logger.warning(f"   Formato de coordenadas desconocido: {type(coord_data)}")
                                         elif res_data.get('request') == 'CAPCHA_NOT_READY':
                                             continue
                                         else:
@@ -1270,7 +1254,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         logger.warning(f"Error en 2captcha HTTP: {e}")
                         return None
 
-                # Función para llamar a anticaptcha API (maneja formato de coordenadas)
+                # Función para llamar a anticaptcha API (versión robusta)
                 def solve_anticaptcha_coordinates(image_path, hint):
                     import base64
                     with open(image_path, 'rb') as f:
@@ -1292,7 +1276,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                 task_id = result['taskId']
                                 logger.debug(f"   anticaptcha task ID: {task_id}, esperando resultado...")
                                 start_time = time.time()
-                                while time.time() - start_time < 300:  # timeout 5 minutos
+                                while time.time() - start_time < 120:  # timeout 2 minutos
                                     time.sleep(5)
                                     res_url = "https://api.anti-captcha.com/getTaskResult"
                                     res_data = {"clientKey": API_KEY_ANTICAPTCHA, "taskId": task_id}
@@ -1300,21 +1284,16 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                     if res_resp.status_code == 200:
                                         res_result = res_resp.json()
                                         if res_result.get('status') == 'ready':
-                                            solution = res_result.get('solution', {})
-                                            coords = solution.get('coordinates')
+                                            coords = res_result['solution'].get('coordinates')
                                             if coords:
-                                                # Puede ser lista de diccionarios o lista de listas
+                                                # anticaptcha puede devolver [{"x":290,"y":69}, ...] o lista de listas
                                                 points = []
                                                 for item in coords:
-                                                    if isinstance(item, dict) and 'x' in item and 'y' in item:
-                                                        points.append(item)
-                                                    elif isinstance(item, (list, tuple)) and len(item) == 2:
-                                                        points.append({'x': item[0], 'y': item[1]})
-                                                if points:
-                                                    return points
-                                                else:
-                                                    logger.warning("   anticaptcha devolvió coordenadas en formato no reconocido")
-                                                    return None
+                                                    if isinstance(item, dict):
+                                                        points.append({'x': int(item['x']), 'y': int(item['y'])})
+                                                    elif isinstance(item, list) and len(item) == 2:
+                                                        points.append({'x': int(item[0]), 'y': int(item[1])})
+                                                return points
                                             else:
                                                 logger.warning("   anticaptcha devolvió solución sin coordenadas")
                                                 return None
@@ -1363,11 +1342,16 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     logger.error("❌ No se pudo obtener bounding box del contenedor (elemento no visible o eliminado)")
                     return None, "No se pudo obtener posición del captcha", last_screenshot
 
+                # Realizar clics en las coordenadas (convertidas a int)
                 for point in coordinates:
-                    abs_x = box['x'] + point['x']
-                    abs_y = box['y'] + point['y']
-                    await page.mouse.click(abs_x, abs_y)
-                    await asyncio.sleep(0.5)
+                    try:
+                        abs_x = box['x'] + int(point['x'])
+                        abs_y = box['y'] + int(point['y'])
+                        await page.mouse.click(abs_x, abs_y)
+                        await asyncio.sleep(0.5)
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Error al hacer clic en coordenada {point}: {e}")
+                        continue
 
                 # Buscar botón de confirmar
                 confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"], button[type="submit"]')
@@ -1382,6 +1366,18 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 # Después de resolver, esperar un poco y actualizar contenido
                 await page.wait_for_timeout(5000)
                 content = await safe_get_content(page)
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
