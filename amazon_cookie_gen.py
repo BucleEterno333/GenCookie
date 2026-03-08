@@ -1532,7 +1532,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-        # ----- PASO 17: Verificar si se requiere agregar y verificar número de teléfono -----
+            # ----- PASO 17: Verificar si se requiere agregar y verificar número de teléfono -----
             logger.debug("📱 [PASO 17] Verificando si se requiere agregar número de teléfono...")
             await page.wait_for_timeout(3000)
             content = await safe_get_content(page)
@@ -1588,15 +1588,16 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 if submit_btn:
                     await submit_btn.click()
                     logger.debug("   ✅ Clic en botón de agregar número")
+                    # Esperar a que la página procese la solicitud
                     await page.wait_for_load_state('networkidle', timeout=15000)
                     last_screenshot = await take_screenshot(page, "despues_enviar_numero")
                 else:
                     logger.warning("   ⚠️ No se encontró botón de envío, puede que se envíe automáticamente")
 
-                # Ahora esperar la página de ingreso de código SMS
-                await page.wait_for_timeout(5000)
-                code_input = await page.query_selector('input[name="code"], input[type="text"]')
-                if code_input:
+                # --- NUEVO: Esperar a que aparezca el campo de código o un mensaje de error ---
+                try:
+                    # Esperar hasta 30 segundos a que aparezca el campo de código (por ID específico)
+                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
                     logger.debug("   📱 Página de ingreso de código SMS detectada")
                     sms_code = await get_hero_sms_code(activation_id)
                     if sms_code:
@@ -1612,12 +1613,20 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     else:
                         logger.error("❌ No se pudo obtener código SMS")
                         raise Exception("No se pudo obtener código de verificación SMS")
-                else:
-                    logger.warning("   ⚠️ No se encontró campo para código SMS, puede que no se requiera")
+                except Exception as e:
+                    # Si no aparece el campo de código, verificar si hay mensaje de error
+                    error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
+                    if error_msg:
+                        error_text = await error_msg.text_content()
+                        logger.error(f"❌ Error al agregar número: {error_text}")
+                        raise Exception(f"Error al agregar número: {error_text}")
+                    else:
+                        # Si no hay error y tampoco campo, puede que la verificación no sea necesaria
+                        logger.warning("⚠️ No se encontró campo de código ni mensaje de error, continuando...")
+                        # Tomar screenshot para depuración
+                        last_screenshot = await take_screenshot(page, "sin_codigo_ni_error")
             else:
                 logger.debug("   ✅ No se requiere agregar número de teléfono")
-
-
 
 
 
