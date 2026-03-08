@@ -1122,8 +1122,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-
-
             # ----- PASO 15: Detectar captcha después del envío -----
             logger.debug("🔍 [PASO 15] Verificando captcha después del envío...")
             await page.wait_for_timeout(5000)
@@ -1194,7 +1192,54 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     logger.debug(f"   📝 Instrucción extraída: {hint_text}")
 
                 # Resolver coordenadas
-                coordinates = solve_coordinates_captcha(img_path, hint_text)
+                coordinates = None
+
+                # Intentar con 2captcha usando el método genérico (más compatible)
+                if API_KEY_2CAPTCHA:
+                    try:
+                        import twocaptcha
+                        solver = twocaptcha.TwoCaptcha(API_KEY_2CAPTCHA)
+                        # Enviar la imagen como base64
+                        with open(img_path, 'rb') as f:
+                            img_base64 = base64.b64encode(f.read()).decode('utf-8')
+                        # Crear tarea de coordenadas manualmente
+                        result = solver.solve_captcha({
+                            'method': 'post',
+                            'body': img_base64,
+                            'coordinatescaptcha': 1,
+                            'textinstructions': hint_text
+                        })
+                        if result and result.get('code'):
+                            # El resultado viene como "x1,y1;x2,y2"
+                            coord_str = result['code']
+                            points = []
+                            for pair in coord_str.split(';'):
+                                if pair:
+                                    x, y = pair.split(',')
+                                    points.append({'x': int(x), 'y': int(y)})
+                            coordinates = points
+                            logger.debug(f"✅ 2captcha resolvió coordenadas: {coordinates}")
+                        else:
+                            logger.warning("⚠️ 2captcha no devolvió coordenadas")
+                    except Exception as e:
+                        logger.warning(f"⚠️ 2captcha falló: {e}")
+
+                # Si falló, intentar con anticaptcha (clase correcta)
+                if not coordinates and API_KEY_ANTICAPTCHA:
+                    try:
+                        from anticaptchaofficial.imagecoordinates import imagecoordinates
+                        solver = imagecoordinates()
+                        solver.set_api_key(API_KEY_ANTICAPTCHA)
+                        solver.set_comment(hint_text)
+                        solver.set_image_path(img_path)
+                        coordinates = solver.solve_and_return_solution()
+                        if coordinates:
+                            logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
+                        else:
+                            logger.warning("⚠️ anticaptcha no devolvió coordenadas")
+                    except Exception as e:
+                        logger.warning(f"⚠️ anticaptcha falló: {e}")
+
                 if not coordinates:
                     return None, "No se pudo resolver captcha de coordenadas", last_screenshot
 
@@ -1223,11 +1268,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 # Después de resolver, esperar un poco y actualizar contenido
                 await page.wait_for_timeout(5000)
                 content = await safe_get_content(page)
-
-
-
-
-
 
 
 
