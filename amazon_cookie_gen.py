@@ -676,6 +676,639 @@ async def add_address(session, country_code, email, password, token=None, servic
         logger.warning(f"⚠️ Error al agregar dirección: {resp.status_code}")
         return False
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+async def create_amazon_account(country_code, email=None, token=None, service=None, add_address_flag=True):
+    # NOTA: email, token, service se ignoran; usamos número de teléfono.
+    logger.debug(f"🏁 [ENTRADA] create_amazon_account para país {country_code} (vía número de teléfono)")
+
+    max_global_retries = 3
+    for global_attempt in range(1, max_global_retries + 1):
+        logger.debug(f"🔄 Intento global {global_attempt}/{max_global_retries}")
+        playwright = None
+        browser = None
+        context = None
+        page = None
+        session = None
+        last_screenshot = None
+
+        account_data = {
+            'email': None,          # No se usará
+            'password': None,
+            'name': None,
+            'phone': None,
+            'address': None,
+            'cookie_string': None,
+            'cookie_dict': None,
+            'country': country_code,
+            'timestamp': time.time()
+        }
+
+        try:
+            # ----- PASO 1: Configurar sesión y proxy -----
+            logger.debug("📦 [PASO 1] Configurando sesión requests...")
+            session = requests.Session()
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=1,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+
+            if PROXY_HOST_PORT:
+                proxy_url = f"http://{PROXY_HOST_PORT}"
+                if PROXY_AUTH:
+                    proxy_url = f"http://{PROXY_AUTH}@{PROXY_HOST_PORT}"
+                session.proxies = {'http': proxy_url, 'https': proxy_url}
+                logger.debug(f"   ✅ Proxy configurado: {PROXY_HOST_PORT}")
+            else:
+                logger.warning("   ⚠️ No se configuró proxy")
+
+            # ----- PASO 2: Probar proxy -----
+            logger.debug("🔄 [PASO 2] Probando proxy...")
+            ok, ip = test_proxy(session)
+            if not ok:
+                logger.error(f"   ❌ Proxy no funciona: {ip}")
+                raise Exception(f"Proxy error: {ip}")
+            logger.debug(f"   ✅ Proxy OK - IP pública: {ip}")
+
+            # ----- PASO 3: Obtener número de teléfono temporal -----
+            logger.debug("📱 [PASO 3] Obteniendo número de teléfono temporal...")
+            phone_number = None
+            order_id = None
+
+            # Intentar con 5sim
+            if FIVESIM_API_KEY:
+                sms_info = await get_fivesim_number(country_code, product='amazon')
+                if sms_info:
+                    full_phone, order_id = sms_info
+                    logger.debug(f"   ✅ Número 5sim obtenido: {full_phone} (order_id: {order_id})")
+                    # Quitar código de país
+                    country_prefix_length = {
+                        'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3,
+                        'FR': 3, 'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3,
+                    }
+                    prefix_len = country_prefix_length.get(country_code, 0)
+                    if prefix_len and len(full_phone) > prefix_len:
+                        phone_number = full_phone[prefix_len:]
+                        phone_number = re.sub(r'\D', '', phone_number)
+                        logger.debug(f"   ✅ Número local (sin código): {phone_number}")
+                    else:
+                        phone_number = full_phone
+                        logger.warning(f"   ⚠️ No se pudo quitar código de país, se usará completo: {phone_number}")
+                else:
+                    logger.warning("   ⚠️ 5sim falló, intentando con HeroSMS...")
+                    # Aquí podrías llamar a get_hero_sms_number si está implementada
+                    if HERO_SMS_API_KEY:
+                        # Implementar get_hero_sms_number similar
+                        logger.error("❌ HeroSMS no implementado en este ejemplo")
+                        raise Exception("No se pudo obtener número de teléfono")
+                    else:
+                        logger.error("❌ No hay API de 5sim ni HeroSMS configurada")
+                        raise Exception("No se pudo obtener número de teléfono")
+            else:
+                logger.error("❌ No hay API key de 5sim configurada")
+                raise Exception("Se requiere número de teléfono pero no hay API de SMS")
+
+            account_data['phone'] = phone_number
+
+            # ----- PASO 4: Generar credenciales (nombre y contraseña) -----
+            logger.debug("🔑 [PASO 4] Generando credenciales...")
+            password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
+            first_name = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5)).capitalize()
+            last_name = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5)).capitalize()
+            fullname = f"{first_name} {last_name}"
+            account_data['password'] = password
+            account_data['name'] = fullname
+            logger.debug(f"   👤 Nombre: {fullname}")
+            logger.debug(f"   🔐 Contraseña: {password}")
+
+            # ----- PASO 5: Iniciar Playwright -----
+            logger.debug("🎬 [PASO 5] Iniciando Playwright...")
+            try:
+                playwright = await async_playwright().start()
+                logger.debug("   ✅ Playwright iniciado")
+            except Exception as e:
+                logger.error(f"   ❌ Error iniciando Playwright: {e}")
+                raise Exception(f"Error iniciando Playwright: {e}")
+
+            launch_options = {
+                'headless': True,
+                'args': [
+                    '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
+                    '--disable-gpu',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-automation',
+                    '--disable-web-security',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--disable-site-isolation-trials',
+                    '--disable-features=BlockInsecurePrivateNetworkRequests',
+                    '--disable-sync',
+                    '--disable-default-apps',
+                    '--disable-extensions',
+                    '--disable-component-extensions-with-background-pages',
+                    '--disable-client-side-phishing-detection',
+                    '--disable-crash-reporter',
+                    '--disable-ipc-flooding-protection',
+                    '--disable-prompt-on-repost',
+                    '--disable-renderer-backgrounding',
+                    '--force-color-profile=srgb',
+                    '--metrics-recording-only',
+                    '--password-store=basic',
+                    '--use-mock-keychain',
+                    '--hide-scrollbars',
+                    '--mute-audio',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-breakpad',
+                    '--disable-component-update',
+                    '--disable-domain-reliability',
+                    '--disable-print-preview',
+                    '--disable-ntp-popular-sites',
+                    '--disable-top-sites',
+                    '--disable-voice-input',
+                    '--enable-automation=0',
+                    '--enable-blink-features=IdleDetection',
+                    '--disable-notifications',
+                    '--disable-permissions-api',
+                    '--disable-speech-api',
+                    '--disable-background-net',
+                    '--disable-features=ChromeWhatsNewUI',
+                    '--disable-features=TranslateUI',
+                    '--disable-features=OptimizationHints',
+                    '--disable-features=MediaRouter',
+                    '--disable-features=DialMediaRouteProvider',
+                    '--disable-features=PasswordImport',
+                    '--disable-features=ImprovedCookieControls',
+                    '--disable-features=LazyFrameLoading',
+                    '--disable-features=LazyImageLoading',
+                    '--disable-features=AutofillServerCommunication',
+                    '--disable-features=AutofillEnableCompanyName',
+                    '--disable-features=InterestFeedContentSuggestions',
+                    '--disable-features=WebRtcHideLocalIpsWithMdns',
+                    '--disable-features=WebRtcAllowInputVolumeAdjustment',
+                    '--disable-features=WebRtcUseEchoCanceller3',
+                    '--disable-features=WebRtcAllowWgcScreenCapturer',
+                    '--disable-features=WebRtcStunOrigin',
+                    '--disable-features=WebRtcUseMinMaxVEABitrate',
+                    '--disable-features=WebRtcAllowWgcScreenCapturer',
+                    '--disable-features=WebRtcEnableFrameDropper',
+                    '--disable-features=WebRtcEnableFrameRateDecoupling',
+                    '--disable-features=WebRtcEnableRtcEventLog',
+                    '--disable-features=WebRtcEnableTimeLimitedFreeze',
+                    '--disable-features=WebRtcEnableVp9kSvc',
+                    '--disable-features=WebRtcH264WithH264',
+                    '--disable-features=WebRtcH265WithH265',
+                    '--disable-features=WebRtcVp8WithVp8',
+                    '--disable-features=WebRtcVp9WithVp9',
+                    '--disable-features=WebRtcAv1WithAv1'
+                ]
+            }
+            if PROXY_HOST_PORT:
+                proxy_dict = {'server': f'http://{PROXY_HOST_PORT}'}
+                if PROXY_AUTH:
+                    user, pwd = PROXY_AUTH.split(':', 1)
+                    proxy_dict['username'] = user
+                    proxy_dict['password'] = pwd
+                launch_options['proxy'] = proxy_dict
+                logger.debug(f"   🌐 Proxy Playwright: {PROXY_HOST_PORT}")
+
+            # ----- PASO 6: Lanzar browser -----
+            logger.debug("🚀 [PASO 6] Lanzando browser...")
+            try:
+                browser = await playwright.chromium.launch(**launch_options)
+                logger.debug("   ✅ Browser lanzado")
+            except Exception as e:
+                logger.error(f"   ❌ Error lanzando browser: {e}")
+                raise Exception(f"Error lanzando browser: {e}")
+
+            context = await browser.new_context(
+                viewport={'width': 1280, 'height': 720},
+                user_agent=random.choice(USER_AGENTS),
+                locale='es-MX' if country_code == 'MX' else 'en-US',
+                timezone_id='America/Mexico_City' if country_code == 'MX' else 'America/New_York'
+            )
+
+            # Inyectar script anti-detección
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                Object.defineProperty(navigator, 'languages', {get: () => ['es-ES', 'es', 'en']});
+                window.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+                Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+                Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+                Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 1});
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                );
+            """)
+
+            page = await context.new_page()
+            logger.debug("   ✅ Contexto y página creados con evasión")
+
+            # ----- PASO 7: Navegar a la URL base del país (con reintentos) -----
+            base_url = base_urls[country_code]
+            logger.debug(f"🌐 [PASO 7] Navegando a URL base: {base_url}")
+
+            page_loaded = False
+            for attempt in range(3):
+                try:
+                    await page.goto(base_url, wait_until='domcontentloaded', timeout=120000)
+                    await page.wait_for_timeout(5000)
+                    body = await page.query_selector('body')
+                    if body:
+                        logger.debug(f"   ✅ Página cargada en intento {attempt+1}")
+                        page_loaded = True
+                        break
+                    else:
+                        logger.warning(f"   ⚠️ Intento {attempt+1}: no se detectó body")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Intento {attempt+1} falló: {e}")
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(5)
+
+            if not page_loaded:
+                raise Exception("No se pudo cargar la página de Amazon después de reintentos")
+
+            await page.wait_for_timeout(3000)
+            last_screenshot = await take_screenshot(page, "home_page")
+            logger.debug(f"   📍 URL actual: {page.url}")
+
+            # ----- PASO 8: Hacer clic en "Hola, identifícate" -----
+            logger.debug("👤 [PASO 8] Buscando enlace de inicio de sesión...")
+            login_selectors = [
+                'a[data-nav-role="signin"]',
+                'a.nav-a[data-nav-role="signin"]',
+                'a[data-csa-c-slot-id="nav-link-accountList"]',
+                'a:has-text("Hola, identifícate")',
+                'a:has-text("Hello, Sign in")',
+                'a:has-text("Identifícate")'
+            ]
+            login_link = None
+            for selector in login_selectors:
+                try:
+                    link = await page.wait_for_selector(selector, state='visible', timeout=5000)
+                    if link:
+                        login_link = link
+                        logger.debug(f"   ✅ Enlace de login encontrado con selector: {selector}")
+                        break
+                except:
+                    continue
+            if not login_link:
+                raise Exception("No se encontró enlace de inicio de sesión")
+
+            await login_link.click()
+            await page.wait_for_load_state('networkidle', timeout=20000)
+            await page.wait_for_timeout(2000)
+            logger.debug(f"   📍 URL después de login: {page.url}")
+            last_screenshot = await take_screenshot(page, "after_login_click")
+
+            # ----- PASO 9: Ingresar número de teléfono en primera página -----
+            logger.debug("📱 [PASO 9] Ingresando número de teléfono...")
+            phone_field = None
+            phone_selectors = ['input#ap_email', 'input[name="email"]', 'input[type="email"]', 'input[type="tel"]']
+            for selector in phone_selectors:
+                field = await page.query_selector(selector)
+                if field and await field.is_visible():
+                    phone_field = field
+                    logger.debug(f"   ✅ Campo encontrado con selector: {selector}")
+                    break
+            if not phone_field:
+                raise Exception("No se encontró campo para ingresar número de teléfono")
+
+            await phone_field.fill(phone_number)
+            logger.debug(f"   ✅ Número ingresado: {phone_number}")
+            last_screenshot = await take_screenshot(page, "phone_llenado")
+
+            # ----- PASO 10: Hacer clic en Continuar -----
+            logger.debug("🖱️ [PASO 10] Haciendo clic en Continuar...")
+            continue_button = None
+            continue_selectors = ['input#continue', 'input.a-button-input', 'button#continue']
+            for selector in continue_selectors:
+                btn = await page.query_selector(selector)
+                if btn and await btn.is_visible():
+                    continue_button = btn
+                    logger.debug(f"   ✅ Botón Continuar encontrado con selector: {selector}")
+                    break
+            if not continue_button:
+                raise Exception("No se encontró botón Continuar")
+
+            await continue_button.click()
+            await page.wait_for_load_state('networkidle', timeout=15000)
+            await page.wait_for_timeout(2000)
+            logger.debug(f"   📍 Nueva URL: {page.url}")
+            last_screenshot = await take_screenshot(page, "despues_continuar")
+
+            # ----- PASO 11: Página intermedia "Proceder a crear una cuenta" -----
+            logger.debug("🔍 [PASO 11] Verificando página intermedia...")
+            proceed_selectors = [
+                'span#intention-submit-button input.a-button-input',
+                'input[value="Proceder a crear una cuenta"]',
+                'button:has-text("Proceder a crear una cuenta")',
+                'input[value*="Create account"]',
+                'button:has-text("Create account")'
+            ]
+            proceed_button = None
+            for selector in proceed_selectors:
+                try:
+                    btn = await page.wait_for_selector(selector, state='visible', timeout=3000)
+                    if btn:
+                        proceed_button = btn
+                        logger.debug(f"   ✅ Botón 'Proceder' encontrado con selector: {selector}")
+                        break
+                except:
+                    continue
+
+            if proceed_button:
+                logger.debug("   🔘 Haciendo clic en 'Proceder'...")
+                await proceed_button.click()
+                try:
+                    await page.wait_for_selector('#ap_customer_name', state='visible', timeout=30000)
+                    logger.debug("   ✅ Campo de nombre visible, formulario cargado")
+                except Exception as e:
+                    content = await safe_get_content(page)
+                    if "JavaScript se ha deshabilitado" in content:
+                        raise Exception("Error: JavaScript deshabilitado")
+                    raise Exception(f"Timeout esperando campo de nombre: {e}")
+                await page.wait_for_timeout(2000)
+                last_screenshot = await take_screenshot(page, "despues_proceder")
+            else:
+                raise Exception("No se pudo acceder al formulario de registro después de Continuar")
+
+            # ----- PASO 12: Llenar formulario de registro (nombre, contraseña) -----
+            logger.debug("📝 [PASO 12] Llenando formulario completo...")
+            last_screenshot = await take_screenshot(page, "formulario_antes_llenar")
+
+            async def safe_fill(selector, value, desc):
+                for attempt in range(3):
+                    try:
+                        field = await page.wait_for_selector(selector, state='visible', timeout=5000)
+                        await field.fill(value)
+                        logger.debug(f"   ✅ {desc} llenado con selector: {selector}")
+                        return True
+                    except Exception as e:
+                        logger.debug(f"      ⚠️ Intento {attempt+1} falló: {str(e)[:50]}")
+                        await page.wait_for_timeout(1000)
+                return False
+
+            # Nombre
+            name_selectors = ['input#ap_customer_name', 'input[name="customerName"]']
+            name_filled = False
+            for sel in name_selectors:
+                if await safe_fill(sel, fullname, "Nombre"):
+                    name_filled = True
+                    break
+            if not name_filled:
+                logger.warning("⚠️ No se pudo llenar campo de nombre, puede estar precargado")
+
+            # Contraseña
+            pwd_selectors = ['input#ap_password', 'input[name="password"]']
+            pwd_filled = False
+            for sel in pwd_selectors:
+                if await safe_fill(sel, password, "Contraseña"):
+                    pwd_filled = True
+                    break
+            if not pwd_filled:
+                raise Exception("No se pudo llenar campo de contraseña")
+
+            # Confirmación de contraseña
+            confirm_selectors = ['input#ap_password_check', 'input[name="passwordCheck"]']
+            for sel in confirm_selectors:
+                if await safe_fill(sel, password, "Confirmación"):
+                    break
+
+            # ----- PASO 13: Botón de registro final -----
+            logger.debug("🎯 [PASO 13] Buscando botón de registro final...")
+            final_btn_selectors = [
+                'input#continue', 'input.a-button-input', 'button[type="submit"]',
+                'input[value*="Crear cuenta"]', 'button:has-text("Crear cuenta")',
+                'input[value*="Create account"]', 'button:has-text("Create account")'
+            ]
+            clicked = False
+            for sel in final_btn_selectors:
+                try:
+                    btn = await page.wait_for_selector(sel, state='visible', timeout=3000)
+                    if btn:
+                        await btn.click()
+                        logger.debug(f"   ✅ Botón final clickeado con selector: {sel}")
+                        clicked = True
+                        break
+                except:
+                    continue
+            if not clicked:
+                logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
+
+            await page.wait_for_load_state('networkidle', timeout=30000)
+            last_screenshot = await take_screenshot(page, "despues_registro")
+
+            # ----- PASO 14: Detectar y resolver captcha -----
+            # (Aquí copia tu código existente de detección de captcha, paso 15 original)
+            # ... (incluye detección de canvas, 2captcha, etc.)
+
+            # ----- PASO 15: Verificación por SMS -----
+            logger.debug("📱 [PASO 15] Esperando campo de código SMS...")
+            try:
+                code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                logger.debug("   ✅ Página de ingreso de código SMS detectada")
+                sms_code = await get_fivesim_code(order_id)
+                if sms_code:
+                    await code_input.fill(sms_code)
+                    logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
+                    verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
+                    if verify_btn:
+                        await verify_btn.click()
+                        await page.wait_for_load_state('networkidle', timeout=15000)
+                        last_screenshot = await take_screenshot(page, "despues_verificacion_sms")
+                    else:
+                        logger.warning("   ⚠️ No se encontró botón de verificar")
+                else:
+                    logger.error("❌ No se pudo obtener código SMS")
+                    raise Exception("No se pudo obtener código de verificación SMS")
+            except Exception as e:
+                # Si no aparece el campo de código, verificar mensajes de error
+                error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
+                if error_msg:
+                    error_text = await error_msg.text_content()
+                    logger.error(f"❌ Error en verificación SMS: {error_text}")
+                    raise Exception(f"Error en verificación SMS: {error_text}")
+                else:
+                    logger.warning("⚠️ No se encontró campo de código ni mensaje de error, continuando...")
+                    last_screenshot = await take_screenshot(page, "sin_codigo_sms")
+
+            # ----- PASO 16: Verificar errores en la página -----
+            # (igual que paso 18 original)
+
+            # ----- PASO 17: Verificar éxito (cuenta creada) -----
+            # (igual que paso 19 original)
+
+            # ----- PASO 18: Agregar dirección (opcional) -----
+            # (igual que paso 20 original)
+
+            # ----- PASO 19: Visitar wallet -----
+            # (igual que paso 21 original)
+
+            # (A partir de aquí, copia el resto de tu código desde la verificación de éxito hasta el final)
+
+        except Exception as e:
+            logger.error(f"❌ Error en intento {global_attempt}: {e}")
+            if global_attempt == max_global_retries:
+                if page:
+                    last_screenshot = await take_screenshot(page, "error_final")
+                return None, str(e), last_screenshot
+            else:
+                logger.info(f"🔄 Reintentando después de 5 segundos (nueva IP)...")
+                if page:
+                    await page.close()
+                if context:
+                    await context.close()
+                if browser:
+                    await browser.close()
+                if playwright:
+                    await playwright.stop()
+                await asyncio.sleep(5)
+                continue
+        finally:
+            logger.debug("🧹 Limpiando recursos (fin del intento)...")
+            if page:
+                await page.close()
+            if context:
+                await context.close()
+            if browser:
+                await browser.close()
+            if playwright:
+                await playwright.stop()
+            logger.debug("✅ Limpieza completada")
+
+    return None, "Error desconocido", None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # -------------------------------------------------------------------
 # FUNCIÓN PRINCIPAL DE CREACIÓN DE CUENTA (CON REINTENTOS GLOBALES)
 # -------------------------------------------------------------------
@@ -1382,361 +2015,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 await page.wait_for_timeout(5000)
                 content = await safe_get_content(page)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            # Detectar otros tipos de captcha (reCAPTCHA, imagen simple)
-            captcha_detected = False
-            captcha_type = None
-            site_key = None
-            captcha_image_url = None
-
-            # reCAPTCHA
-            recaptcha = await page.query_selector('div.g-recaptcha')
-            if recaptcha:
-                site_key = await recaptcha.get_attribute('data-sitekey')
-                if site_key:
-                    captcha_detected = True
-                    captcha_type = 'recaptcha'
-                    logger.debug(f"   ✅ reCAPTCHA detectado, sitekey: {site_key}")
-
-            # Captcha de imagen Amazon
-            if not captcha_detected:
-                captcha_container = await page.query_selector('#captcha, .captcha, .a-row captcha')
-                if captcha_container:
-                    img = await captcha_container.query_selector('img')
-                    if img:
-                        captcha_image_url = await img.get_attribute('src')
-                        if captcha_image_url:
-                            captcha_detected = True
-                            captcha_type = 'image_captcha'
-                            logger.debug(f"   ✅ Captcha de imagen detectado: {captcha_image_url}")
-
-            if captcha_detected:
-                logger.warning(f"⚠️ Captcha detectado (tipo: {captcha_type})")
-                last_screenshot = await take_screenshot(page, "captcha_detectado")
-
-                if captcha_type == 'recaptcha' and site_key:
-                    solution = solve_captcha(site_key, page.url, is_image_captcha=False)
-                    if solution:
-                        logger.debug("   ✅ Enviando solución reCAPTCHA...")
-                        await page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML="{solution}";')
-                        submit = await page.query_selector('input[type="submit"], button[type="submit"]')
-                        if submit:
-                            await submit.click()
-                    else:
-                        raise Exception("No se pudo resolver reCAPTCHA")
-
-                elif captcha_type == 'image_captcha' and captcha_image_url:
-                    img_data = requests.get(captcha_image_url, timeout=10).content
-                    with open('temp_captcha.jpg', 'wb') as f:
-                        f.write(img_data)
-                    solution = solve_captcha(None, page.url, is_image_captcha=True, image_path='temp_captcha.jpg')
-                    if solution:
-                        input_field = await page.query_selector('input[name="cvf_captcha_input"], input[type="text"]')
-                        if input_field:
-                            await input_field.fill(solution)
-                            submit = await page.query_selector('input[type="submit"]')
-                            if submit:
-                                await submit.click()
-                        else:
-                            raise Exception("No se encontró campo para captcha")
-                    else:
-                        raise Exception("No se pudo resolver captcha de imagen")
-
-                await page.wait_for_load_state('networkidle', timeout=30000)
-                last_screenshot = await take_screenshot(page, "despues_captcha")
-                content = await safe_get_content(page)
-                if "JavaScript se ha deshabilitado" in content:
-                    raise Exception("JavaScript deshabilitado después de captcha")
-
-            else:
-                logger.debug("   ✅ No se detectó captcha")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            # ----- PASO 16: Verificación de correo electrónico -----
-            logger.debug("📧 [PASO 16] Verificando si se requiere confirmación de correo...")
-            await page.wait_for_timeout(3000)
-            content = await safe_get_content(page)
-
-            if "Verifica la dirección de correo electrónico" in content or "verify your email" in content.lower():
-                logger.debug("   ✅ Página de verificación de correo detectada")
-                code_input = await page.query_selector('input[name="code"], input[type="text"]')
-                if code_input:
-                    verification_code = await get_verification_code(email, token, service)
-                    if verification_code:
-                        await code_input.fill(verification_code)
-                        logger.debug(f"   ✅ Código ingresado: {verification_code}")
-                        submit_btn = await page.query_selector('input[type="submit"], button[type="submit"]')
-                        if submit_btn:
-                            await submit_btn.click()
-                            await page.wait_for_load_state('networkidle', timeout=30000)
-                            last_screenshot = await take_screenshot(page, "despues_verificacion_correo")
-                        else:
-                            logger.warning("   ⚠️ No se encontró botón de verificación")
-                    else:
-                        logger.error("   ❌ No se pudo obtener código de verificación después de múltiples intentos")
-                        # Tomar captura del estado actual
-                        last_screenshot = await take_screenshot(page, "error_verificacion_correo")
-                        # Lanzar excepción para reintentar global
-                        raise Exception("No se pudo obtener código de verificación")
-                else:
-                    logger.warning("   ⚠️ No se encontró campo para código")
-            else:
-                logger.debug("   ✅ No se requiere verificación de correo")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            # ----- PASO 17: Verificar si se requiere agregar y verificar número de teléfono -----
-            logger.debug("📱 [PASO 17] Verificando si se requiere agregar número de teléfono...")
-            await page.wait_for_timeout(3000)
-            content = await safe_get_content(page)
-
-            # Detectar página de "Agregar un número de teléfono móvil"
-            if "Agregar un número de teléfono móvil" in content or "add a mobile phone number" in content.lower():
-                logger.warning("⚠️ Se requiere agregar número de teléfono")
-                last_screenshot = await take_screenshot(page, "pagina_agregar_telefono")
-
-                # Buscar el campo de número
-                phone_input = await page.query_selector('input[type="tel"], input[name*="phone"]')
-                if not phone_input:
-                    logger.error("❌ No se encontró campo para número de teléfono")
-                    raise Exception("No se encontró campo de teléfono en la página de verificación")
-
-                # --- Obtener número de 5sim ---
-                phone_number = None
-                order_id = None
-                if FIVESIM_API_KEY:
-                    sms_info = await get_fivesim_number(country_code, product='amazon')
-                    if sms_info:
-                        full_phone, order_id = sms_info
-                        logger.debug(f"   ✅ Número completo obtenido: {full_phone}")
-                        
-                        # Definir cuántos dígitos quitar según el código de país
-                        country_prefix_length = {
-                            'MX': 3,   # 52 + posiblemente un dígito extra
-                            'US': 2,   # 1
-                            'CA': 2,   # 1
-                            'UK': 3,   # 44
-                            'DE': 3,   # 49
-                            'FR': 3,   # 33
-                            'IT': 3,   # 39
-                            'ES': 3,   # 34
-                            'JP': 3,   # 81
-                            'AU': 3,   # 61
-                            'IN': 3,   # 91
-                        }
-                        prefix_len = country_prefix_length.get(country_code, 0)
-                        if prefix_len and len(full_phone) > prefix_len:
-                            # Extraer solo los dígitos locales (sin el código de país)
-                            phone_number = full_phone[prefix_len:]
-                            # Asegurar que solo sean dígitos
-                            phone_number = re.sub(r'\D', '', phone_number)
-                            logger.debug(f"   ✅ Número local (sin código): {phone_number}")
-                        else:
-                            phone_number = full_phone
-                            logger.warning(f"   ⚠️ No se pudo quitar el código de país, se usará el número completo")
-                    else:
-                        logger.error("❌ No se pudo obtener número de 5sim")
-                        raise Exception("No se pudo obtener número de teléfono real para verificación SMS")
-                else:
-                    logger.error("❌ No hay API key de 5sim configurada")
-                    raise Exception("Se requiere número de teléfono pero no hay API de SMS")
-
-                # --- Función auxiliar para reintentar con escritura del número ---
-                async def intentar_agregar_numero(telefono, intento=1):
-                    # Limpiar y escribir el número
-                    await phone_input.fill('')
-                    await asyncio.sleep(0.5)
-                    await phone_input.fill(telefono)
-                    logger.debug(f"   🔄 Intento {intento}: Número ingresado: {telefono}")
-
-                    # Buscar y hacer clic en el botón de agregar
-                    btn = await page.query_selector('input[type="submit"], button:has-text("Agregar"), button:has-text("Continue"), button:has-text("Continuar")')
-                    if btn:
-                        await btn.click()
-                        logger.debug(f"   🔄 Intento {intento}: Clic en botón de agregar número")
-                        await page.wait_for_load_state('networkidle', timeout=15000)
-                        last_screenshot = await take_screenshot(page, f"despues_enviar_numero_intento{intento}")
-                        return True
-                    else:
-                        logger.warning(f"   ⚠️ Intento {intento}: No se encontró botón de envío")
-                        return False
-
-                # --- Primer intento ---
-                exito = await intentar_agregar_numero(phone_number, 1)
-
-                # --- Esperar campo de código o error ---
-                try:
-                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
-                    logger.debug("   📱 Página de ingreso de código SMS detectada (primer intento)")
-                    sms_code = await get_fivesim_code(order_id)
-                    if sms_code:
-                        await code_input.fill(sms_code)
-                        logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
-                        verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
-                        if verify_btn:
-                            await verify_btn.click()
-                            await page.wait_for_load_state('networkidle', timeout=15000)
-                            last_screenshot = await take_screenshot(page, "despues_verificacion_sms")
-                        else:
-                            logger.warning("   ⚠️ No se encontró botón de verificar")
-                    else:
-                        logger.error("❌ No se pudo obtener código SMS")
-                        raise Exception("No se pudo obtener código de verificación SMS")
-
-                except Exception as e:
-                    # Si no aparece el campo de código, verificar si hay mensaje de error
-                    error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
-                    if error_msg:
-                        error_text = await error_msg.text_content()
-                        logger.warning(f"⚠️ Error al agregar número (intento 1): {error_text}")
-                        
-                        # --- Segundo intento: volver a escribir el número y enviar ---
-                        if "actividad inusual" in error_text.lower() or "try again" in error_text.lower():
-                            logger.debug("   🔄 Error por actividad inusual, reintentando con el mismo número...")
-                            await asyncio.sleep(3)  # esperar un poco
-                            exito2 = await intentar_agregar_numero(phone_number, 2)
-                            if exito2:
-                                try:
-                                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
-                                    logger.debug("   📱 Página de ingreso de código SMS detectada (segundo intento)")
-                                    sms_code = await get_fivesim_code(order_id)
-                                    if sms_code:
-                                        await code_input.fill(sms_code)
-                                        logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
-                                        verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
-                                        if verify_btn:
-                                            await verify_btn.click()
-                                            await page.wait_for_load_state('networkidle', timeout=15000)
-                                            last_screenshot = await take_screenshot(page, "despues_verificacion_sms_segundo")
-                                        else:
-                                            logger.warning("   ⚠️ No se encontró botón de verificar")
-                                    else:
-                                        logger.error("❌ No se pudo obtener código SMS")
-                                        raise Exception("No se pudo obtener código de verificación SMS")
-                                except Exception as e2:
-                                    logger.error("❌ Reintento fallido también")
-                                    raise Exception(f"Error persistente al agregar número: {error_text}")
-                            else:
-                                logger.error("❌ No se pudo realizar el segundo intento (botón no encontrado)")
-                                raise Exception(f"Error al agregar número: {error_text}")
-                        else:
-                            # Otro tipo de error, no reintentar
-                            raise Exception(f"Error al agregar número: {error_text}")
-                    else:
-                        logger.warning("⚠️ No se encontró campo de código ni mensaje de error, continuando...")
-                        last_screenshot = await take_screenshot(page, "sin_codigo_ni_error")
-            else:
-                logger.debug("   ✅ No se requiere agregar número de teléfono")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                
 
             # ----- PASO 18: Verificar errores en la página -----
             logger.debug("🔍 [PASO 18] Buscando mensajes de error...")
@@ -1829,6 +2108,21 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
     # Nunca debería llegar aquí
     return None, "Error desconocido", None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # -------------------------------------------------------------------
 # FUNCIÓN PARA API
