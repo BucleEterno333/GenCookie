@@ -1601,17 +1601,17 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         
                         # Definir cuántos dígitos quitar según el código de país
                         country_prefix_length = {
-                            'MX': 2,   # 52
-                            'US': 1,   # 1
-                            'CA': 1,   # 1
-                            'UK': 2,   # 44
-                            'DE': 2,   # 49
-                            'FR': 2,   # 33
-                            'IT': 2,   # 39
-                            'ES': 2,   # 34
-                            'JP': 2,   # 81
-                            'AU': 2,   # 61
-                            'IN': 2,   # 91
+                            'MX': 3,   # 52
+                            'US': 2,   # 1
+                            'CA': 2,   # 1
+                            'UK': 3,   # 44
+                            'DE': 3,   # 49
+                            'FR': 3,   # 33
+                            'IT': 3,   # 39
+                            'ES': 3,   # 34
+                            'JP': 3,   # 81
+                            'AU': 3,   # 61
+                            'IN': 3,   # 91
                         }
                         prefix_len = country_prefix_length.get(country_code, 0)
                         if prefix_len and len(full_phone) > prefix_len:
