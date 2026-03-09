@@ -612,8 +612,8 @@ async def add_address(session, country_code, email, password, token=None, servic
     address_data = {
         'CA': {'countryCode': 'CA', 'fullName': 'Mark O. Montanez', 'phone': f'1{random.randint(1000000000,9999999999)}',
                'line1': '456 Bloor Street West', 'city': 'Toronto', 'state': 'ON', 'postalCode': 'M5S 1X8'},
-        'MX': {'countryCode': 'MX', 'fullName': 'Juan Pérez', 'phone': f'52{random.randint(1000000000,9999999999)}',
-               'line1': 'Calle Reforma 123', 'city': 'Ciudad de México', 'state': 'CDMX', 'postalCode': '06000'},
+        'MX': {'countryCode': 'US', 'fullName': 'John Doe', 'phone': f'1{random.randint(1000000000,9999999999)}',
+               'line1': '123 Main Street', 'city': 'New York', 'state': 'NY', 'postalCode': '10001'},
         'US': {'countryCode': 'US', 'fullName': 'John Doe', 'phone': f'1{random.randint(1000000000,9999999999)}',
                'line1': '123 Main Street', 'city': 'New York', 'state': 'NY', 'postalCode': '10001'},
         'UK': {'countryCode': 'GB', 'fullName': 'James Smith', 'phone': f'44{random.randint(1000000000,9999999999)}',
@@ -1704,7 +1704,7 @@ if __name__ == '__main__':
                     if res['success']:
                         data = res['data']
                         print(f"\n✅ Cookie generada:")
-                        print(f"   Email: {data['email']}")
+                        print(f"   Teléfono: {data['phone']}")
                         print(f"   Contraseña: {data['password']}")
                         print(f"   Cookie: {data['cookie_string'][:100]}...")
                     else:
