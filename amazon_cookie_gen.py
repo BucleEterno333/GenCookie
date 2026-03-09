@@ -1397,12 +1397,31 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 await page.wait_for_timeout(5000)
                 content = await safe_get_content(page)
 
+            # ----- PASO 15: Verificación por SMS (con posible redirección a WhatsApp) -----
+            logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
+            await page.wait_for_timeout(5000)  # esperar a que cargue la página
+            content = await safe_get_content(page)
 
-            # ----- PASO 15: Verificación por SMS -----
-            logger.debug("📱 [PASO 15] Esperando campo de código SMS...")
+            # Detectar si estamos en la página de WhatsApp
+            if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
+                logger.warning("⚠️ Página de verificación con WhatsApp detectada, seleccionando SMS...")
+                last_screenshot = await take_screenshot(page, "pagina_whatsapp")
+                # Buscar el enlace o botón para enviar por SMS
+                sms_option = await page.query_selector('a:has-text("Enviar código por SMS"), button:has-text("Enviar código por SMS")')
+                if sms_option:
+                    await sms_option.click()
+                    logger.debug("   ✅ Clic en 'Enviar código por SMS'")
+                    await page.wait_for_load_state('networkidle', timeout=15000)
+                    last_screenshot = await take_screenshot(page, "despues_seleccion_sms")
+                else:
+                    logger.warning("   ⚠️ No se encontró opción de SMS, puede que ya esté en la página de código")
+            else:
+                logger.debug("   ✅ No se detectó página de WhatsApp, continuando...")
+
+            # Ahora esperar el campo de código
             try:
                 code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
-                logger.debug("   ✅ Página de ingreso de código SMS detectada")
+                logger.debug("   📱 Página de ingreso de código SMS detectada")
                 sms_code = await get_fivesim_code(order_id)
                 if sms_code:
                     await code_input.fill(sms_code)
