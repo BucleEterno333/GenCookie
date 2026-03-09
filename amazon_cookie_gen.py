@@ -1399,22 +1399,29 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
             # ----- PASO 15: Verificación por SMS (con posible redirección a WhatsApp) -----
             logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
-            await page.wait_for_timeout(5000)  # esperar a que cargue la página
+            await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
 
             # Detectar si estamos en la página de WhatsApp
             if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
                 logger.warning("⚠️ Página de verificación con WhatsApp detectada, seleccionando SMS...")
                 last_screenshot = await take_screenshot(page, "pagina_whatsapp")
-                # Buscar el enlace o botón para enviar por SMS
-                sms_option = await page.query_selector('a:has-text("Enviar código por SMS"), button:has-text("Enviar código por SMS")')
-                if sms_option:
-                    await sms_option.click()
-                    logger.debug("   ✅ Clic en 'Enviar código por SMS'")
-                    await page.wait_for_load_state('networkidle', timeout=15000)
-                    last_screenshot = await take_screenshot(page, "despues_seleccion_sms")
-                else:
-                    logger.warning("   ⚠️ No se encontró opción de SMS, puede que ya esté en la página de código")
+                # Buscar el enlace o botón con el texto "Enviar código por SMS"
+                try:
+                    # Usar XPath para encontrar cualquier elemento que contenga ese texto
+                    sms_option = await page.query_selector('xpath=//*[contains(text(), "Enviar código por SMS")]')
+                    if not sms_option:
+                        # Intentar con texto exacto
+                        sms_option = await page.query_selector('xpath=//*[text()="Enviar código por SMS"]')
+                    if sms_option:
+                        await sms_option.click()
+                        logger.debug("   ✅ Clic en 'Enviar código por SMS'")
+                        await page.wait_for_load_state('networkidle', timeout=15000)
+                        last_screenshot = await take_screenshot(page, "despues_seleccion_sms")
+                    else:
+                        logger.warning("   ⚠️ No se encontró la opción de SMS, puede que ya esté en la página de código")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Error al buscar opción SMS: {e}")
             else:
                 logger.debug("   ✅ No se detectó página de WhatsApp, continuando...")
 
