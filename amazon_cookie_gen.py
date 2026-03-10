@@ -1500,26 +1500,27 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-
-
-                # ----- PASO 20: Agregar dirección (opcional) -----
+                                # ----- PASO 20: Agregar dirección (opcional) -----
                 if add_address_flag:
                     logger.debug("📍 [PASO 20] Agregando dirección...")
                     try:
                         # Navegar a la página de direcciones
+                        logger.debug("   Navegando a address book...")
                         await page.goto(address_book_urls[country_code], wait_until='networkidle', timeout=20000)
                         await page.wait_for_timeout(2000)
 
                         # Buscar y hacer clic en "Agregar dirección"
+                        logger.debug("   Buscando enlace para agregar dirección...")
                         add_link = page.locator('a[href*="/a/addresses/add"]').first()
                         if await add_link.count() == 0:
                             add_link = page.get_by_text("Agregar dirección", exact=False).first()
                         if await add_link.count() > 0:
                             await add_link.click()
+                            logger.debug("   ✅ Clic en 'Agregar dirección'")
                             await page.wait_for_load_state('networkidle', timeout=15000)
                             await page.wait_for_timeout(2000)
                         else:
-                            logger.warning("⚠️ No se encontró enlace para agregar dirección, se usará URL directa")
+                            logger.warning("   ⚠️ No se encontró enlace, yendo a URL directa")
                             await page.goto(add_address_urls[country_code], wait_until='networkidle', timeout=20000)
                             await page.wait_for_timeout(2000)
 
@@ -1545,63 +1546,73 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             },
                         }
                         country_data = address_data.get(country_code, address_data['US'])
+                        logger.debug(f"   Datos a ingresar: {country_data}")
 
                         # ---- Seleccionar país ----
                         try:
-                            # Hacer clic en el dropdown de país (el botón que muestra el país actual)
+                            logger.debug("   Seleccionando país...")
+                            # Hacer clic en el dropdown de país
                             country_dropdown = page.locator('span.a-button-text[data-action="a-dropdown-button"]').first()
                             if await country_dropdown.count() > 0:
                                 await country_dropdown.click()
                                 await page.wait_for_timeout(1000)
-                                # Buscar la opción "Estados Unidos" por texto
+                                # Buscar la opción "Estados Unidos"
                                 us_option = page.get_by_text("Estados Unidos", exact=True).first()
                                 if await us_option.count() > 0:
                                     await us_option.click()
-                                    await page.wait_for_timeout(1000)
+                                    logger.debug("   ✅ País seleccionado por texto")
                                 else:
-                                    # Intentar con el atributo data-value
+                                    # Fallback por data-value
                                     us_option = page.locator('a[data-value*="US"]').first()
                                     if await us_option.count() > 0:
                                         await us_option.click()
-                                        await page.wait_for_timeout(1000)
+                                        logger.debug("   ✅ País seleccionado por data-value")
                                     else:
-                                        logger.warning("⚠️ No se encontró la opción Estados Unidos")
+                                        logger.warning("   ⚠️ No se encontró opción Estados Unidos")
+                                await page.wait_for_timeout(1000)
                             else:
-                                logger.warning("⚠️ No se encontró dropdown de país")
+                                logger.warning("   ⚠️ No se encontró dropdown de país")
                         except Exception as e:
-                            logger.warning(f"⚠️ Error seleccionando país: {e}")
+                            logger.warning(f"   ⚠️ Error seleccionando país: {e}")
 
                         # Llenar campos de texto
+                        logger.debug("   Llenando campos...")
                         await page.fill('#address-ui-widgets-enterAddressFullName', country_data['fullName'])
                         await page.fill('#address-ui-widgets-enterAddressPhoneNumber', country_data['phone'])
                         await page.fill('#address-ui-widgets-enterAddressLine1', country_data['line1'])
                         await page.fill('#address-ui-widgets-enterAddressCity', country_data['city'])
+                        logger.debug("   ✅ Campos básicos llenados")
 
                         # ---- Seleccionar estado ----
                         try:
-                            # Hacer clic en el dropdown de estado (el botón que muestra "Seleccionar")
+                            logger.debug("   Seleccionando estado...")
+                            # Hacer clic en el dropdown de estado
+                            # Primero intentamos encontrar el botón que contiene "Seleccionar"
                             state_dropdown = page.locator('span.a-button-text[data-action="a-dropdown-button"]').filter(has_text="Seleccionar").first()
                             if await state_dropdown.count() == 0:
-                                # Si no encuentra con texto, usar el primer dropdown después del campo de ciudad
+                                # Si no, asumimos que el segundo dropdown es el de estado
                                 state_dropdown = page.locator('span.a-button-text[data-action="a-dropdown-button"]').nth(1)
                             if await state_dropdown.count() > 0:
                                 await state_dropdown.click()
                                 await page.wait_for_timeout(1000)
-                                # Buscar la opción por el valor del estado (NY)
+                                # Buscar opción por texto "New York"
                                 state_option = page.get_by_text("New York", exact=True).first()
                                 if await state_option.count() == 0:
                                     state_option = page.locator(f'a[data-value*="{country_data["state"]}"]').first()
                                 if await state_option.count() > 0:
                                     await state_option.click()
-                                    await page.wait_for_timeout(1000)
+                                    logger.debug(f"   ✅ Estado seleccionado: {country_data['state']}")
                                 else:
-                                    logger.warning(f"⚠️ No se encontró opción de estado {country_data['state']}")
+                                    logger.warning(f"   ⚠️ No se encontró opción de estado {country_data['state']}")
+                                await page.wait_for_timeout(1000)
                             else:
-                                logger.warning("⚠️ No se encontró dropdown de estado")
+                                logger.warning("   ⚠️ No se encontró dropdown de estado")
                         except Exception as e:
-                            logger.warning(f"⚠️ Error seleccionando estado: {e}")
+                            logger.warning(f"   ⚠️ Error seleccionando estado: {e}")
 
+                        # Código postal
                         await page.fill('#address-ui-widgets-enterAddressPostalCode', country_data['postalCode'])
+                        logger.debug("   ✅ Código postal llenado")
 
                         # Hacer clic en el botón de enviar
                         submit_btn = page.locator('input[type="submit"]').first()
@@ -1626,15 +1637,15 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                     account_data['address'] = "Dirección agregada (no se pudo confirmar)"
                                     logger.debug("   ℹ️ No se pudo confirmar, pero se intentó")
                         else:
-                            logger.warning("⚠️ No se encontró botón de envío")
+                            logger.warning("   ⚠️ No se encontró botón de envío")
                             account_data['address'] = "Error: no se encontró botón de envío"
+
                     except Exception as e:
                         logger.warning(f"⚠️ Error durante el proceso de agregar dirección: {e}")
                         account_data['address'] = f"Error: {e}"
                 else:
                     account_data['address'] = "No se agregó dirección"
                     logger.debug("   ℹ️ Omisión de dirección")
-
 
 
                 # ----- PASO 21: Visitar wallet para actualizar cookies -----
