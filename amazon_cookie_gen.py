@@ -1493,6 +1493,56 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
                 # ----- PASO 20: Agregar dirección (opcional) -----
                 if add_address_flag:
                     logger.debug("📍 [PASO 20] Agregando dirección...")
@@ -1572,29 +1622,33 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         await page.fill('#address-ui-widgets-enterAddressCity', country_data['city'])
                         logger.debug("   ✅ Campos básicos llenados")
 
-                        # ---- Seleccionar estado ----
+                        # ---- Seleccionar estado (intento 1) ----
+                        estado_seleccionado = False
                         try:
-                            logger.debug("   Seleccionando estado...")
-                            # Obtener todos los dropdowns
-                            dropdowns = await page.query_selector_all('span.a-button-text[data-action="a-dropdown-button"]')
-                            # Asumimos que el segundo es el de estado (el primero es país)
-                            if len(dropdowns) >= 2:
-                                state_dropdown = dropdowns[1]
-                            else:
-                                state_dropdown = None
+                            logger.debug("   Seleccionando estado (intento 1)...")
+                            # Esperar a que el dropdown de estado esté disponible
+                            await page.wait_for_timeout(2000)
+                            # Buscar el dropdown que tenga el texto "Seleccionar" (común para estado)
+                            state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]:has-text("Seleccionar")')
+                            if not state_dropdown:
+                                # Fallback: segundo dropdown
+                                dropdowns = await page.query_selector_all('span.a-button-text[data-action="a-dropdown-button"]')
+                                if len(dropdowns) >= 2:
+                                    state_dropdown = dropdowns[1]
                             if state_dropdown:
                                 await state_dropdown.click()
-                                await page.wait_for_timeout(1000)
-                                # Buscar opción por texto "New York"
+                                await page.wait_for_timeout(1500)
+                                # Buscar opción "New York"
                                 state_option = await page.query_selector('a:has-text("New York")')
                                 if not state_option:
                                     state_option = await page.query_selector(f'a[data-value*="{country_data["state"]}"]')
                                 if state_option:
                                     await state_option.click()
                                     logger.debug(f"   ✅ Estado seleccionado: {country_data['state']}")
+                                    await page.wait_for_timeout(1500)
+                                    estado_seleccionado = True
                                 else:
                                     logger.warning(f"   ⚠️ No se encontró opción de estado {country_data['state']}")
-                                await page.wait_for_timeout(1000)
                             else:
                                 logger.warning("   ⚠️ No se encontró dropdown de estado")
                         except Exception as e:
@@ -1604,32 +1658,91 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         await page.fill('#address-ui-widgets-enterAddressPostalCode', country_data['postalCode'])
                         logger.debug("   ✅ Código postal llenado")
 
-                        # Hacer clic en el botón de enviar
+                        # Función para verificar errores específicos
+                        async def check_address_errors():
+                            # Buscar mensaje de error general arriba del formulario
+                            general_error = await page.query_selector('.a-alert-error, .a-alert-warning')
+                            if general_error:
+                                error_text = await general_error.text_content()
+                                if "Revisa tu dirección" in error_text:
+                                    logger.debug("   🔍 Detectado error: 'Revisa tu dirección' (puede ser por un solo clic)")
+                                return error_text
+                            # Buscar error específico de estado
+                            state_error = await page.query_selector('#address-ui-widgets-enterAddressStateOrRegion + .a-alert-error, .a-alert-error:has-text("Ingresa un estado")')
+                            if state_error:
+                                error_text = await state_error.text_content()
+                                if "Ingresa un estado" in error_text:
+                                    logger.debug("   🔍 Detectado error: 'Ingresa un estado, región o provincia' (estado no seleccionado)")
+                                return error_text
+                            return None
+
+                        # Hacer clic en el botón de enviar (primer intento)
                         submit_btn = await page.query_selector('input[type="submit"]')
                         if submit_btn:
                             await submit_btn.click()
-                            logger.debug("   ✅ Clic en botón de agregar dirección")
-                            await page.wait_for_load_state('networkidle', timeout=15000)
-                            await page.wait_for_timeout(2000)
-                            await submit_btn.click()
-                            logger.debug("   ✅ Segundo clic en botón de agregar dirección")
-                            await page.wait_for_load_state('networkidle', timeout=15000)
-                            await page.wait_for_timeout(2000)
+                            logger.debug("   ✅ Primer clic en botón de agregar dirección")
+                            await page.wait_for_timeout(3000)  # Esperar a que el servidor procese
 
-                            # Verificar mensaje de éxito o error
-                            success_msg = await page.query_selector('.a-alert-success')
-                            if success_msg:
-                                account_data['address'] = "Dirección agregada exitosamente"
-                                logger.debug("   ✅ Dirección agregada correctamente")
-                            else:
-                                error_msg = await page.query_selector('.a-alert-error')
-                                if error_msg:
-                                    error_text = await error_msg.text_content()
-                                    account_data['address'] = f"Error al agregar dirección: {error_text}"
-                                    logger.warning(f"   ⚠️ {account_data['address']}")
+                            # Verificar errores después del primer clic
+                            error_msg = await check_address_errors()
+                            if error_msg:
+                                logger.warning(f"   ⚠️ Error después del primer clic: {error_msg}")
+                                # Si el error es por estado no seleccionado, reintentar selección
+                                if "Ingresa un estado" in error_msg and not estado_seleccionado:
+                                    logger.debug("   🔄 Reintentando selección de estado...")
+                                    try:
+                                        # Volver a buscar el dropdown de estado
+                                        state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]:has-text("Seleccionar")')
+                                        if not state_dropdown:
+                                            dropdowns = await page.query_selector_all('span.a-button-text[data-action="a-dropdown-button"]')
+                                            if len(dropdowns) >= 2:
+                                                state_dropdown = dropdowns[1]
+                                        if state_dropdown:
+                                            await state_dropdown.click()
+                                            await page.wait_for_timeout(1500)
+                                            state_option = await page.query_selector('a:has-text("New York")')
+                                            if not state_option:
+                                                state_option = await page.query_selector(f'a[data-value*="{country_data["state"]}"]')
+                                            if state_option:
+                                                await state_option.click()
+                                                logger.debug(f"   ✅ Estado seleccionado en reintento")
+                                                await page.wait_for_timeout(1500)
+                                                estado_seleccionado = True
+                                    except Exception as e:
+                                        logger.warning(f"   ⚠️ Error en reintento de estado: {e}")
+
+                                # Segundo clic (después de corregir)
+                                # Buscar el botón nuevamente (puede haber cambiado)
+                                submit_btn2 = await page.query_selector('input[type="submit"]')
+                                if submit_btn2:
+                                    await submit_btn2.click()
+                                    logger.debug("   ✅ Segundo clic en botón de agregar dirección")
+                                    await page.wait_for_timeout(3000)
+                                    # Verificar si hubo éxito
+                                    success_msg = await page.query_selector('.a-alert-success')
+                                    if success_msg:
+                                        account_data['address'] = "Dirección agregada exitosamente"
+                                        logger.debug("   ✅ Dirección agregada correctamente después de reintento")
+                                    else:
+                                        error_msg2 = await check_address_errors()
+                                        if error_msg2:
+                                            account_data['address'] = f"Error persistente: {error_msg2}"
+                                            logger.warning(f"   ⚠️ Error persistente: {error_msg2}")
+                                        else:
+                                            account_data['address'] = "Dirección agregada (sin confirmación)"
+                                            logger.debug("   ℹ️ No se confirmó éxito/error, se asume agregada")
                                 else:
-                                    account_data['address'] = "Dirección agregada (no se pudo confirmar)"
-                                    logger.debug("   ℹ️ No se pudo confirmar, pero se intentó")
+                                    logger.warning("   ⚠️ No se encontró botón para segundo clic")
+                                    account_data['address'] = "Error: botón desapareció"
+                            else:
+                                # Si no hay error, verificar éxito
+                                success_msg = await page.query_selector('.a-alert-success')
+                                if success_msg:
+                                    account_data['address'] = "Dirección agregada exitosamente"
+                                    logger.debug("   ✅ Dirección agregada correctamente")
+                                else:
+                                    account_data['address'] = "Dirección agregada (sin confirmación)"
+                                    logger.debug("   ℹ️ No se detectó mensaje de éxito, pero se intentó")
                         else:
                             logger.warning("   ⚠️ No se encontró botón de envío")
                             account_data['address'] = "Error: no se encontró botón de envío"
@@ -1640,6 +1753,8 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 else:
                     account_data['address'] = "No se agregó dirección"
                     logger.debug("   ℹ️ Omisión de dirección")
+
+
 
 
 
