@@ -1494,6 +1494,16 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
+
+
+
+
+
+
+
+
+
+
                 # ----- PASO 20: Agregar dirección (opcional) -----
                 if add_address_flag:
                     logger.debug("📍 [PASO 20] Agregando dirección...")
@@ -1504,7 +1514,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         # Hacer clic en "Agregar dirección"
                         add_link = await page.query_selector('a[href*="/a/addresses/add"]')
                         if not add_link:
-                            add_link = await page.query_selector('a:has-text("Agregar dirección")')
+                            add_link = await page.get_by_text("Agregar dirección", exact=False).first
                         if add_link:
                             await add_link.click()
                             await page.wait_for_load_state('networkidle', timeout=15000)
@@ -1545,9 +1555,9 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                 await country_dropdown.click()
                                 await page.wait_for_timeout(1000)
                                 # Buscar la opción por data-value (US)
-                                option = await page.query_selector(f'a[data-value*="US"]')
+                                option = await page.query_selector('a[data-value*="US"]')
                                 if not option:
-                                    option = await page.query_selector('a:has-text("Estados Unidos")')
+                                    option = await page.get_by_text("Estados Unidos", exact=False).first
                                 if option:
                                     await option.click()
                                     await page.wait_for_timeout(1000)
@@ -1566,15 +1576,17 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
                         # Seleccionar estado
                         try:
-                            state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]', has_text="Seleccionar")
+                            # Buscar el dropdown de estado (puede ser el único que tiene "Seleccionar" como texto)
+                            state_dropdown = await page.get_by_text("Seleccionar", exact=False).first
                             if not state_dropdown:
                                 state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
                             if state_dropdown:
                                 await state_dropdown.click()
                                 await page.wait_for_timeout(1000)
+                                # Seleccionar New York
                                 state_option = await page.query_selector(f'a[data-value*="{country_data["state"]}"]')
                                 if not state_option:
-                                    state_option = await page.query_selector(f'a:has-text("{country_data["state"]}")')
+                                    state_option = await page.get_by_text(country_data["state"], exact=False).first
                                 if state_option:
                                     await state_option.click()
                                     await page.wait_for_timeout(1000)
@@ -1617,6 +1629,10 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 else:
                     account_data['address'] = "No se agregó dirección"
                     logger.debug("   ℹ️ Omisión de dirección")
+
+
+
+
 
                 # ----- PASO 21: Visitar wallet para actualizar cookies -----
                 try:
