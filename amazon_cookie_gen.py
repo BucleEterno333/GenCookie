@@ -1826,7 +1826,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                     logger.debug("   ℹ️ No se detectó mensaje de éxito, pero se intentó")
                                     address_success = True  # Asumimos éxito aunque no haya confirmación
                                     last_screenshot = await take_screenshot(page, "address_no_confirmation")
-                                    logger.debug("   📸 Captura: address_no_confirmation")
                         else:
                             logger.warning("   ⚠️ No se encontró botón de envío")
                             account_data['address'] = "Error: no se encontró botón de envío"
