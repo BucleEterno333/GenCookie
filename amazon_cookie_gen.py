@@ -1530,27 +1530,17 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
                 # ----- PASO 20: Agregar dirección (opcional) -----
                 if add_address_flag:
                     logger.debug("📍 [PASO 20] Agregando dirección...")
+                    address_success = False
                     try:
                         # Navegar a la página de direcciones
                         logger.debug("   Navegando a address book...")
                         await page.goto(address_book_urls[country_code], wait_until='networkidle', timeout=20000)
                         await page.wait_for_timeout(2000)
+                        last_screenshot = await take_screenshot(page, "address_book_page")
+                        logger.debug("   📸 Captura: address_book_page")
 
                         # Buscar y hacer clic en "Agregar dirección"
                         logger.debug("   Buscando enlace para agregar dirección...")
@@ -1562,10 +1552,18 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             logger.debug("   ✅ Clic en 'Agregar dirección'")
                             await page.wait_for_load_state('networkidle', timeout=15000)
                             await page.wait_for_timeout(2000)
+                            last_screenshot = await take_screenshot(page, "after_add_click")
+                            logger.debug("   📸 Captura: after_add_click")
                         else:
                             logger.warning("   ⚠️ No se encontró enlace, yendo a URL directa")
                             await page.goto(add_address_urls[country_code], wait_until='networkidle', timeout=20000)
                             await page.wait_for_timeout(2000)
+                            last_screenshot = await take_screenshot(page, "add_address_form_direct")
+                            logger.debug("   📸 Captura: add_address_form_direct")
+
+                        # Captura antes de llenar el formulario
+                        last_screenshot = await take_screenshot(page, "address_form_before_fill")
+                        logger.debug("   📸 Captura: address_form_before_fill")
 
                         # Datos de dirección según país (usando USA para MX)
                         address_data = {
@@ -1599,6 +1597,8 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             if country_dropdown:
                                 await country_dropdown.click()
                                 await page.wait_for_timeout(1000)
+                                last_screenshot = await take_screenshot(page, "country_dropdown_open")
+                                logger.debug("   📸 Captura: country_dropdown_open")
                                 # Buscar la opción "Estados Unidos"
                                 us_option = await page.query_selector('a:has-text("Estados Unidos")')
                                 if not us_option:
@@ -1606,13 +1606,21 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                 if us_option:
                                     await us_option.click()
                                     logger.debug("   ✅ País seleccionado")
+                                    await page.wait_for_timeout(1000)
+                                    last_screenshot = await take_screenshot(page, "country_selected")
+                                    logger.debug("   📸 Captura: country_selected")
                                 else:
                                     logger.warning("   ⚠️ No se encontró la opción Estados Unidos")
-                                await page.wait_for_timeout(1000)
+                                    last_screenshot = await take_screenshot(page, "country_option_not_found")
+                                    logger.debug("   📸 Captura: country_option_not_found")
                             else:
                                 logger.warning("   ⚠️ No se encontró dropdown de país")
+                                last_screenshot = await take_screenshot(page, "country_dropdown_not_found")
+                                logger.debug("   📸 Captura: country_dropdown_not_found")
                         except Exception as e:
                             logger.warning(f"   ⚠️ Error seleccionando país: {e}")
+                            last_screenshot = await take_screenshot(page, "country_selection_error")
+                            logger.debug("   📸 Captura: country_selection_error")
 
                         # Llenar campos de texto
                         logger.debug("   Llenando campos...")
@@ -1621,23 +1629,25 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         await page.fill('#address-ui-widgets-enterAddressLine1', country_data['line1'])
                         await page.fill('#address-ui-widgets-enterAddressCity', country_data['city'])
                         logger.debug("   ✅ Campos básicos llenados")
+                        last_screenshot = await take_screenshot(page, "fields_filled")
+                        logger.debug("   📸 Captura: fields_filled")
 
                         # ---- Seleccionar estado (intento 1) ----
                         estado_seleccionado = False
                         try:
                             logger.debug("   Seleccionando estado (intento 1)...")
-                            # Esperar a que el dropdown de estado esté disponible
                             await page.wait_for_timeout(2000)
                             # Buscar el dropdown que tenga el texto "Seleccionar" (común para estado)
                             state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]:has-text("Seleccionar")')
                             if not state_dropdown:
-                                # Fallback: segundo dropdown
                                 dropdowns = await page.query_selector_all('span.a-button-text[data-action="a-dropdown-button"]')
                                 if len(dropdowns) >= 2:
                                     state_dropdown = dropdowns[1]
                             if state_dropdown:
                                 await state_dropdown.click()
                                 await page.wait_for_timeout(1500)
+                                last_screenshot = await take_screenshot(page, "state_dropdown_open")
+                                logger.debug("   📸 Captura: state_dropdown_open")
                                 # Buscar opción "New York"
                                 state_option = await page.query_selector('a:has-text("New York")')
                                 if not state_option:
@@ -1646,17 +1656,27 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                     await state_option.click()
                                     logger.debug(f"   ✅ Estado seleccionado: {country_data['state']}")
                                     await page.wait_for_timeout(1500)
+                                    last_screenshot = await take_screenshot(page, "state_selected")
+                                    logger.debug("   📸 Captura: state_selected")
                                     estado_seleccionado = True
                                 else:
                                     logger.warning(f"   ⚠️ No se encontró opción de estado {country_data['state']}")
+                                    last_screenshot = await take_screenshot(page, "state_option_not_found")
+                                    logger.debug("   📸 Captura: state_option_not_found")
                             else:
                                 logger.warning("   ⚠️ No se encontró dropdown de estado")
+                                last_screenshot = await take_screenshot(page, "state_dropdown_not_found")
+                                logger.debug("   📸 Captura: state_dropdown_not_found")
                         except Exception as e:
                             logger.warning(f"   ⚠️ Error seleccionando estado: {e}")
+                            last_screenshot = await take_screenshot(page, "state_selection_error")
+                            logger.debug("   📸 Captura: state_selection_error")
 
                         # Código postal
                         await page.fill('#address-ui-widgets-enterAddressPostalCode', country_data['postalCode'])
                         logger.debug("   ✅ Código postal llenado")
+                        last_screenshot = await take_screenshot(page, "postal_code_filled")
+                        logger.debug("   📸 Captura: postal_code_filled")
 
                         # Función para verificar errores específicos
                         async def check_address_errors():
@@ -1665,7 +1685,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             if general_error:
                                 error_text = await general_error.text_content()
                                 if "Revisa tu dirección" in error_text:
-                                    logger.debug("   🔍 Detectado error: 'Revisa tu dirección' (puede ser por un solo clic)")
+                                    logger.debug("   🔍 Detectado error: 'Revisa tu dirección' (posiblemente necesita un segundo clic)")
                                 return error_text
                             # Buscar error específico de estado
                             state_error = await page.query_selector('#address-ui-widgets-enterAddressStateOrRegion + .a-alert-error, .a-alert-error:has-text("Ingresa un estado")')
@@ -1676,6 +1696,10 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                 return error_text
                             return None
 
+                        # ANTES DEL PRIMER CLIC
+                        last_screenshot = await take_screenshot(page, "before_first_submit")
+                        logger.debug("   📸 Captura: before_first_submit")
+
                         # Hacer clic en el botón de enviar (primer intento)
                         submit_btn = await page.query_selector('input[type="submit"]')
                         if submit_btn:
@@ -1683,14 +1707,30 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             logger.debug("   ✅ Primer clic en botón de agregar dirección")
                             await page.wait_for_timeout(3000)  # Esperar a que el servidor procese
 
+                            # DESPUÉS DEL PRIMER CLIC
+                            last_screenshot = await take_screenshot(page, "after_first_submit")
+                            logger.debug("   📸 Captura: after_first_submit")
+
                             # Verificar errores después del primer clic
                             error_msg = await check_address_errors()
                             if error_msg:
                                 logger.warning(f"   ⚠️ Error después del primer clic: {error_msg}")
+                                # Captura específica del error
+                                if "Revisa tu dirección" in error_msg:
+                                    last_screenshot = await take_screenshot(page, "error_revisa_direccion")
+                                    logger.debug("   📸 Captura: error_revisa_direccion")
+                                elif "Ingresa un estado" in error_msg:
+                                    last_screenshot = await take_screenshot(page, "error_estado_no_seleccionado")
+                                    logger.debug("   📸 Captura: error_estado_no_seleccionado")
+                                
                                 # Si el error es por estado no seleccionado, reintentar selección
                                 if "Ingresa un estado" in error_msg and not estado_seleccionado:
                                     logger.debug("   🔄 Reintentando selección de estado...")
                                     try:
+                                        # Captura antes de reintentar
+                                        last_screenshot = await take_screenshot(page, "before_state_retry")
+                                        logger.debug("   📸 Captura: before_state_retry")
+                                        
                                         # Volver a buscar el dropdown de estado
                                         state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]:has-text("Seleccionar")')
                                         if not state_dropdown:
@@ -1700,6 +1740,9 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                         if state_dropdown:
                                             await state_dropdown.click()
                                             await page.wait_for_timeout(1500)
+                                            last_screenshot = await take_screenshot(page, "state_retry_dropdown")
+                                            logger.debug("   📸 Captura: state_retry_dropdown")
+                                            
                                             state_option = await page.query_selector('a:has-text("New York")')
                                             if not state_option:
                                                 state_option = await page.query_selector(f'a[data-value*="{country_data["state"]}"]')
@@ -1707,59 +1750,107 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                                 await state_option.click()
                                                 logger.debug(f"   ✅ Estado seleccionado en reintento")
                                                 await page.wait_for_timeout(1500)
+                                                last_screenshot = await take_screenshot(page, "state_retry_selected")
+                                                logger.debug("   📸 Captura: state_retry_selected")
                                                 estado_seleccionado = True
+                                                
+                                                # Captura antes del segundo clic
+                                                last_screenshot = await take_screenshot(page, "before_second_submit")
+                                                logger.debug("   📸 Captura: before_second_submit")
+                                            else:
+                                                logger.warning("   ⚠️ No se encontró opción de estado en reintento")
+                                                last_screenshot = await take_screenshot(page, "state_retry_option_not_found")
+                                                logger.debug("   📸 Captura: state_retry_option_not_found")
+                                        else:
+                                            logger.warning("   ⚠️ No se encontró dropdown de estado en reintento")
+                                            last_screenshot = await take_screenshot(page, "state_retry_dropdown_not_found")
+                                            logger.debug("   📸 Captura: state_retry_dropdown_not_found")
                                     except Exception as e:
                                         logger.warning(f"   ⚠️ Error en reintento de estado: {e}")
+                                        last_screenshot = await take_screenshot(page, "state_retry_exception")
+                                        logger.debug("   📸 Captura: state_retry_exception")
 
                                 # Segundo clic (después de corregir)
-                                # Buscar el botón nuevamente (puede haber cambiado)
                                 submit_btn2 = await page.query_selector('input[type="submit"]')
                                 if submit_btn2:
                                     await submit_btn2.click()
                                     logger.debug("   ✅ Segundo clic en botón de agregar dirección")
                                     await page.wait_for_timeout(3000)
+                                    
+                                    # DESPUÉS DEL SEGUNDO CLIC
+                                    last_screenshot = await take_screenshot(page, "after_second_submit")
+                                    logger.debug("   📸 Captura: after_second_submit")
+                                    
                                     # Verificar si hubo éxito
                                     success_msg = await page.query_selector('.a-alert-success')
                                     if success_msg:
                                         account_data['address'] = "Dirección agregada exitosamente"
                                         logger.debug("   ✅ Dirección agregada correctamente después de reintento")
+                                        address_success = True
+                                        last_screenshot = await take_screenshot(page, "address_success")
+                                        logger.debug("   📸 Captura: address_success")
                                     else:
                                         error_msg2 = await check_address_errors()
                                         if error_msg2:
                                             account_data['address'] = f"Error persistente: {error_msg2}"
                                             logger.warning(f"   ⚠️ Error persistente: {error_msg2}")
+                                            last_screenshot = await take_screenshot(page, "persistent_error")
+                                            logger.debug("   📸 Captura: persistent_error")
+                                            # Marcar como error para reintentar global
+                                            address_success = False
                                         else:
+                                            # No hay error visible pero tampoco éxito confirmado
                                             account_data['address'] = "Dirección agregada (sin confirmación)"
                                             logger.debug("   ℹ️ No se confirmó éxito/error, se asume agregada")
+                                            # Asumimos éxito aunque no haya confirmación explícita
+                                            address_success = True
+                                            last_screenshot = await take_screenshot(page, "address_ambiguous")
+                                            logger.debug("   📸 Captura: address_ambiguous")
                                 else:
                                     logger.warning("   ⚠️ No se encontró botón para segundo clic")
                                     account_data['address'] = "Error: botón desapareció"
+                                    last_screenshot = await take_screenshot(page, "button_disappeared")
+                                    logger.debug("   📸 Captura: button_disappeared")
+                                    address_success = False
                             else:
-                                # Si no hay error, verificar éxito
+                                # Si no hay error tras el primer clic, verificar éxito
                                 success_msg = await page.query_selector('.a-alert-success')
                                 if success_msg:
                                     account_data['address'] = "Dirección agregada exitosamente"
-                                    logger.debug("   ✅ Dirección agregada correctamente")
+                                    logger.debug("   ✅ Dirección agregada correctamente en primer intento")
+                                    address_success = True
+                                    last_screenshot = await take_screenshot(page, "address_success_first_try")
+                                    logger.debug("   📸 Captura: address_success_first_try")
                                 else:
                                     account_data['address'] = "Dirección agregada (sin confirmación)"
                                     logger.debug("   ℹ️ No se detectó mensaje de éxito, pero se intentó")
+                                    address_success = True  # Asumimos éxito aunque no haya confirmación
+                                    last_screenshot = await take_screenshot(page, "address_no_confirmation")
+                                    logger.debug("   📸 Captura: address_no_confirmation")
                         else:
                             logger.warning("   ⚠️ No se encontró botón de envío")
                             account_data['address'] = "Error: no se encontró botón de envío"
+                            last_screenshot = await take_screenshot(page, "submit_button_not_found")
+                            logger.debug("   📸 Captura: submit_button_not_found")
+                            address_success = False
 
                     except Exception as e:
                         logger.warning(f"⚠️ Error durante el proceso de agregar dirección: {e}")
                         account_data['address'] = f"Error: {e}"
+                        last_screenshot = await take_screenshot(page, "address_exception")
+                        logger.debug("   📸 Captura: address_exception")
+                        address_success = False
+
+                    # Si no se logró agregar dirección exitosamente, lanzar excepción para reintentar global
+                    if not address_success:
+                        error_msg = f"Fallo al agregar dirección: {account_data.get('address', 'desconocido')}"
+                        logger.error(f"   ❌ {error_msg}")
+                        raise Exception(error_msg)
+                    else:
+                        logger.debug("   ✅ Dirección procesada con éxito (o asumida como exitosa)")
                 else:
                     account_data['address'] = "No se agregó dirección"
                     logger.debug("   ℹ️ Omisión de dirección")
-
-
-
-
-
-
-
 
 
 
