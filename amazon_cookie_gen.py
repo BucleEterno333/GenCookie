@@ -722,7 +722,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
     # NOTA: email, token, service se ignoran; usamos número de teléfono.
     logger.debug(f"🏁 [ENTRADA] create_amazon_account para país {country_code} (vía número de teléfono)")
 
-    max_global_retries = 3
+    max_global_retries = 1
     for global_attempt in range(1, max_global_retries + 1):
         logger.debug(f"🔄 Intento global {global_attempt}/{max_global_retries}")
         playwright = None
