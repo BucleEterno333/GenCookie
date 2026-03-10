@@ -1608,9 +1608,13 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         submit_btn = await page.query_selector('input[type="submit"]')
                         if submit_btn:
                             await submit_btn.click()
+                            await page.wait_for_timeout(2000)
+                            await submit_btn.click()
                             logger.debug("   ✅ Clic en botón de agregar dirección")
                             await page.wait_for_load_state('networkidle', timeout=15000)
                             await page.wait_for_timeout(2000)
+                            await submit_btn.click()
+                            logger.debug("   ✅ Segundo clic en botón de agregar dirección")
 
                             # Verificar mensaje de éxito o error
                             success_msg = await page.query_selector('.a-alert-success')
@@ -1672,7 +1676,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-                    
+
 
                 # ----- PASO 21: Visitar wallet para actualizar cookies -----
                 try:
