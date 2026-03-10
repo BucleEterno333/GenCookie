@@ -1889,7 +1889,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     logger.debug("💳 [PASO 21] Visitando wallet...")
                     await page.goto(wallet_urls[country_code], wait_until='networkidle', timeout=20000)
                     await page.wait_for_timeout(3000)
-                    last_screenshot = await take_screenshot(page, "wallet")
                     cookies = await context.cookies()
                     cookie_dict = {c['name']: c['value'] for c in cookies}
                     cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
@@ -1903,7 +1902,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 return account_data, None, last_screenshot
             else:
                 logger.error(f"   ❌ Registro fallido, URL final: {page.url}")
-                last_screenshot = await take_screenshot(page, "error_registro_final")
                 raise Exception(f"Registro fallido, URL: {page.url}")
 
 
