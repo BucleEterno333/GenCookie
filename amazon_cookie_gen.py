@@ -961,7 +961,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             page_loaded = False
             for attempt in range(3):
                 try:
-                    await page.goto(base_url, wait_until='domcontentloaded', timeout=120000)
+                    await page.goto(base_url, wait_until='domcontentloaded', timeout=30000)
                     await page.wait_for_timeout(5000)
                     body = await page.query_selector('body')
                     if body:
@@ -996,7 +996,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             login_link = None
             for selector in login_selectors:
                 try:
-                    link = await page.wait_for_selector(selector, state='visible', timeout=5000)
+                    link = await page.wait_for_selector(selector, state='visible', timeout=8000)
                     if link:
                         login_link = link
                         logger.debug(f"   ✅ Enlace de login encontrado con selector: {selector}")
@@ -1155,7 +1155,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
             # ----- PASO 15: Detectar captcha después del envío -----
-            logger.debug("🔍 [PASO 15] Verificando captcha después del envío...")
+            logger.debug("🔍 [PASO 14] Verificando captcha después del envío...")
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
 
@@ -1825,7 +1825,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                     account_data['address'] = "Dirección agregada (sin confirmación)"
                                     logger.debug("   ℹ️ No se detectó mensaje de éxito, pero se intentó")
                                     address_success = True  # Asumimos éxito aunque no haya confirmación
-                                    last_screenshot = await take_screenshot(page, "address_no_confirmation")
                         else:
                             logger.warning("   ⚠️ No se encontró botón de envío")
                             account_data['address'] = "Error: no se encontró botón de envío"
