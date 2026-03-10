@@ -1060,7 +1060,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             proceed_button = None
             for selector in proceed_selectors:
                 try:
-                    btn = await page.wait_for_selector(selector, state='visible', timeout=3000)
+                    btn = await page.wait_for_selector(selector, state='visible', timeout=4000)
                     if btn:
                         proceed_button = btn
                         logger.debug(f"   ✅ Botón 'Proceder' encontrado con selector: {selector}")
@@ -1457,7 +1457,11 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     logger.warning("⚠️ No se encontró campo de código ni mensaje de error, continuando...")
                     last_screenshot = await take_screenshot(page, "sin_codigo_sms")
 
-# ----- PASO 18: Verificar errores en la página -----
+
+
+
+
+            # ----- PASO 18: Verificar errores en la página -----
             logger.debug("🔍 [PASO 18] Buscando mensajes de error...")
             soup = BeautifulSoup(content, 'html.parser')
             error_div = soup.find('div', {'class': re.compile('a-alert-error|a-alert-warning|a-box-error')})
@@ -1466,6 +1470,10 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 logger.error(f"   ❌ Error en registro: {error_msg}")
                 last_screenshot = await take_screenshot(page, "error_registro")
                 raise Exception(f"Error en registro: {error_msg}")
+
+
+
+
 
             # ----- PASO 19: Verificar éxito (cuenta creada) -----
             logger.debug("🎉 [PASO 19] Verificando éxito...")
@@ -1482,12 +1490,130 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 for name, value in cookie_dict.items():
                     session.cookies.set(name, value, domain=f".{base_urls[country_code].replace('https://','')}")
 
+
+
+
+
                 # ----- PASO 20: Agregar dirección (opcional) -----
                 if add_address_flag:
                     logger.debug("📍 [PASO 20] Agregando dirección...")
-                    addr_ok = await add_address(session, country_code, email, password, token, service)
-                    account_data['address'] = "Dirección agregada" if addr_ok else "Error al agregar dirección"
-                    logger.debug(f"   ✅ Resultado dirección: {account_data['address']}")
+                    try:
+                        # Navegar a la página de direcciones
+                        await page.goto(address_book_urls[country_code], wait_until='networkidle', timeout=20000)
+                        await page.wait_for_timeout(2000)
+                        # Hacer clic en "Agregar dirección"
+                        add_link = await page.query_selector('a[href*="/a/addresses/add"]')
+                        if not add_link:
+                            add_link = await page.query_selector('a:has-text("Agregar dirección")')
+                        if add_link:
+                            await add_link.click()
+                            await page.wait_for_load_state('networkidle', timeout=15000)
+                            await page.wait_for_timeout(2000)
+                        else:
+                            logger.warning("⚠️ No se encontró enlace para agregar dirección, se usará URL directa")
+                            await page.goto(add_address_urls[country_code], wait_until='networkidle', timeout=20000)
+                            await page.wait_for_timeout(2000)
+
+                        # Datos de dirección según país (usando USA para MX)
+                        address_data = {
+                            'MX': {
+                                'countryCode': 'US',
+                                'fullName': 'John Doe',
+                                'phone': f'1{random.randint(1000000000,9999999999)}',
+                                'line1': '123 Main Street',
+                                'city': 'New York',
+                                'state': 'NY',
+                                'postalCode': '10001'
+                            },
+                            'US': {
+                                'countryCode': 'US',
+                                'fullName': 'John Doe',
+                                'phone': f'1{random.randint(1000000000,9999999999)}',
+                                'line1': '123 Main Street',
+                                'city': 'New York',
+                                'state': 'NY',
+                                'postalCode': '10001'
+                            },
+                            # Puedes agregar más países según sea necesario
+                        }
+                        country_data = address_data.get(country_code, address_data['US'])
+
+                        # Seleccionar país en el dropdown
+                        try:
+                            country_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
+                            if country_dropdown:
+                                await country_dropdown.click()
+                                await page.wait_for_timeout(1000)
+                                # Buscar la opción por data-value (US)
+                                option = await page.query_selector(f'a[data-value*="US"]')
+                                if not option:
+                                    option = await page.query_selector('a:has-text("Estados Unidos")')
+                                if option:
+                                    await option.click()
+                                    await page.wait_for_timeout(1000)
+                                else:
+                                    logger.warning("⚠️ No se encontró la opción Estados Unidos")
+                            else:
+                                logger.warning("⚠️ No se encontró dropdown de país")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error seleccionando país: {e}")
+
+                        # Llenar campos
+                        await page.fill('#address-ui-widgets-enterAddressFullName', country_data['fullName'])
+                        await page.fill('#address-ui-widgets-enterAddressPhoneNumber', country_data['phone'])
+                        await page.fill('#address-ui-widgets-enterAddressLine1', country_data['line1'])
+                        await page.fill('#address-ui-widgets-enterAddressCity', country_data['city'])
+
+                        # Seleccionar estado
+                        try:
+                            state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]', has_text="Seleccionar")
+                            if not state_dropdown:
+                                state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
+                            if state_dropdown:
+                                await state_dropdown.click()
+                                await page.wait_for_timeout(1000)
+                                state_option = await page.query_selector(f'a[data-value*="{country_data["state"]}"]')
+                                if not state_option:
+                                    state_option = await page.query_selector(f'a:has-text("{country_data["state"]}")')
+                                if state_option:
+                                    await state_option.click()
+                                    await page.wait_for_timeout(1000)
+                                else:
+                                    logger.warning(f"⚠️ No se encontró opción de estado {country_data['state']}")
+                            else:
+                                logger.warning("⚠️ No se encontró dropdown de estado")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error seleccionando estado: {e}")
+
+                        await page.fill('#address-ui-widgets-enterAddressPostalCode', country_data['postalCode'])
+
+                        # Hacer clic en el botón de enviar
+                        submit_btn = await page.query_selector('input[type="submit"]')
+                        if submit_btn:
+                            await submit_btn.click()
+                            logger.debug("   ✅ Clic en botón de agregar dirección")
+                            await page.wait_for_load_state('networkidle', timeout=15000)
+                            await page.wait_for_timeout(2000)
+                            # Verificar si hay éxito o error
+                            success_msg = await page.query_selector('.a-alert-success')
+                            if success_msg:
+                                account_data['address'] = "Dirección agregada exitosamente"
+                                logger.debug("   ✅ Dirección agregada correctamente")
+                            else:
+                                error_msg = await page.query_selector('.a-alert-error')
+                                if error_msg:
+                                    error_text = await error_msg.text_content()
+                                    account_data['address'] = f"Error al agregar dirección: {error_text}"
+                                    logger.warning(f"   ⚠️ {account_data['address']}")
+                                else:
+                                    account_data['address'] = "Dirección agregada (no se pudo confirmar)"
+                                    logger.debug("   ℹ️ No se pudo confirmar, pero se intentó")
+                        else:
+                            logger.warning("⚠️ No se encontró botón de envío")
+                            account_data['address'] = "Error: no se encontró botón de envío"
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error durante el proceso de agregar dirección: {e}")
+                        account_data['address'] = f"Error: {e}"
                 else:
                     account_data['address'] = "No se agregó dirección"
                     logger.debug("   ℹ️ Omisión de dirección")
