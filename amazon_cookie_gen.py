@@ -1707,10 +1707,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             logger.debug("   ✅ Primer clic en botón de agregar dirección")
                             await page.wait_for_timeout(3000)  # Esperar a que el servidor procese
 
-                            # DESPUÉS DEL PRIMER CLIC
-                            last_screenshot = await take_screenshot(page, "after_first_submit")
-                            logger.debug("   📸 Captura: after_first_submit")
-
                             # Verificar errores después del primer clic
                             error_msg = await check_address_errors()
                             if error_msg:
