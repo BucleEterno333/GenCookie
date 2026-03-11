@@ -1858,27 +1858,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-                # ----- PASO 21: Visitar wallet para actualizar cookies -----
-                try:
-                    logger.debug("💳 [PASO 21] Visitando wallet...")
-                    await page.goto(wallet_urls[country_code], wait_until='networkidle', timeout=20000)
-                    await page.wait_for_timeout(3000)
-                    cookies = await context.cookies()
-                    cookie_dict = {c['name']: c['value'] for c in cookies}
-                    cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
-                    account_data['cookie_dict'] = cookie_dict
-                    account_data['cookie_string'] = cookie_string
-                    logger.debug(f"   ✅ Cookies actualizadas: {len(cookie_dict)} cookies")
-                except Exception as e:
-                    logger.warning(f"   ⚠️ Error al visitar wallet: {e}")
-
-                logger.debug("🏁 [FIN] create_amazon_account completado con éxito")
-                return account_data, None, last_screenshot
-            else:
-                logger.error(f"   ❌ Registro fallido, URL final: {page.url}")
-                raise Exception(f"Registro fallido, URL: {page.url}")
-
-
         except Exception as e:
             logger.error(f"❌ Error en intento {global_attempt}: {e}")
             if global_attempt == max_global_retries:
