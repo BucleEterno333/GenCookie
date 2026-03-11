@@ -1719,137 +1719,61 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         last_screenshot = await take_screenshot(page, "before_first_submit")
                         logger.debug("   📸 Captura: before_first_submit")
 
-                        # Hacer clic en el botón de enviar (primer intento)
-                        submit_btn = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"]')
-                        if not submit_btn:
-                            submit_btn = await page.query_selector('input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
+                                               # ---- Enviar formulario ----
+                        # Buscar el botón de submit por su selector más específico
+                        submit_btn = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"], input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
                         if submit_btn:
+                            # Primer clic
+                            logger.debug("   Realizando primer clic en botón de agregar dirección...")
                             await submit_btn.click()
-                            logger.debug("   ✅ Primer clic en botón de agregar dirección")
-                            await page.wait_for_timeout(3000)  # Esperar a que el servidor procese
-                            last_screenshot = await take_screenshot(page, "after_first_submit")
-                            logger.debug("   📸 Captura: after_first_submit")
-
-                            # Verificar errores después del primer clic
-                            error_msg = await check_address_errors()
+                            # Esperar unos segundos para que aparezca posible error
+                            await page.wait_for_timeout(3000)
+                            
+                            # Verificar si hay mensajes de error
+                            error_msg = await page.query_selector('.a-alert-error, .a-alert-warning')
                             if error_msg:
-                                logger.warning(f"   ⚠️ Error después del primer clic: {error_msg}")
-                                # Captura específica del error
-                                if "Revisa tu dirección" in error_msg:
-                                    last_screenshot = await take_screenshot(page, "error_revisa_direccion")
-                                    logger.debug("   📸 Captura: error_revisa_direccion")
-                                elif "Ingresa un estado" in error_msg:
-                                    last_screenshot = await take_screenshot(page, "error_estado_no_seleccionado")
-                                    logger.debug("   📸 Captura: error_estado_no_seleccionado")
-                                
-                                # Si el error es por estado no seleccionado, reintentar selección
-                                if "Ingresa un estado" in error_msg and not estado_seleccionado:
-                                    logger.debug("   🔄 Reintentando selección de estado...")
-                                    try:
-                                        # Captura antes de reintentar
-                                        last_screenshot = await take_screenshot(page, "before_state_retry")
-                                        logger.debug("   📸 Captura: before_state_retry")
-                                        
-                                        # Volver a buscar el dropdown de estado
-                                        state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]:has-text("Seleccionar")')
-                                        if not state_dropdown:
-                                            dropdowns = await page.query_selector_all('span.a-button-text[data-action="a-dropdown-button"]')
-                                            if len(dropdowns) >= 2:
-                                                state_dropdown = dropdowns[1]
-                                        if state_dropdown:
-                                            await state_dropdown.click()
-                                            await page.wait_for_timeout(1500)
-                                            last_screenshot = await take_screenshot(page, "state_retry_dropdown")
-                                            logger.debug("   📸 Captura: state_retry_dropdown")
-                                            
-                                            state_option = await page.query_selector('a:has-text("New York")')
-                                            if not state_option:
-                                                state_option = await page.query_selector(f'a[data-value*="{country_data["state"]}"]')
-                                            if state_option:
-                                                await state_option.click()
-                                                logger.debug(f"   ✅ Estado seleccionado en reintento")
-                                                await page.wait_for_timeout(1500)
-                                                last_screenshot = await take_screenshot(page, "state_retry_selected")
-                                                logger.debug("   📸 Captura: state_retry_selected")
-                                                estado_seleccionado = True
-                                                
-                                                # Captura antes del segundo clic
-                                                last_screenshot = await take_screenshot(page, "before_second_submit")
-                                                logger.debug("   📸 Captura: before_second_submit")
-                                            else:
-                                                logger.warning("   ⚠️ No se encontró opción de estado en reintento")
-                                                last_screenshot = await take_screenshot(page, "state_retry_option_not_found")
-                                                logger.debug("   📸 Captura: state_retry_option_not_found")
-                                        else:
-                                            logger.warning("   ⚠️ No se encontró dropdown de estado en reintento")
-                                            last_screenshot = await take_screenshot(page, "state_retry_dropdown_not_found")
-                                            logger.debug("   📸 Captura: state_retry_dropdown_not_found")
-                                    except Exception as e:
-                                        logger.warning(f"   ⚠️ Error en reintento de estado: {e}")
-                                        last_screenshot = await take_screenshot(page, "state_retry_exception")
-                                        logger.debug("   📸 Captura: state_retry_exception")
-
-                                # Segundo clic (después de corregir)
-                                submit_btn2 = await page.query_selector('input[type="submit"]')
+                                error_text = await error_msg.text_content()
+                                logger.warning(f"   ⚠️ Error después del primer clic: {error_text}")
+                                logger.debug("   Realizando segundo clic debido al error...")
+                                # Volver a buscar el botón (puede haber cambiado)
+                                submit_btn2 = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"], input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
                                 if submit_btn2:
-                                    await submit_btn2.click()
-                                    logger.debug("   ✅ Segundo clic en botón de agregar dirección")
-                                    await page.wait_for_timeout(3000)
-                                    
-                                    # DESPUÉS DEL SEGUNDO CLIC
-                                    last_screenshot = await take_screenshot(page, "after_second_submit")
-                                    logger.debug("   📸 Captura: after_second_submit")
-                                    
-                                    # Verificar si hubo éxito
-                                    success_msg = await page.query_selector('.a-alert-success')
-                                    if success_msg:
-                                        account_data['address'] = "Dirección agregada exitosamente"
-                                        logger.debug("   ✅ Dirección agregada correctamente después de reintento")
-                                        address_success = True
-                                        last_screenshot = await take_screenshot(page, "address_success")
-                                        logger.debug("   📸 Captura: address_success")
-                                    else:
-                                        error_msg2 = await check_address_errors()
-                                        if error_msg2:
-                                            account_data['address'] = f"Error persistente: {error_msg2}"
-                                            logger.warning(f"   ⚠️ Error persistente: {error_msg2}")
-                                            last_screenshot = await take_screenshot(page, "persistent_error")
-                                            logger.debug("   📸 Captura: persistent_error")
-                                            # Marcar como error para reintentar global
-                                            address_success = False
-                                        else:
-                                            # No hay error visible pero tampoco éxito confirmado
-                                            account_data['address'] = "Dirección agregada (sin confirmación)"
-                                            logger.debug("   ℹ️ No se confirmó éxito/error, se asume agregada")
-                                            # Asumimos éxito aunque no haya confirmación explícita
-                                            address_success = True
-                                            last_screenshot = await take_screenshot(page, "address_ambiguous")
-                                            logger.debug("   📸 Captura: address_ambiguous")
+                                    # Usar expect_navigation para esperar la redirección después del segundo clic
+                                    async with page.expect_navigation(timeout=10000):
+                                        await submit_btn2.click()
+                                    logger.debug("   ✅ Segundo clic realizado, navegación detectada")
                                 else:
-                                    logger.warning("   ⚠️ No se encontró botón para segundo clic")
-                                    account_data['address'] = "Error: botón desapareció"
-                                    last_screenshot = await take_screenshot(page, "button_disappeared")
-                                    logger.debug("   📸 Captura: button_disappeared")
-                                    address_success = False
+                                    logger.warning("   ⚠️ No se encontró el botón para segundo clic")
+                                    account_data['address'] = "Error: botón desapareció después del primer clic"
                             else:
-                                # Si no hay error tras el primer clic, verificar éxito
+                                # Si no hay error, esperar navegación normalmente
+                                async with page.expect_navigation(timeout=10000):
+                                    # No es necesario hacer clic de nuevo, ya lo hicimos, pero esperamos la navegación
+                                    pass
+                                logger.debug("   ✅ Navegación detectada después del primer clic")
+                            
+                            # Verificar la nueva URL
+                            new_url = page.url
+                            logger.debug(f"   Nueva URL después del submit: {new_url}")
+                            if "addresses" in new_url:
                                 success_msg = await page.query_selector('.a-alert-success')
                                 if success_msg:
                                     account_data['address'] = "Dirección agregada exitosamente"
-                                    logger.debug("   ✅ Dirección agregada correctamente en primer intento")
-                                    address_success = True
-                                    last_screenshot = await take_screenshot(page, "address_success_first_try")
-                                    logger.debug("   📸 Captura: address_success_first_try")
+                                    logger.debug("   ✅ Dirección agregada correctamente")
                                 else:
                                     account_data['address'] = "Dirección agregada (sin confirmación)"
-                                    logger.debug("   ℹ️ No se detectó mensaje de éxito, pero se intentó")
-                                    address_success = True  # Asumimos éxito aunque no haya confirmación
+                                    logger.debug("   ℹ️ No se detectó mensaje de éxito, pero la URL indica direcciones")
+                            else:
+                                logger.warning(f"   ⚠️ Redirigido a URL inesperada: {new_url}")
+                                error_msg = await page.query_selector('.a-alert-error')
+                                if error_msg:
+                                    error_text = await error_msg.text_content()
+                                    account_data['address'] = f"Error al agregar dirección: {error_text}"
+                                else:
+                                    account_data['address'] = "Error: redirección inesperada"
                         else:
                             logger.warning("   ⚠️ No se encontró botón de envío")
                             account_data['address'] = "Error: no se encontró botón de envío"
-                            last_screenshot = await take_screenshot(page, "submit_button_not_found")
-                            logger.debug("   📸 Captura: submit_button_not_found")
-                            address_success = False
 
                     except Exception as e:
                         logger.warning(f"⚠️ Error durante el proceso de agregar dirección: {e}")
