@@ -1727,6 +1727,9 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             await submit_btn.click()
                             await page.wait_for_timeout(3000)
 
+                            last_screenshot = await take_screenshot(page, "after_first_submit")
+                            logger.debug("   📸 Captura: after_first_submit")
+
                             # Verificar si hay mensajes de error en la página
                             error_detected = False
                             error_text = ""
@@ -1772,6 +1775,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                 except Exception:
                                     # Si no hubo navegación, forzar segundo clic
                                     logger.debug("   No hubo navegación, realizando segundo clic por seguridad...")
+
                                     submit_btn2 = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"], input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
                                     if submit_btn2:
                                         try:
@@ -1862,7 +1866,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             logger.error(f"❌ Error en intento {global_attempt}: {e}")
             if global_attempt == max_global_retries:
                 if page:
-                    last_screenshot = await take_screenshot(page, "error_final")
+                    last_screensehot = await take_screenshot(page, "error_final")
                 return None, str(e), last_screenshot
             else:
                 logger.info(f"🔄 Reintentando después de 5 segundos (nueva IP)...")
