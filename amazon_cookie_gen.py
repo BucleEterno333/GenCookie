@@ -1026,7 +1026,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 raise Exception("No se encontró enlace de inicio de sesión")
 
             await login_link.click()
-            await page.wait_for_load_state('networkidle', timeout=20000)
+            await page.wait_for_load_state('networkidle', timeout=30000)
             await page.wait_for_timeout(2000)
             logger.debug(f"   📍 URL después de login: {page.url}")
             last_screenshot = await take_screenshot(page, "after_login_click")
@@ -1211,8 +1211,8 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     click_element = img_element
                 else:
                     # Si aún no aparece, esperar un poco más y reintentar una vez
-                    logger.warning("   ⚠️ No se encontró canvas ni imagen, esperando 2 segundos más...")
-                    await page.wait_for_timeout(2000)
+                    logger.warning("   ⚠️ No se encontró canvas ni imagen, esperando 5 segundos más...")
+                    await page.wait_for_timeout(5000)
                     canvas_element = await page.query_selector('canvas')
                     img_element = await page.query_selector('img[src*="captcha"]')
                     if canvas_element:
@@ -1720,11 +1720,15 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         logger.debug("   📸 Captura: before_first_submit")
 
                         # Hacer clic en el botón de enviar (primer intento)
-                        submit_btn = await page.query_selector('input[type="submit"]')
+                        submit_btn = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"]')
+                        if not submit_btn:
+                            submit_btn = await page.query_selector('input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
                         if submit_btn:
                             await submit_btn.click()
                             logger.debug("   ✅ Primer clic en botón de agregar dirección")
                             await page.wait_for_timeout(3000)  # Esperar a que el servidor procese
+                            last_screenshot = await take_screenshot(page, "after_first_submit")
+                            logger.debug("   📸 Captura: after_first_submit")
 
                             # Verificar errores después del primer clic
                             error_msg = await check_address_errors()
