@@ -352,11 +352,10 @@ async def get_fivesim_number(country_code, product='amazon'):
     except Exception as e:
         logger.warning(f"⚠️ Error comprando número 5sim: {e}")
         return None
-
 async def get_fivesim_code(order_id, timeout=180):
     """
     Espera y obtiene el código SMS de 5sim.
-    Retorna el código como string o None si no se obtiene.
+    Retorna el código como string o None si no se obtiene en el tiempo especificado.
     """
     url = f"{FIVESIM_BASE_URL}/user/check/{order_id}"
     headers = {
@@ -401,7 +400,27 @@ async def get_fivesim_code(order_id, timeout=180):
     return None
 
 
-
+async def wait_for_sms_with_resend(order_id, page, max_retries=3, timeout_per_retry=30):
+    """
+    Intenta obtener el código SMS, y si no llega, hace clic en "Reenviar código" hasta max_retries veces.
+    """
+    for attempt in range(max_retries):
+        logger.debug(f"📱 Esperando código SMS (intento {attempt+1}/{max_retries})...")
+        code = await get_fivesim_code(order_id, timeout=timeout_per_retry)
+        if code:
+            return code
+        # Si no se obtuvo código, hacer clic en reenviar
+        try:
+            resend_link = await page.query_selector('a#cvf-resend-link')
+            if resend_link:
+                await resend_link.click()
+                logger.debug("   🔄 Clic en 'Reenviar código'")
+                await page.wait_for_timeout(5000)  # Esperar a que el nuevo SMS sea enviado
+            else:
+                logger.warning("   ⚠️ No se encontró enlace de reenviar")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Error al hacer clic en reenviar: {e}")
+    return None
 
 
 
@@ -1154,7 +1173,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
 
 
-            # ----- PASO 15: Detectar captcha después del envío -----
+            # ----- PASO 14: Detectar captcha después del envío -----
             logger.debug("🔍 [PASO 14] Verificando captcha después del envío...")
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
@@ -1397,7 +1416,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 await page.wait_for_timeout(5000)
                 content = await safe_get_content(page)
 
-            # ----- PASO 15: Verificación por SMS (con posible redirección a WhatsApp) -----
+             # ----- PASO 15: Verificación por SMS (con posible redirección a WhatsApp) -----
             logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
@@ -1407,17 +1426,14 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 logger.warning("⚠️ Página de verificación con WhatsApp detectada, seleccionando SMS...")
                 last_screenshot = await take_screenshot(page, "pagina_whatsapp")
                 
-                # Buscar el botón "Enviar código por SMS" usando el id del contenedor
+                # Buscar el botón "Enviar código por SMS"
                 sms_option = await page.query_selector('#secondary_channel_button input.a-button-input')
                 if not sms_option:
-                    # Intentar con el contenedor directamente
                     sms_option = await page.query_selector('#secondary_channel_button')
                 if not sms_option:
-                    # Fallback: buscar por texto usando XPath
                     sms_option = await page.query_selector('xpath=//*[contains(text(), "Enviar código por SMS")]')
                 
                 if sms_option:
-                    # Pequeña espera para asegurar que el elemento esté listo
                     await page.wait_for_timeout(500)
                     await sms_option.click()
                     logger.debug("   ✅ Clic en 'Enviar código por SMS'")
@@ -1432,7 +1448,10 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             try:
                 code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
                 logger.debug("   📱 Página de ingreso de código SMS detectada")
-                sms_code = await get_fivesim_code(order_id)
+                
+                # Usar la nueva función con reintentos y resend
+                sms_code = await wait_for_sms_with_resend(order_id, page, max_retries=3, timeout_per_retry=30)
+                
                 if sms_code:
                     await code_input.fill(sms_code)
                     logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
@@ -1444,7 +1463,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     else:
                         logger.warning("   ⚠️ No se encontró botón de verificar")
                 else:
-                    logger.error("❌ No se pudo obtener código SMS")
+                    logger.error("❌ No se pudo obtener código SMS después de varios intentos y reenvíos")
                     raise Exception("No se pudo obtener código de verificación SMS")
             except Exception as e:
                 # Si no aparece el campo de código, verificar mensajes de error
