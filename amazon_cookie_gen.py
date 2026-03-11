@@ -1211,8 +1211,8 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     click_element = img_element
                 else:
                     # Si aún no aparece, esperar un poco más y reintentar una vez
-                    logger.warning("   ⚠️ No se encontró canvas ni imagen, esperando 5 segundos más...")
-                    await page.wait_for_timeout(5000)
+                    logger.warning("   ⚠️ No se encontró canvas ni imagen, esperando 9 segundos más...")
+                    await page.wait_for_timeout(9000)
                     canvas_element = await page.query_selector('canvas')
                     img_element = await page.query_selector('img[src*="captcha"]')
                     if canvas_element:
@@ -1719,40 +1719,73 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         last_screenshot = await take_screenshot(page, "before_first_submit")
                         logger.debug("   📸 Captura: before_first_submit")
 
-                                               # ---- Enviar formulario ----
-                        # Buscar el botón de submit por su selector más específico
+                                  # ---- Enviar formulario ----
                         submit_btn = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"], input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
                         if submit_btn:
                             # Primer clic
                             logger.debug("   Realizando primer clic en botón de agregar dirección...")
                             await submit_btn.click()
-                            # Esperar unos segundos para que aparezca posible error
                             await page.wait_for_timeout(3000)
-                            
-                            # Verificar si hay mensajes de error
-                            error_msg = await page.query_selector('.a-alert-error, .a-alert-warning')
-                            if error_msg:
-                                error_text = await error_msg.text_content()
+
+                            # Verificar si hay mensajes de error en la página
+                            error_detected = False
+                            error_text = ""
+                            # Buscar por clases comunes de error
+                            error_elem = await page.query_selector('.a-alert-error, .a-alert-warning, .a-box-error')
+                            if error_elem:
+                                error_text = await error_elem.text_content()
+                                error_detected = True
+                            else:
+                                # Buscar por texto específico de error
+                                error_texts = ["Revisa tu dirección", "Ingresa un estado", "No pudimos verificar", "No pudimos validar"]
+                                for text in error_texts:
+                                    elem = await page.query_selector(f'*:has-text("{text}")')
+                                    if elem:
+                                        error_text = text
+                                        error_detected = True
+                                        break
+
+                            if error_detected:
                                 logger.warning(f"   ⚠️ Error después del primer clic: {error_text}")
                                 logger.debug("   Realizando segundo clic debido al error...")
                                 # Volver a buscar el botón (puede haber cambiado)
                                 submit_btn2 = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"], input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
                                 if submit_btn2:
-                                    # Usar expect_navigation para esperar la redirección después del segundo clic
-                                    async with page.expect_navigation(timeout=10000):
-                                        await submit_btn2.click()
-                                    logger.debug("   ✅ Segundo clic realizado, navegación detectada")
+                                    try:
+                                        async with page.expect_navigation(timeout=15000):
+                                            await submit_btn2.click()
+                                        logger.debug("   ✅ Segundo clic realizado, navegación detectada")
+                                    except Exception as e:
+                                        logger.error(f"   ❌ Fallo al agregar dirección: {e}")
+                                        raise Exception(f"Fallo al agregar dirección: {e}")
                                 else:
                                     logger.warning("   ⚠️ No se encontró el botón para segundo clic")
                                     account_data['address'] = "Error: botón desapareció después del primer clic"
                             else:
-                                # Si no hay error, esperar navegación normalmente
-                                async with page.expect_navigation(timeout=10000):
-                                    # No es necesario hacer clic de nuevo, ya lo hicimos, pero esperamos la navegación
-                                    pass
-                                logger.debug("   ✅ Navegación detectada después del primer clic")
-                            
-                            # Verificar la nueva URL
+                                # No se detectó error, intentar esperar navegación
+                                logger.debug("   No se detectaron errores, esperando navegación...")
+                                try:
+                                    async with page.expect_navigation(timeout=15000):
+                                        # Esperar a que el primer clic provoque navegación
+                                        pass
+                                    logger.debug("   ✅ Navegación detectada después del primer clic")
+                                except Exception:
+                                    # Si no hubo navegación, forzar segundo clic
+                                    logger.debug("   No hubo navegación, realizando segundo clic por seguridad...")
+                                    submit_btn2 = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"], input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
+                                    if submit_btn2:
+                                        try:
+                                            async with page.expect_navigation(timeout=15000):
+                                                await submit_btn2.click()
+                                            logger.debug("   ✅ Segundo clic realizado, navegación detectada")
+                                        except Exception as e:
+                                            logger.error(f"   ❌ Fallo al agregar dirección: {e}")
+                                            raise Exception(f"Fallo al agregar dirección: {e}")
+                                    else:
+                                        logger.warning("   ⚠️ No se encontró botón para segundo clic")
+                                        account_data['address'] = "Error: botón desapareció"
+
+                            # Verificar resultado después de la navegación
                             new_url = page.url
                             logger.debug(f"   Nueva URL después del submit: {new_url}")
                             if "addresses" in new_url:
