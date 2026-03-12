@@ -356,7 +356,7 @@ async def get_fivesim_code(order_id, timeout=180):
                 try:
                     data = response.json()
                 except ValueError:
-                    logger.warning(f"⚠️ Respuesta no JSON: {response.text[:200]}")
+                    logger.warning(f"⚠️ 5sim respondió con texto no JSON: {response.text[:200]}")
                     await asyncio.sleep(5)
                     continue
                 status = data.get('status')
@@ -375,10 +375,10 @@ async def get_fivesim_code(order_id, timeout=180):
                 elif status == 'PENDING':
                     pass
                 else:
-                    logger.warning(f"⚠️ Estado inesperado: {status}")
+                    logger.warning(f"⚠️ Estado inesperado de 5sim: {status}")
             await asyncio.sleep(5)
         except Exception as e:
-            logger.debug(f"📱 Error esperando código: {e}")
+            logger.debug(f"📱 Error esperando código de 5sim: {e}")
             await asyncio.sleep(5)
     return None
 
@@ -396,16 +396,30 @@ async def get_hero_sms_number(country_code, service='am'):
     try:
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, lambda: requests.get(url, params=params, timeout=30))
-        if response.status_code == 200:
+        # Intentar parsear JSON
+        try:
             data = response.json()
             if 'activationId' in data and 'phoneNumber' in data:
                 return data['phoneNumber'], data['activationId']
-        logger.warning(f"Hero SMS error: {response.text}")
-        return None
+            else:
+                logger.warning(f"Hero SMS respuesta inesperada (JSON): {data}")
+                return None
+        except ValueError:
+            # No es JSON, probablemente un mensaje de error en texto
+            error_text = response.text.strip()
+            logger.warning(f"Hero SMS respuesta no JSON: {error_text}")
+            # Aquí podrías mapear errores comunes
+            if error_text == 'NO_NUMBERS':
+                logger.warning("Hero SMS: No hay números disponibles para este país/servicio")
+            elif error_text == 'BAD_KEY':
+                logger.error("Hero SMS: API key inválida")
+            elif error_text == 'NO_BALANCE':
+                logger.error("Hero SMS: Saldo insuficiente")
+            return None
     except Exception as e:
         logger.warning(f"Hero SMS exception: {e}")
         return None
-
+    
 async def get_hero_sms_code(activation_id, timeout=180):
     """Espera el código SMS en Hero SMS."""
     url = "https://hero-sms.com/stubs/handler_api.php"
@@ -545,7 +559,7 @@ async def safe_get_content(page, timeout=20):
 async def create_amazon_account(country_code, add_address_flag=True):
     logger.debug(f"🏁 [ENTRADA] create_amazon_account para país {country_code} (vía número de teléfono)")
 
-    max_global_retries = 3  # Aumentado para mayor robustez
+    max_global_retries = 4  # Aumentado para mayor robustez
     for global_attempt in range(1, max_global_retries + 1):
         logger.debug(f"🔄 Intento global {global_attempt}/{max_global_retries}")
         playwright = None
@@ -1298,7 +1312,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
                 else:
                     account_data['address'] = "No se agregó dirección"
 
-                return account_data
+                return account_data, None, last_screenshot
             else:
                 raise Exception(f"Registro fallido, URL: {page.url}")
 
