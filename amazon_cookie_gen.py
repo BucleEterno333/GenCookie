@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Amazon Cookie Generator - Versión API REST con navegación dinámica
-- Parte desde la URL base del país
-- Navega haciendo clic en elementos: "Hola, identifícate" 
-- Incluye registro, verificación de correo, captcha, agregar dirección y wallet
-- Logs detallados en cada paso (visibles en Northflank y en consola)
-- Capturas de pantalla en base64 para el frontend
-- Soporte para captchas de selección de imágenes (coordenadas) con 2Captcha y Anti-Captcha
-- Reintentos automáticos con cambio de IP (proxy rotativo) ante cualquier error
+Amazon Cookie Generator - Versión API REST mejorada
+- Incorpora sistema de SMS con fallback (Hero y 5sim)
+- Captchas resueltos por HTTP directo (sin librerías problemáticas)
+- Reintentos globales, detección de números registrados
+- Selectores precisos para agregar dirección
+- Logs detallados y capturas en base64
 """
 
 import os
@@ -21,6 +19,7 @@ import logging
 import argparse
 import base64
 import sys
+import io
 from urllib.parse import urljoin, urlencode
 from bs4 import BeautifulSoup
 import requests
@@ -29,6 +28,10 @@ from urllib3.util.retry import Retry
 from playwright.async_api import async_playwright
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+
+# Forzar UTF-8 en la salida (útil para entornos Windows, en Northflank no estorba)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # -------------------------------------------------------------------
 # CONFIGURACIÓN DESDE VARIABLES DE ENTORNO
@@ -44,7 +47,6 @@ API_HOST = os.getenv('API_HOST', '0.0.0.0')
 API_PORT = int(os.getenv('API_PORT', '8080'))
 API_KEY = os.getenv('API_KEY', '')
 FIVESIM_API_KEY = os.getenv('FIVESIM_API_KEY', '')
-
 
 # Proxy
 PROXY_AUTH = None
@@ -155,7 +157,7 @@ def test_proxy(session, max_retries=3):
             logger.warning(f"   Intento {attempt+1}: Connection Error: {e}")
         except Exception as e:
             logger.warning(f"   Intento {attempt+1}: Error: {e}")
-        time.sleep(2)  # espera antes de reintentar
+        time.sleep(2)
     return False, "Max retries exceeded"
 
 def get_str(string, start, end, occurrence=1):
@@ -171,133 +173,128 @@ def get_str(string, start, end, occurrence=1):
         return None
 
 # -------------------------------------------------------------------
-# CAPTCHA RESOLUTION (coordenadas)
+# CAPTCHA RESOLUTION (coordenadas) - VERSIÓN HTTP DIRECTA
 # -------------------------------------------------------------------
-def solve_coordinates_captcha(image_path, hint_text=None):
+def solve_2captcha_coordinates(image_path, hint):
     """
-    Resuelve un captcha de selección de imágenes (coordenadas) usando 2captcha o anticaptcha.
-    Retorna una lista de puntos [{'x': int, 'y': int}] o None si falla.
+    Resuelve captcha de coordenadas usando 2captcha API HTTP.
+    Retorna lista de puntos [{'x': int, 'y': int}] o None.
     """
-    solution = None
-    logger.debug(f"🔍 Intentando resolver captcha de coordenadas con imagen: {image_path}")
+    import base64
+    with open(image_path, 'rb') as f:
+        img_base64 = base64.b64encode(f.read()).decode('utf-8')
+    url = "http://2captcha.com/in.php"
+    data = {
+        'key': API_KEY_2CAPTCHA,
+        'method': 'base64',
+        'body': img_base64,
+        'coordinatescaptcha': 1,
+        'textinstructions': hint,
+        'json': 1
+    }
+    try:
+        resp = requests.post(url, data=data, timeout=30)
+        if resp.status_code == 200:
+            result = resp.json()
+            if result.get('status') == 1:
+                captcha_id = result['request']
+                logger.debug(f"   2captcha ID: {captcha_id}, esperando resultado...")
+                start_time = time.time()
+                while time.time() - start_time < 120:
+                    time.sleep(5)
+                    res_url = f"http://2captcha.com/res.php?key={API_KEY_2CAPTCHA}&action=get&id={captcha_id}&json=1"
+                    res_resp = requests.get(res_url, timeout=10)
+                    if res_resp.status_code == 200:
+                        try:
+                            res_data = res_resp.json()
+                        except:
+                            continue
+                        if res_data.get('status') == 1:
+                            coord_data = res_data['request']
+                            if isinstance(coord_data, str):
+                                points = []
+                                for pair in coord_data.split(';'):
+                                    if pair:
+                                        x, y = pair.split(',')
+                                        points.append({'x': int(x), 'y': int(y)})
+                                return points
+                            elif isinstance(coord_data, list):
+                                points = []
+                                for item in coord_data:
+                                    if isinstance(item, dict):
+                                        points.append({'x': int(item['x']), 'y': int(item['y'])})
+                                    elif isinstance(item, list) and len(item) == 2:
+                                        points.append({'x': int(item[0]), 'y': int(item[1])})
+                                return points
+                            else:
+                                logger.warning(f"   Formato de coordenadas desconocido: {type(coord_data)}")
+                        elif res_data.get('request') == 'CAPCHA_NOT_READY':
+                            continue
+                        else:
+                            break
+        return None
+    except Exception as e:
+        logger.warning(f"Error en 2captcha HTTP: {e}")
+        return None
 
-    # Intentar con 2captcha
-    if API_KEY_ANTICAPTCHA:
-        try:
-            from anticaptchaofficial.imagecoordinates import imagecoordinates
-            solver = imagecoordinates()
-            solver.set_api_key(API_KEY_ANTICAPTCHA)
-            solver.set_comment(hint_text or "Click on all images that match the description")
-            solver.set_image_path(image_path)
-            coordinates = solver.solve_and_return_solution()
-            if coordinates:
-                logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
-                return coordinates
-            else:
-                logger.warning("⚠️ 2captcha no devolvió coordenadas")
-        except Exception as e:
-            logger.warning(f"⚠️ 2captcha falló: {e}")
-
-    # Intentar con anticaptcha
-    if not solution and API_KEY_2CAPTCHA :
-        try:
-            from twocaptcha import TwoCaptcha
-            solver = TwoCaptcha(API_KEY_2CAPTCHA)
-            # El método coordinates recibe la ruta de la imagen
-            result = solver.coordinates(image_path, textinstructions=hint_text)
-            if result and 'code' in result:
-                coord_str = result['code']
-                if coord_str.startswith('coordinates='):
-                    coord_str = coord_str.replace('coordinates=', '')
-                points = []
-                for pair in coord_str.split(';'):
-                    if pair:
-                        x, y = pair.split(',')
-                        points.append({'x': int(x), 'y': int(y)})
-                logger.debug(f"✅ 2captcha resolvió coordenadas: {points}")
-                return points 
-            else:
-                logger.warning("⚠️ anticaptcha no devolvió coordenadas")
-        except Exception as e:
-            logger.warning(f"⚠️ anticaptcha falló: {e}")
-
-    logger.error("❌ No se pudo resolver captcha de coordenadas")
-    return None
-
-# -------------------------------------------------------------------
-# CAPTCHA RESOLUTION (reCAPTCHA e imagen simple)
-# -------------------------------------------------------------------
-def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
-    """Resuelve captcha usando 2captcha o anticaptcha."""
-    solution = None
-    logger.debug(f"🔍 Intentando resolver captcha: site_key={site_key}, url={page_url}, is_image={is_image_captcha}")
-
-    if API_KEY_ANTICAPTCHA:
-        try:
-            from anticaptchaofficial.recaptchav2proxyless import recaptchaV2Proxyless
-            from anticaptchaofficial.imagecaptcha import imagecaptcha
-            if is_image_captcha and image_path:
-                solver = imagecaptcha()
-                solver.set_api_key(API_KEY_ANTICAPTCHA)
-                solution = solver.solve_and_return_solution(image_path)
-                logger.debug(f"✅ anticaptcha resolvió imagen: {solution[:10]}...")
-            else:
-                solver = recaptchaV2Proxyless()
-                solver.set_api_key(API_KEY_ANTICAPTCHA)
-                solver.set_website_url(page_url)
-                solver.set_website_key(site_key)
-                solution = solver.solve_and_return_solution()
-                logger.debug(f"✅ anticaptcha resolvió recaptcha: {solution[:10]}...")
-        except Exception as e:
-            logger.warning(f"⚠️ 2captcha falló: {e}")
-
-    if not solution and API_KEY_2CAPTCHA:
-        try:
-            from twocaptcha import TwoCaptcha
-            solver = TwoCaptcha(API_KEY_2CAPTCHA)
-            if is_image_captcha and image_path:
-                result = solver.normal(image_path)
-                solution = result['code']
-                logger.debug(f"✅ 2captcha resolvió imagen: {solution[:10]}...")
-            else:
-                result = solver.recaptcha(sitekey=site_key, url=page_url)
-                solution = result['code']
-                logger.debug(f"✅ 2captcha resolvió recaptcha: {solution[:10]}...")
-
-
-        except Exception as e:
-            logger.error(f"❌ anticaptcha falló: {e}")
-
-    if not solution:
-        logger.error("❌ No se obtuvo solución de captcha")
-    return solution
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+def solve_anticaptcha_coordinates(image_path, hint):
+    """
+    Resuelve captcha de coordenadas usando Anti-Captcha API HTTP.
+    Retorna lista de puntos [{'x': int, 'y': int}] o None.
+    """
+    import base64
+    with open(image_path, 'rb') as f:
+        img_base64 = base64.b64encode(f.read()).decode('utf-8')
+    url = "https://api.anti-captcha.com/createTask"
+    data = {
+        "clientKey": API_KEY_ANTICAPTCHA,
+        "task": {
+            "type": "ImageToCoordinatesTask",
+            "body": img_base64,
+            "comment": hint
+        }
+    }
+    try:
+        resp = requests.post(url, json=data, timeout=30)
+        if resp.status_code == 200:
+            result = resp.json()
+            if result.get('errorId') == 0:
+                task_id = result['taskId']
+                logger.debug(f"   anticaptcha task ID: {task_id}, esperando resultado...")
+                start_time = time.time()
+                while time.time() - start_time < 120:
+                    time.sleep(5)
+                    res_url = "https://api.anti-captcha.com/getTaskResult"
+                    res_data = {"clientKey": API_KEY_ANTICAPTCHA, "taskId": task_id}
+                    res_resp = requests.post(res_url, json=res_data, timeout=10)
+                    if res_resp.status_code == 200:
+                        res_result = res_resp.json()
+                        if res_result.get('status') == 'ready':
+                            coords = res_result['solution'].get('coordinates')
+                            if coords:
+                                points = []
+                                for item in coords:
+                                    if isinstance(item, dict):
+                                        points.append({'x': int(item['x']), 'y': int(item['y'])})
+                                    elif isinstance(item, list) and len(item) == 2:
+                                        points.append({'x': int(item[0]), 'y': int(item[1])})
+                                return points
+                            else:
+                                logger.warning("   anticaptcha devolvió solución sin coordenadas")
+                                return None
+                        elif res_result.get('status') == 'processing':
+                            continue
+                        else:
+                            break
+        return None
+    except Exception as e:
+        logger.warning(f"Error en anticaptcha HTTP: {e}")
+        return None
 
 # -------------------------------------------------------------------
-# SMS (versión mejorada con manejo de errores)
+# SMS SERVICES
 # -------------------------------------------------------------------
 FIVESIM_BASE_URL = "https://5sim.net/v1"
-
 FIVESIM_COUNTRY_MAP = {
     'MX': 'mexico',
     'US': 'usa',
@@ -312,32 +309,22 @@ FIVESIM_COUNTRY_MAP = {
     'IN': 'india',
 }
 
-# Servicios SMS disponibles
 async def get_fivesim_number(country_code, product='amazon'):
-    """
-    Compra un número de teléfono temporal en 5sim (usando GET).
-    Retorna (phone_number, order_id) o None si falla.
-    """
+    """Compra un número en 5sim."""
     if not FIVESIM_API_KEY:
         logger.warning("⚠️ No hay API key de 5sim")
         return None
-
     country = FIVESIM_COUNTRY_MAP.get(country_code)
     if not country:
         logger.error(f"❌ No hay mapeo de país 5sim para {country_code}")
         return None
-
     url = f"{FIVESIM_BASE_URL}/user/buy/activation/{country}/any/{product}"
-    headers = {
-        'Authorization': f'Bearer {FIVESIM_API_KEY}',
-        'Accept': 'application/json'
-    }
+    headers = {'Authorization': f'Bearer {FIVESIM_API_KEY}', 'Accept': 'application/json'}
     try:
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=30))
         logger.debug(f"📡 5sim respuesta HTTP {response.status_code}")
         if response.status_code == 200:
-            # Intentar parsear JSON
             try:
                 data = response.json()
                 phone = data.get('phone')
@@ -346,25 +333,20 @@ async def get_fivesim_number(country_code, product='amazon'):
                     logger.debug(f"📱 Número 5sim comprado: {phone} (order_id: {order_id})")
                     return phone, order_id
                 else:
-                    logger.warning(f"⚠️ Respuesta inesperada de 5sim (faltan campos): {data}")
-            except ValueError as e:
-                logger.warning(f"⚠️ Respuesta no JSON de 5sim: {response.text[:200]}")
+                    logger.warning(f"⚠️ Respuesta inesperada: {data}")
+            except ValueError:
+                logger.warning(f"⚠️ Respuesta no JSON: {response.text[:200]}")
         else:
-            logger.warning(f"⚠️ Error HTTP {response.status_code} de 5sim: {response.text[:200]}")
+            logger.warning(f"⚠️ Error HTTP {response.status_code}: {response.text[:200]}")
         return None
     except Exception as e:
         logger.warning(f"⚠️ Error comprando número 5sim: {e}")
         return None
+
 async def get_fivesim_code(order_id, timeout=180):
-    """
-    Espera y obtiene el código SMS de 5sim.
-    Retorna el código como string o None si no se obtiene en el tiempo especificado.
-    """
+    """Espera y obtiene el código SMS de 5sim."""
     url = f"{FIVESIM_BASE_URL}/user/check/{order_id}"
-    headers = {
-        'Authorization': f'Bearer {FIVESIM_API_KEY}',
-        'Accept': 'application/json'
-    }
+    headers = {'Authorization': f'Bearer {FIVESIM_API_KEY}', 'Accept': 'application/json'}
     start_time = time.time()
     loop = asyncio.get_running_loop()
     while time.time() - start_time < timeout:
@@ -374,7 +356,7 @@ async def get_fivesim_code(order_id, timeout=180):
                 try:
                     data = response.json()
                 except ValueError:
-                    logger.warning(f"⚠️ Respuesta no JSON de 5sim: {response.text[:200]}")
+                    logger.warning(f"⚠️ Respuesta no JSON: {response.text[:200]}")
                     await asyncio.sleep(5)
                     continue
                 status = data.get('status')
@@ -384,7 +366,6 @@ async def get_fivesim_code(order_id, timeout=180):
                         code = sms[0].get('code')
                         if not code:
                             text = sms[0].get('text', '')
-                            import re
                             codes = re.findall(r'\b(\d{5,6})\b', text)
                             if codes:
                                 code = codes[0]
@@ -394,15 +375,14 @@ async def get_fivesim_code(order_id, timeout=180):
                 elif status == 'PENDING':
                     pass
                 else:
-                    logger.warning(f"⚠️ Estado inesperado de 5sim: {status}")
+                    logger.warning(f"⚠️ Estado inesperado: {status}")
             await asyncio.sleep(5)
         except Exception as e:
             logger.debug(f"📱 Error esperando código: {e}")
             await asyncio.sleep(5)
-    logger.error("❌ Tiempo de espera agotado para código SMS")
     return None
 
-
+# Hero SMS
 async def get_hero_sms_number(country_code, service='am'):
     """Alquila un número en Hero SMS (API compatible con SMS-Activate)."""
     url = "https://hero-sms.com/stubs/handler_api.php"
@@ -410,7 +390,7 @@ async def get_hero_sms_number(country_code, service='am'):
         'api_key': HERO_SMS_API_KEY,
         'action': 'getNumberV2',
         'service': service,
-        'country': country_code,  # Ej: 54 para México
+        'country': country_code,
         'operator': 'any'
     }
     try:
@@ -449,6 +429,7 @@ async def get_hero_sms_code(activation_id, timeout=180):
             await asyncio.sleep(5)
     return None
 
+# Lista de servicios SMS disponibles
 SMS_SERVICES = [
     {'name': 'hero', 'enabled': bool(HERO_SMS_API_KEY), 'get_number': get_hero_sms_number, 'get_code': get_hero_sms_code},
     {'name': '5sim', 'enabled': bool(FIVESIM_API_KEY), 'get_number': get_fivesim_number, 'get_code': get_fivesim_code},
@@ -462,218 +443,77 @@ async def get_phone_number(country_code):
         logger.debug(f"Intentando con {service['name']}...")
         try:
             if service['name'] == 'hero':
-                # Hero SMS requiere el código de país en formato numérico (ej. 54 para MX)
+                # Hero requiere código numérico de país
                 hero_country_map = {'MX': 54, 'US': 187, 'CA': 36, 'UK': 16, 'DE': 43, 'FR': 78, 'IT': 86, 'ES': 56, 'JP': 182, 'AU': 175, 'IN': 22}
                 hero_country = hero_country_map.get(country_code)
                 if not hero_country:
                     logger.warning(f"No hay mapeo Hero SMS para {country_code}")
                     continue
                 result = await service['get_number'](hero_country, service='am')
-            else:
-                # 5sim usa el nombre del país en inglés
+                if result:
+                    phone_full, service_id = result
+                    # Quitar código de país (Hero devuelve con código, ej. +5255...)
+                    prefix_len = {'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2,
+                                 'FR': 2, 'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}.get(country_code, 0)
+                    if prefix_len and len(phone_full) > prefix_len:
+                        phone_local = phone_full[prefix_len:]
+                        phone_local = re.sub(r'\D', '', phone_local)
+                    else:
+                        phone_local = phone_full
+                    return {
+                        'full': phone_full,
+                        'local': phone_local,
+                        'service_id': service_id,
+                        'service_name': service['name']
+                    }
+            else:  # 5sim
                 result = await service['get_number'](country_code, product='amazon')
-            
-            if result:
-                phone_full, service_id = result
-                # Quitar código de país según el país
-                prefix_len = {'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3,
-                              'FR': 3, 'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3}.get(country_code, 0)
-                if prefix_len and len(phone_full) > prefix_len:
-                    phone_local = phone_full[prefix_len:]
-                    phone_local = re.sub(r'\D', '', phone_local)
-                else:
-                    phone_local = phone_full
-                return {
-                    'full': phone_full,
-                    'local': phone_local,
-                    'service_id': service_id,
-                    'service_name': service['name']
-                }
+                if result:
+                    phone_full, service_id = result
+                    # 5sim a veces incluye código de país sin +, ejemplo: 521234567890 (para MX son 3 dígitos)
+                    prefix_len = {'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3,
+                                 'FR': 3, 'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3}.get(country_code, 0)
+                    if prefix_len and len(phone_full) > prefix_len:
+                        phone_local = phone_full[prefix_len:]
+                        phone_local = re.sub(r'\D', '', phone_local)
+                    else:
+                        phone_local = phone_full
+                    return {
+                        'full': phone_full,
+                        'local': phone_local,
+                        'service_id': service_id,
+                        'service_name': service['name']
+                    }
         except Exception as e:
             logger.warning(f"Error con {service['name']}: {e}")
             continue
     return None
 
-async def get_sms_code(service_name, service_id, page=None, timeout=180):
-    """Obtiene código SMS según el servicio."""
-    for service in SMS_SERVICES:
-        if service['name'] == service_name and service['enabled']:
-            if service_name == 'hero':
-                return await service['get_code'](service_id, timeout=timeout)
-            else:
-                # Para 5sim, usamos wait_for_sms_with_resend que ya tiene reintentos
-                return await wait_for_sms_with_resend(service_id, page, max_retries=3, timeout_per_retry=30)
-    return None
-
-async def wait_for_sms_with_resend(order_id, page, max_retries=3, timeout_per_retry=30):
+async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30):
     """
-    Intenta obtener el código SMS, y si no llega, hace clic en "Reenviar código" hasta max_retries veces.
+    Espera el código SMS del servicio correspondiente, con reintentos y clic en "Reenviar código".
     """
     for attempt in range(max_retries):
         logger.debug(f"📱 Esperando código SMS (intento {attempt+1}/{max_retries})...")
-        code = await get_sms_code(order_id, timeout=timeout_per_retry)
+        code = None
+        # Obtener la función get_code según el servicio
+        for s in SMS_SERVICES:
+            if s['name'] == service_name and s['enabled']:
+                code = await s['get_code'](service_id, timeout=timeout_per_retry)
+                break
         if code:
             return code
-        # Si no se obtuvo código, hacer clic en reenviar
+        # Si no llegó, hacer clic en reenviar
         try:
             resend_link = await page.query_selector('a#cvf-resend-link')
             if resend_link:
                 await resend_link.click()
                 logger.debug("   🔄 Clic en 'Reenviar código'")
-                await page.wait_for_timeout(5000)  # Esperar a que el nuevo SMS sea enviado
+                await page.wait_for_timeout(5000)
             else:
                 logger.warning("   ⚠️ No se encontró enlace de reenviar")
         except Exception as e:
             logger.warning(f"   ⚠️ Error al hacer clic en reenviar: {e}")
-    return None
-
-
-
-
-
-# -------------------------------------------------------------------
-# CORREO TEMPORAL (MEJORADO CON MÚLTIPLES SERVICIOS)
-# -------------------------------------------------------------------
-async def generate_temp_email():
-    """Genera una dirección de correo temporal usando múltiples servicios con reintentos."""
-    services = [
-        ('mail.tm', 'https://api.mail.tm'),
-        ('guerrillamail', 'https://api.guerrillamail.com/ajax.php'),
-        ('tempmail.plus', 'https://api.tempmail.plus/generate'),
-        ('mailinator', 'https://api.mailinator.com/v2/domains/public'),
-        ('10minutemail', 'https://10minutemail.net/api/1.1/')
-    ]
-    for service_name, api_url in services:
-        for attempt in range(3):
-            try:
-                logger.debug(f"📧 Intentando {service_name} (intento {attempt+1}/3)...")
-                if service_name == 'mail.tm':
-                    # Obtener dominios
-                    resp = requests.get(f"{api_url}/domains", timeout=30)
-                    if resp.status_code != 200:
-                        logger.warning(f"   mail.tm dominios respondió {resp.status_code}")
-                        continue
-                    data = resp.json()
-                    domains_list = data.get('hydra:member', [])
-                    if not domains_list or not domains_list[0].get('domain'):
-                        logger.warning("   mail.tm no devolvió dominios")
-                        continue
-                    domain = domains_list[0]['domain']
-                    email = f"{uuid.uuid4().hex[:8]}@{domain}"
-                    password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
-                    # Crear cuenta
-                    acc_resp = requests.post(
-                        f"{api_url}/accounts",
-                        json={"address": email, "password": password},
-                        timeout=30
-                    )
-                    if acc_resp.status_code == 201:
-                        # Autenticarse para obtener el token
-                        token_resp = requests.post(
-                            f"{api_url}/token",
-                            json={"address": email, "password": password},
-                            timeout=30
-                        )
-                        if token_resp.status_code == 200:
-                            token_data = token_resp.json()
-                            token = token_data.get('token')
-                            logger.debug(f"✅ mail.tm: {email}, token obtenido")
-                            return email, token, service_name
-                        else:
-                            logger.warning(f"   mail.tm autenticación falló: {token_resp.status_code}")
-                    else:
-                        logger.warning(f"   mail.tm creación falló: {acc_resp.status_code}")
-
-                elif service_name == 'guerrillamail':
-                    resp = requests.get(
-                        f"{api_url}?f=get_email_address&ip=127.0.0.1",
-                        timeout=30
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        email = data.get('email_addr')
-                        token = data.get('sid_token')
-                        if email and token:
-                            logger.debug(f"✅ guerrillamail: {email}")
-                            return email, token, service_name
-                    else:
-                        logger.warning(f"   guerrillamail respondió {resp.status_code}")
-
-                elif service_name == 'tempmail.plus':
-                    resp = requests.get(api_url, timeout=30)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        email = data.get('email')
-                        token = data.get('token')
-                        if email and token:
-                            logger.debug(f"✅ tempmail.plus: {email}")
-                            return email, token, service_name
-                    else:
-                        logger.warning(f"   tempmail.plus respondió {resp.status_code}")
-
-                elif service_name == 'mailinator':
-                    domain = 'mailinator.com'
-                    email = f"{uuid.uuid4().hex[:8]}@{domain}"
-                    logger.debug(f"✅ mailinator: {email} (sin token)")
-                    return email, None, service_name
-
-                elif service_name == '10minutemail':
-                    resp = requests.get(f"{api_url}new", timeout=30)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        email = data.get('email')
-                        token = data.get('token')
-                        if email:
-                            logger.debug(f"✅ 10minutemail: {email}")
-                            return email, token, service_name
-                    else:
-                        logger.warning(f"   10minutemail respondió {resp.status_code}")
-
-            except requests.exceptions.Timeout:
-                logger.warning(f"⚠️ Timeout en {service_name}")
-            except requests.exceptions.ConnectionError as e:
-                logger.warning(f"⚠️ Error de conexión en {service_name}: {e}")
-            except Exception as e:
-                logger.warning(f"⚠️ Error inesperado en {service_name}: {e}")
-            await asyncio.sleep(2)
-    logger.error("❌ Todos los servicios de correo fallaron")
-    return None, None, None
-
-async def get_verification_code(email, token, service, max_attempts=20, wait_time=10):
-    """
-    Obtiene el código de verificación del correo temporal.
-    Busca cualquier número de 5 o 6 dígitos en el texto del mensaje.
-    """
-    logger.debug(f"📧 Esperando código de verificación para {email} (servicio: {service})...")
-    
-    for attempt in range(max_attempts):
-        try:
-            if service == 'mail.tm' and token:
-                resp = requests.get(
-                    "https://api.mail.tm/messages",
-                    headers={'Authorization': f'Bearer {token}'},
-                    timeout=30
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    messages = data.get('hydra:member', [])
-                    for msg in messages:
-                        # Obtener el texto del mensaje (puede estar en varios campos)
-                        text = msg.get('text', '') or msg.get('html', '') or msg.get('intro', '')
-                        # Buscar cualquier número de 5 o 6 dígitos
-                        import re
-                        codes = re.findall(r'\b(\d{5,6})\b', text)
-                        if codes:
-                            code = codes[0]
-                            logger.debug(f"📧 Código obtenido de mail.tm: {code}")
-                            return code
-            # Aquí puedes agregar otros servicios (guerrillamail, etc.) con la misma lógica
-        except Exception as e:
-            logger.debug(f"📧 Intento {attempt+1} falló: {e}")
-        
-        await asyncio.sleep(wait_time)
-    
-    logger.error("❌ No se pudo obtener código de verificación después de múltiples intentos")
     return None
 
 # -------------------------------------------------------------------
@@ -689,9 +529,6 @@ async def take_screenshot(page, step_name):
         logger.warning(f"⚠️ Error tomando screenshot en paso {step_name}: {e}")
         return None
 
-# -------------------------------------------------------------------
-# FUNCIÓN AUXILIAR PARA OBTENER CONTENIDO DE FORMA SEGURA
-# -------------------------------------------------------------------
 async def safe_get_content(page, timeout=20):
     try:
         await page.wait_for_function('document.readyState === "complete"', timeout=timeout*1000)
@@ -703,152 +540,12 @@ async def safe_get_content(page, timeout=20):
         return await page.content()
 
 # -------------------------------------------------------------------
-# FUNCIÓN PARA AGREGAR DIRECCIÓN
+# FUNCIÓN PRINCIPAL DE CREACIÓN DE CUENTA
 # -------------------------------------------------------------------
-async def add_address(session, country_code, email, password, token=None, service=None):
-    """Agrega una dirección por defecto a la cuenta."""
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": f"{base_urls[country_code]}/gp/your-account?ref_=nav_AccountFlyout_ya",
-        "Viewport-Width": "1536"
-    }
-
-    resp = session.get(address_book_urls[country_code], headers=headers, timeout=15, allow_redirects=True)
-    if resp.status_code != 200:
-        logger.warning("⚠️ No se pudo acceder a address book")
-        return False
-
-    if 'signin' in resp.url.lower():
-        logger.debug("🔑 Sesión expirada, intentando reautenticar... (no implementado, se asume éxito)")
-        # Aquí podrías implementar login_again si es necesario
-
-    resp = session.get(add_address_urls[country_code], headers=headers, timeout=15, allow_redirects=True)
-    if resp.status_code != 200:
-        logger.warning("⚠️ No se pudo acceder a add address")
-        return False
-
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    form = soup.find('form', {'id': 'address-ui-widgets-form'}) or soup.find('form', {'action': re.compile('add', re.I)})
-    if not form:
-        logger.warning("⚠️ No se encontró formulario de dirección")
-        return False
-
-    address_data = {
-        'CA': {'countryCode': 'CA', 'fullName': 'Mark O. Montanez', 'phone': f'1{random.randint(1000000000,9999999999)}',
-               'line1': '456 Bloor Street West', 'city': 'Toronto', 'state': 'ON', 'postalCode': 'M5S 1X8'},
-        'MX': {'countryCode': 'US', 'fullName': 'John Doe', 'phone': f'1{random.randint(1000000000,9999999999)}',
-               'line1': '123 Main Street', 'city': 'New York', 'state': 'NY', 'postalCode': '10001'},
-        'US': {'countryCode': 'US', 'fullName': 'John Doe', 'phone': f'1{random.randint(1000000000,9999999999)}',
-               'line1': '123 Main Street', 'city': 'New York', 'state': 'NY', 'postalCode': '10001'},
-        'UK': {'countryCode': 'GB', 'fullName': 'James Smith', 'phone': f'44{random.randint(1000000000,9999999999)}',
-               'line1': '123 Oxford Street', 'city': 'London', 'state': '', 'postalCode': 'W1D 1AA'},
-        'DE': {'countryCode': 'DE', 'fullName': 'Hans Müller', 'phone': f'49{random.randint(1000000000,9999999999)}',
-               'line1': 'Hauptstraße 12', 'city': 'Berlin', 'state': '', 'postalCode': '10115'},
-        'FR': {'countryCode': 'FR', 'fullName': 'Pierre Dubois', 'phone': f'33{random.randint(1000000000,9999999999)}',
-               'line1': '12 Rue de Rivoli', 'city': 'Paris', 'state': '', 'postalCode': '75001'},
-        'IT': {'countryCode': 'IT', 'fullName': 'Giuseppe Rossi', 'phone': f'39{random.randint(1000000000,9999999999)}',
-               'line1': 'Via Roma 10', 'city': 'Roma', 'state': '', 'postalCode': '00184'},
-        'ES': {'countryCode': 'ES', 'fullName': 'Carlos García', 'phone': f'34{random.randint(1000000000,9999999999)}',
-               'line1': 'Calle Mayor 15', 'city': 'Madrid', 'state': '', 'postalCode': '28013'},
-        'JP': {'countryCode': 'JP', 'fullName': 'Taro Yamada', 'phone': f'81{random.randint(1000000000,9999999999)}',
-               'line1': '1-2-3 Shibuya', 'city': 'Tokyo', 'state': '', 'postalCode': '150-0002'},
-        'AU': {'countryCode': 'AU', 'fullName': 'Emma Wilson', 'phone': f'61{random.randint(1000000000,9999999999)}',
-               'line1': '123 George Street', 'city': 'Sydney', 'state': 'NSW', 'postalCode': '2000'},
-        'IN': {'countryCode': 'IN', 'fullName': 'Amit Sharma', 'phone': f'91{random.randint(1000000000,9999999999)}',
-               'line1': '123 MG Road', 'city': 'Mumbai', 'state': 'Maharashtra', 'postalCode': '400001'}
-    }
-
-    country_data = address_data[country_code]
-
-    post_data = {}
-    for inp in form.find_all('input', type='hidden'):
-        if inp.get('name'):
-            post_data[inp['name']] = inp.get('value', '')
-
-    post_data.update({
-        "address-ui-widgets-countryCode": country_data['countryCode'],
-        "address-ui-widgets-enterAddressFullName": country_data['fullName'],
-        "address-ui-widgets-enterAddressPhoneNumber": country_data['phone'],
-        "address-ui-widgets-enterAddressLine1": country_data['line1'],
-        "address-ui-widgets-enterAddressLine2": "",
-        "address-ui-widgets-enterAddressCity": country_data['city'],
-        "address-ui-widgets-enterAddressStateOrRegion": country_data['state'],
-        "address-ui-widgets-enterAddressPostalCode": country_data['postalCode'],
-        "address-ui-widgets-use-as-my-default": "true",
-        "address-ui-widgets-addressFormButtonText": "save"
-    })
-
-    post_url = urljoin(base_urls[country_code], form.get('action') or "/a/addresses/add")
-    headers.update({
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Origin": base_urls[country_code],
-        "Referer": add_address_urls[country_code]
-    })
-
-    resp = session.post(
-        post_url,
-        data=urlencode(post_data),
-        headers=headers,
-        timeout=15,
-        allow_redirects=True
-    )
-
-    if resp.status_code == 200:
-        logger.debug("✅ Dirección agregada exitosamente")
-        return True
-    else:
-        logger.warning(f"⚠️ Error al agregar dirección: {resp.status_code}")
-        return False
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-async def create_amazon_account(country_code, email=None, token=None, service=None, add_address_flag=True):
-    # NOTA: email, token, service se ignoran; usamos número de teléfono.
+async def create_amazon_account(country_code, add_address_flag=True):
     logger.debug(f"🏁 [ENTRADA] create_amazon_account para país {country_code} (vía número de teléfono)")
 
-    max_global_retries = 1
+    max_global_retries = 3  # Aumentado para mayor robustez
     for global_attempt in range(1, max_global_retries + 1):
         logger.debug(f"🔄 Intento global {global_attempt}/{max_global_retries}")
         playwright = None
@@ -859,19 +556,17 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
         last_screenshot = None
 
         account_data = {
-            'email': None,          # No se usará
+            'phone': None,
             'password': None,
             'name': None,
-            'phone': None,
             'address': None,
             'cookie_string': None,
             'cookie_dict': None,
             'country': country_code,
-            'timestamp': time.time()
         }
 
         try:
-            # ----- PASO 1: Configurar sesión y proxy -----
+            # ----- PASO 1: Configurar sesión requests -----
             logger.debug("📦 [PASO 1] Configurando sesión requests...")
             session = requests.Session()
             retry_strategy = Retry(
@@ -912,7 +607,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             logger.debug(f"   ✅ Número obtenido: {phone_number} (servicio: {service_name}, ID: {service_id})")
             account_data['phone'] = phone_number
 
-
             # ----- PASO 4: Generar credenciales (nombre y contraseña) -----
             logger.debug("🔑 [PASO 4] Generando credenciales...")
             password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
@@ -934,7 +628,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 raise Exception(f"Error iniciando Playwright: {e}")
 
             launch_options = {
-                'headless': True,
+                'headless': True,  # En servidor, headless
                 'args': [
                     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
                     '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
@@ -1105,7 +799,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 raise Exception("No se encontró enlace de inicio de sesión")
 
             await login_link.click()
-            await page.wait_for_load_state('networkidle', timeout=30000)
+            await page.wait_for_load_state('load', timeout=30000)
             await page.wait_for_timeout(2000)
             logger.debug(f"   📍 URL después de login: {page.url}")
             last_screenshot = await take_screenshot(page, "after_login_click")
@@ -1141,11 +835,17 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 raise Exception("No se encontró botón Continuar")
 
             await continue_button.click()
-            await continue_button.click()
-            await page.wait_for_load_state('networkidle', timeout=15000)
+            await page.wait_for_load_state('load', timeout=15000)
             await page.wait_for_timeout(2000)
             logger.debug(f"   📍 Nueva URL: {page.url}")
             last_screenshot = await take_screenshot(page, "despues_continuar")
+
+            # ----- PASO 10.5: Verificar si la página es de inicio de sesión (número ya registrado) -----
+            content = await safe_get_content(page)
+            if "claim?" in page.url.lower():
+                logger.warning("⚠️ Detectada página de inicio de sesión (número posiblemente ya registrado). Reintentando con nueva IP...")
+                last_screenshot = await take_screenshot(page, "error_numero_registrado")
+                raise Exception("Número ya registrado o sesión inesperada")
 
             # ----- PASO 11: Página intermedia "Proceder a crear una cuenta" -----
             logger.debug("🔍 [PASO 11] Verificando página intermedia...")
@@ -1246,43 +946,32 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             if not clicked:
                 logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
 
-            await page.wait_for_load_state('networkidle', timeout=30000)
+            await page.wait_for_load_state('load', timeout=30000)
             last_screenshot = await take_screenshot(page, "despues_registro")
-
-
-
-
 
             # ----- PASO 14: Detectar captcha después del envío -----
             logger.debug("🔍 [PASO 14] Verificando captcha después del envío...")
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
 
-
-            # Detectar captcha de selección de imágenes (tipo "elige las sillas")
             if "Resuelve esta adivinanza" in content or "Elija todo las sillas" in content or "Elija todo" in content:
                 logger.warning("⚠️ Captcha de selección de imágenes detectado")
-                # Esperar a que el canvas termine de cargar (puede tardar unos segundos)
-                logger.debug("   ⏳ Esperando 4 segundos adicionales para que cargue el canvas...")
                 await page.wait_for_timeout(4000)
                 last_screenshot = await take_screenshot(page, "captcha_seleccion")
-
-                # Buscar el canvas (es lo más común) o una imagen
                 canvas_element = await page.query_selector('canvas')
                 img_element = await page.query_selector('img[src*="captcha"]')
-                
                 if canvas_element:
                     logger.debug("   ✅ Captcha es un canvas, tomando screenshot del elemento")
                     screenshot_bytes = await canvas_element.screenshot()
                     img_path = 'temp_canvas_captcha.png'
                     with open(img_path, 'wb') as f:
                         f.write(screenshot_bytes)
-                    logger.debug(f"   ✅ Canvas capturado, tamaño: {len(screenshot_bytes)} bytes")
                     click_element = canvas_element
                 elif img_element:
                     logger.debug("   ✅ Captcha es una imagen, descargando...")
                     img_src = await img_element.get_attribute('src')
                     if not img_src:
+                        logger.error("La imagen del captcha no tiene src")
                         return None, "La imagen del captcha no tiene src", last_screenshot
                     img_data = requests.get(img_src, timeout=10).content
                     img_path = 'temp_image_captcha.jpg'
@@ -1290,13 +979,11 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         f.write(img_data)
                     click_element = img_element
                 else:
-                    # Si aún no aparece, esperar un poco más y reintentar una vez
                     logger.warning("   ⚠️ No se encontró canvas ni imagen, esperando 9 segundos más...")
                     await page.wait_for_timeout(9000)
                     canvas_element = await page.query_selector('canvas')
                     img_element = await page.query_selector('img[src*="captcha"]')
                     if canvas_element:
-                        logger.debug("   ✅ Captcha (canvas) apareció después de espera adicional")
                         screenshot_bytes = await canvas_element.screenshot()
                         img_path = 'temp_canvas_captcha.png'
                         with open(img_path, 'wb') as f:
@@ -1304,8 +991,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         click_element = canvas_element
                     elif img_element:
                         img_src = await img_element.get_attribute('src')
-                        if not img_src:
-                            return None, "La imagen del captcha no tiene src", last_screenshot
                         img_data = requests.get(img_src, timeout=10).content
                         img_path = 'temp_image_captcha.jpg'
                         with open(img_path, 'wb') as f:
@@ -1313,135 +998,15 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         click_element = img_element
                     else:
                         logger.error("❌ No se encontró canvas ni imagen de captcha después de reintentar")
-                        return None, "No se encontró elemento de captcha", last_screenshot
+                        raise Exception("No se pudo encontrar elemento de captcha")
 
-                # Extraer texto de instrucción (mejorado)
                 hint_text = "Haz clic en todas las imágenes que correspondan"
-
-                # --- Resolver coordenadas usando API HTTP directamente ---
                 coordinates = None
-
-                # Función para llamar a 2captcha API (versión robusta)
-                def solve_2captcha_coordinates(image_path, hint):
-                    import base64
-                    with open(image_path, 'rb') as f:
-                        img_base64 = base64.b64encode(f.read()).decode('utf-8')
-                    url = "http://2captcha.com/in.php"
-                    data = {
-                        'key': API_KEY_2CAPTCHA,
-                        'method': 'base64',
-                        'body': img_base64,
-                        'coordinatescaptcha': 1,
-                        'textinstructions': hint,
-                        'json': 1
-                    }
-                    try:
-                        resp = requests.post(url, data=data, timeout=30)
-                        if resp.status_code == 200:
-                            result = resp.json()
-                            if result.get('status') == 1:
-                                captcha_id = result['request']
-                                logger.debug(f"   2captcha ID: {captcha_id}, esperando resultado...")
-                                start_time = time.time()
-                                while time.time() - start_time < 120:  # timeout 2 minutos
-                                    time.sleep(5)
-                                    res_url = f"http://2captcha.com/res.php?key={API_KEY_2CAPTCHA}&action=get&id={captcha_id}&json=1"
-                                    res_resp = requests.get(res_url, timeout=10)
-                                    if res_resp.status_code == 200:
-                                        try:
-                                            res_data = res_resp.json()
-                                        except:
-                                            logger.warning("   Respuesta no JSON de 2captcha")
-                                            continue
-                                        if res_data.get('status') == 1:
-                                            coord_data = res_data['request']
-                                            # Puede ser string "x1,y1;x2,y2" o una lista de puntos
-                                            if isinstance(coord_data, str):
-                                                points = []
-                                                for pair in coord_data.split(';'):
-                                                    if pair:
-                                                        x, y = pair.split(',')
-                                                        points.append({'x': int(x), 'y': int(y)})
-                                                return points
-                                            elif isinstance(coord_data, list):
-                                                # Formato: [{"x":290,"y":69}, ...] o [ [290,69], ... ]
-                                                points = []
-                                                for item in coord_data:
-                                                    if isinstance(item, dict):
-                                                        points.append({'x': int(item['x']), 'y': int(item['y'])})
-                                                    elif isinstance(item, list) and len(item) == 2:
-                                                        points.append({'x': int(item[0]), 'y': int(item[1])})
-                                                return points
-                                            else:
-                                                logger.warning(f"   Formato de coordenadas desconocido: {type(coord_data)}")
-                                        elif res_data.get('request') == 'CAPCHA_NOT_READY':
-                                            continue
-                                        else:
-                                            break
-                            return None
-                    except Exception as e:
-                        logger.warning(f"Error en 2captcha HTTP: {e}")
-                        return None
-
-                # Función para llamar a anticaptcha API (versión robusta)
-                def solve_anticaptcha_coordinates(image_path, hint):
-                    import base64
-                    with open(image_path, 'rb') as f:
-                        img_base64 = base64.b64encode(f.read()).decode('utf-8')
-                    url = "https://api.anti-captcha.com/createTask"
-                    data = {
-                        "clientKey": API_KEY_ANTICAPTCHA,
-                        "task": {
-                            "type": "ImageToCoordinatesTask",
-                            "body": img_base64,
-                            "comment": hint
-                        }
-                    }
-                    try:
-                        resp = requests.post(url, json=data, timeout=30)
-                        if resp.status_code == 200:
-                            result = resp.json()
-                            if result.get('errorId') == 0:
-                                task_id = result['taskId']
-                                logger.debug(f"   anticaptcha task ID: {task_id}, esperando resultado...")
-                                start_time = time.time()
-                                while time.time() - start_time < 120:  # timeout 2 minutos
-                                    time.sleep(5)
-                                    res_url = "https://api.anti-captcha.com/getTaskResult"
-                                    res_data = {"clientKey": API_KEY_ANTICAPTCHA, "taskId": task_id}
-                                    res_resp = requests.post(res_url, json=res_data, timeout=10)
-                                    if res_resp.status_code == 200:
-                                        res_result = res_resp.json()
-                                        if res_result.get('status') == 'ready':
-                                            coords = res_result['solution'].get('coordinates')
-                                            if coords:
-                                                # anticaptcha puede devolver [{"x":290,"y":69}, ...] o lista de listas
-                                                points = []
-                                                for item in coords:
-                                                    if isinstance(item, dict):
-                                                        points.append({'x': int(item['x']), 'y': int(item['y'])})
-                                                    elif isinstance(item, list) and len(item) == 2:
-                                                        points.append({'x': int(item[0]), 'y': int(item[1])})
-                                                return points
-                                            else:
-                                                logger.warning("   anticaptcha devolvió solución sin coordenadas")
-                                                return None
-                                        elif res_result.get('status') == 'processing':
-                                            continue
-                                        else:
-                                            break
-                            return None
-                    except Exception as e:
-                        logger.warning(f"Error en anticaptcha HTTP: {e}")
-                        return None
-
-                # Intentar con 2captcha
                 if API_KEY_2CAPTCHA:
                     logger.debug("   Intentando con 2captcha API HTTP...")
                     coordinates = solve_2captcha_coordinates(img_path, hint_text)
                     if coordinates:
                         logger.debug(f"✅ 2captcha resolvió coordenadas: {coordinates}")
-
                 if not coordinates and API_KEY_ANTICAPTCHA:
                     logger.debug("   Intentando con anticaptcha API HTTP...")
                     coordinates = solve_anticaptcha_coordinates(img_path, hint_text)
@@ -1449,133 +1014,100 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
                     else:
                         logger.warning("   anticaptcha no devolvió coordenadas")
-
                 if not coordinates:
                     return None, "No se pudo resolver captcha de coordenadas", last_screenshot
 
-                # Verificar que el elemento de clic siga existente y visible
-                try:
-                    if canvas_element:
-                        click_element = await page.query_selector('canvas')
-                    else:
-                        click_element = await page.query_selector('img[src*="captcha"]')
-                    if not click_element or not await click_element.is_visible():
-                        logger.error("❌ El elemento de captcha ya no está visible")
-                        return None, "Elemento de captcha desapareció", last_screenshot
-                except Exception as e:
-                    logger.error(f"❌ Error al verificar elemento de captcha: {e}")
-                    return None, "Error al verificar elemento de captcha", last_screenshot
-
+                # Realizar clics
                 box = await click_element.bounding_box()
-                if not box:
-                    logger.error("❌ No se pudo obtener bounding box del contenedor (elemento no visible o eliminado)")
-                    return None, "No se pudo obtener posición del captcha", last_screenshot
+                if box:
+                    for point in coordinates:
+                        try:
+                            abs_x = box['x'] + int(point['x'])
+                            abs_y = box['y'] + int(point['y'])
+                            await page.mouse.click(abs_x, abs_y)
+                            await asyncio.sleep(0.5)
+                        except Exception as e:
+                            logger.warning(f"   ⚠️ Error al hacer clic: {e}")
+                else:
+                    logger.warning("No se pudo obtener bounding box del captcha")
 
-                # Realizar clics en las coordenadas (convertidas a int)
-                for point in coordinates:
-                    try:
-                        abs_x = box['x'] + int(point['x'])
-                        abs_y = box['y'] + int(point['y'])
-                        await page.mouse.click(abs_x, abs_y)
-                        await asyncio.sleep(0.5)
-                    except Exception as e:
-                        logger.warning(f"   ⚠️ Error al hacer clic en coordenada {point}: {e}")
-                        continue
-
-                # Buscar botón de confirmar
+                # Botón confirmar
                 confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"], button[type="submit"]')
                 if confirm_btn:
                     await confirm_btn.click()
                     logger.debug("✅ Clic en botón de confirmar")
-                    await page.wait_for_load_state('networkidle', timeout=30000)
-                    last_screenshot = await take_screenshot(page, "despues_captcha_coordenadas")
+                    await page.wait_for_load_state('load', timeout=30000)
                 else:
-                    logger.warning("⚠️ No se encontró botón de confirmar, puede que se envíe automáticamente")
-
-                # Después de resolver, esperar un poco y actualizar contenido
+                    logger.warning("⚠️ No se encontró botón de confirmar")
                 await page.wait_for_timeout(5000)
                 content = await safe_get_content(page)
 
-             # ----- PASO 15: Verificación por SMS (con posible redirección a WhatsApp) -----
+            # ----- PASO 15: Verificación por SMS (con posible redirección a WhatsApp) -----
             logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
 
-            # Detectar si estamos en la página de WhatsApp
             if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
                 logger.warning("⚠️ Página de verificación con WhatsApp detectada, seleccionando SMS...")
-                last_screenshot = await take_screenshot(page, "pagina_whatsapp")
-                
-                # Buscar el botón "Enviar código por SMS"
                 sms_option = await page.query_selector('#secondary_channel_button input.a-button-input')
                 if not sms_option:
                     sms_option = await page.query_selector('#secondary_channel_button')
                 if not sms_option:
                     sms_option = await page.query_selector('xpath=//*[contains(text(), "Enviar código por SMS")]')
-                
                 if sms_option:
                     await page.wait_for_timeout(500)
                     await sms_option.click()
                     logger.debug("   ✅ Clic en 'Enviar código por SMS'")
-                    await page.wait_for_load_state('networkidle', timeout=15000)
-                    last_screenshot = await take_screenshot(page, "despues_seleccion_sms")
+                    await page.wait_for_load_state('load', timeout=15000)
                 else:
                     logger.warning("   ⚠️ No se encontró la opción de SMS, puede que ya esté en la página de código")
-            else:
-                logger.debug("   ✅ No se detectó página de WhatsApp, continuando...")
 
-            # Ahora esperar el campo de código
+            # Esperar el campo de código
             try:
                 code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
                 logger.debug("   📱 Página de ingreso de código SMS detectada")
-                
-                # Usar la nueva función con reintentos y resend
-                sms_code = await wait_for_sms_with_resend(order_id, page, max_retries=3, timeout_per_retry=30)
-                
-                if sms_code:
-                    await code_input.fill(sms_code)
-                    logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
-                    verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
-                    if verify_btn:
-                        await verify_btn.click()
-                        await page.wait_for_load_state('networkidle', timeout=15000)
-                        last_screenshot = await take_screenshot(page, "despues_verificacion_sms")
-                    else:
-                        logger.warning("   ⚠️ No se encontró botón de verificar")
-                else:
-                    logger.error("❌ No se pudo obtener código SMS después de varios intentos y reenvíos")
-                    raise Exception("No se pudo obtener código de verificación SMS")
             except Exception as e:
-                # Si no aparece el campo de código, verificar mensajes de error
+                # Si no aparece, verificar si hay mensaje de error
                 error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
                 if error_msg:
                     error_text = await error_msg.text_content()
-                    logger.error(f"❌ Error en verificación SMS: {error_text}")
-                    raise Exception(f"Error en verificación SMS: {error_text}")
+                    if "Hemos enviado tu OTP" in error_text:
+                        logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
+                        await page.wait_for_timeout(3000)
+                        code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                    else:
+                        logger.error(f"❌ Error en verificación SMS: {error_text}")
+                        raise Exception(f"Error en verificación SMS: {error_text}")
                 else:
-                    logger.warning("⚠️ No se encontró campo de código ni mensaje de error, continuando...")
-                    last_screenshot = await take_screenshot(page, "sin_codigo_sms")
+                    raise
 
-
-
-
+            # Obtener el código SMS
+            sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30)
+            if sms_code:
+                # Volver a buscar el campo por si cambió
+                code_input = await page.query_selector('#cvf-input-code')
+                if not code_input or not await code_input.is_visible():
+                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=10000)
+                await code_input.fill(sms_code)
+                logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
+                verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
+                if verify_btn:
+                    await verify_btn.click()
+                    await page.wait_for_load_state('load', timeout=20000)
+                else:
+                    logger.warning("   ⚠️ No se encontró botón de verificar")
+            else:
+                raise Exception("No se pudo obtener código de verificación SMS")
 
             # ----- PASO 18: Verificar errores en la página -----
-            logger.debug("🔍 [PASO 18] Buscando mensajes de error...")
             soup = BeautifulSoup(content, 'html.parser')
             error_div = soup.find('div', {'class': re.compile('a-alert-error|a-alert-warning|a-box-error')})
             if error_div:
                 error_msg = error_div.get_text(strip=True)
                 logger.error(f"   ❌ Error en registro: {error_msg}")
-                last_screenshot = await take_screenshot(page, "error_registro")
                 raise Exception(f"Error en registro: {error_msg}")
 
-
-
-
-
             # ----- PASO 19: Verificar éxito (cuenta creada) -----
-            logger.debug("🎉 [PASO 19] Verificando éxito...")
             if 'your-account' in page.url.lower() or 'account' in page.url.lower() or 'welcome' in page.url.lower():
                 logger.debug("   ✅ Registro exitoso!")
                 cookies = await context.cookies()
@@ -1585,50 +1117,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                 account_data['cookie_string'] = cookie_string
                 logger.debug(f"   🍪 Cookies obtenidas: {len(cookie_dict)} cookies")
 
-                # Sincronizar cookies con la sesión requests
-                for name, value in cookie_dict.items():
-                    session.cookies.set(name, value, domain=f".{base_urls[country_code].replace('https://','')}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
                 # ----- PASO 20: Agregar dirección (opcional) -----
                 if add_address_flag:
                     logger.debug("📍 [PASO 20] Agregando dirección...")
@@ -1636,7 +1124,8 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                     try:
                         # Navegar a la página de direcciones
                         logger.debug("   Navegando a address book...")
-                        await page.goto(address_book_urls[country_code], wait_until='networkidle', timeout=20000)
+                        await page.wait_for_timeout(5000)
+                        await page.goto(address_book_urls[country_code], wait_until='domcontentloaded', timeout=30000)
                         await page.wait_for_timeout(2000)
                         last_screenshot = await take_screenshot(page, "address_book_page")
                         logger.debug("   📸 Captura: address_book_page")
@@ -1649,22 +1138,18 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         if add_link:
                             await add_link.click()
                             logger.debug("   ✅ Clic en 'Agregar dirección'")
-                            await page.wait_for_load_state('networkidle', timeout=15000)
+                            await page.wait_for_load_state('domcontentloaded', timeout=15000)
                             await page.wait_for_timeout(2000)
                             last_screenshot = await take_screenshot(page, "after_add_click")
                             logger.debug("   📸 Captura: after_add_click")
                         else:
                             logger.warning("   ⚠️ No se encontró enlace, yendo a URL directa")
-                            await page.goto(add_address_urls[country_code], wait_until='networkidle', timeout=20000)
+                            await page.goto(add_address_urls[country_code], wait_until='load', timeout=20000)
                             await page.wait_for_timeout(2000)
                             last_screenshot = await take_screenshot(page, "add_address_form_direct")
                             logger.debug("   📸 Captura: add_address_form_direct")
 
-                        # Captura antes de llenar el formulario
-                        last_screenshot = await take_screenshot(page, "address_form_before_fill")
-                        logger.debug("   📸 Captura: address_form_before_fill")
-
-                        # Datos de dirección según país (usando USA para MX)
+                        # Datos de dirección
                         address_data = {
                             'MX': {
                                 'countryCode': 'US',
@@ -1691,14 +1176,10 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                         # ---- Seleccionar país ----
                         try:
                             logger.debug("   Seleccionando país...")
-                            # Hacer clic en el dropdown de país
                             country_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
                             if country_dropdown:
                                 await country_dropdown.click()
                                 await page.wait_for_timeout(1000)
-                                last_screenshot = await take_screenshot(page, "country_dropdown_open")
-                                logger.debug("   📸 Captura: country_dropdown_open")
-                                # Buscar la opción "Estados Unidos"
                                 us_option = await page.query_selector('a:has-text("Estados Unidos")')
                                 if not us_option:
                                     us_option = await page.query_selector('a[data-value*="US"]')
@@ -1706,37 +1187,25 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                     await us_option.click()
                                     logger.debug("   ✅ País seleccionado")
                                     await page.wait_for_timeout(1000)
-                                    last_screenshot = await take_screenshot(page, "country_selected")
-                                    logger.debug("   📸 Captura: country_selected")
                                 else:
                                     logger.warning("   ⚠️ No se encontró la opción Estados Unidos")
-                                    last_screenshot = await take_screenshot(page, "country_option_not_found")
-                                    logger.debug("   📸 Captura: country_option_not_found")
                             else:
                                 logger.warning("   ⚠️ No se encontró dropdown de país")
-                                last_screenshot = await take_screenshot(page, "country_dropdown_not_found")
-                                logger.debug("   📸 Captura: country_dropdown_not_found")
                         except Exception as e:
                             logger.warning(f"   ⚠️ Error seleccionando país: {e}")
-                            last_screenshot = await take_screenshot(page, "country_selection_error")
-                            logger.debug("   📸 Captura: country_selection_error")
 
-                        # Llenar campos de texto
+                        # Llenar campos
                         logger.debug("   Llenando campos...")
                         await page.fill('#address-ui-widgets-enterAddressFullName', country_data['fullName'])
                         await page.fill('#address-ui-widgets-enterAddressPhoneNumber', country_data['phone'])
                         await page.fill('#address-ui-widgets-enterAddressLine1', country_data['line1'])
                         await page.fill('#address-ui-widgets-enterAddressCity', country_data['city'])
                         logger.debug("   ✅ Campos básicos llenados")
-                        last_screenshot = await take_screenshot(page, "fields_filled")
-                        logger.debug("   📸 Captura: fields_filled")
 
-                        # ---- Seleccionar estado (intento 1) ----
-                        estado_seleccionado = False
+                        # ---- Seleccionar estado ----
                         try:
-                            logger.debug("   Seleccionando estado (intento 1)...")
+                            logger.debug("   Seleccionando estado...")
                             await page.wait_for_timeout(2000)
-                            # Buscar el dropdown que tenga el texto "Seleccionar" (común para estado)
                             state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]:has-text("Seleccionar")')
                             if not state_dropdown:
                                 dropdowns = await page.query_selector_all('span.a-button-text[data-action="a-dropdown-button"]')
@@ -1745,9 +1214,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                             if state_dropdown:
                                 await state_dropdown.click()
                                 await page.wait_for_timeout(1500)
-                                last_screenshot = await take_screenshot(page, "state_dropdown_open")
-                                logger.debug("   📸 Captura: state_dropdown_open")
-                                # Buscar opción "New York"
                                 state_option = await page.query_selector('a:has-text("New York")')
                                 if not state_option:
                                     state_option = await page.query_selector(f'a[data-value*="{country_data["state"]}"]')
@@ -1755,194 +1221,92 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                     await state_option.click()
                                     logger.debug(f"   ✅ Estado seleccionado: {country_data['state']}")
                                     await page.wait_for_timeout(1500)
-                                    last_screenshot = await take_screenshot(page, "state_selected")
-                                    logger.debug("   📸 Captura: state_selected")
-                                    estado_seleccionado = True
                                 else:
                                     logger.warning(f"   ⚠️ No se encontró opción de estado {country_data['state']}")
-                                    last_screenshot = await take_screenshot(page, "state_option_not_found")
-                                    logger.debug("   📸 Captura: state_option_not_found")
                             else:
                                 logger.warning("   ⚠️ No se encontró dropdown de estado")
-                                last_screenshot = await take_screenshot(page, "state_dropdown_not_found")
-                                logger.debug("   📸 Captura: state_dropdown_not_found")
                         except Exception as e:
                             logger.warning(f"   ⚠️ Error seleccionando estado: {e}")
-                            last_screenshot = await take_screenshot(page, "state_selection_error")
-                            logger.debug("   📸 Captura: state_selection_error")
 
                         # Código postal
                         await page.fill('#address-ui-widgets-enterAddressPostalCode', country_data['postalCode'])
                         logger.debug("   ✅ Código postal llenado")
-                        last_screenshot = await take_screenshot(page, "postal_code_filled")
-                        logger.debug("   📸 Captura: postal_code_filled")
 
-                        # Función para verificar errores específicos
-                        async def check_address_errors():
-                            # Buscar mensaje de error general arriba del formulario
-                            general_error = await page.query_selector('.a-alert-error, .a-alert-warning')
-                            if general_error:
-                                error_text = await general_error.text_content()
-                                if "Revisa tu dirección" in error_text:
-                                    logger.debug("   🔍 Detectado error: 'Revisa tu dirección' (posiblemente necesita un segundo clic)")
-                                return error_text
-                            # Buscar error específico de estado
-                            state_error = await page.query_selector('#address-ui-widgets-enterAddressStateOrRegion + .a-alert-error, .a-alert-error:has-text("Ingresa un estado")')
-                            if state_error:
-                                error_text = await state_error.text_content()
-                                if "Ingresa un estado" in error_text:
-                                    logger.debug("   🔍 Detectado error: 'Ingresa un estado, región o provincia' (estado no seleccionado)")
-                                return error_text
+                        # ---- Función auxiliar para buscar botón de envío ----
+                        async def find_submit_button():
+                            for selector in [
+                                'span#address-ui-widgets-form-submit-button input[type="submit"]',
+                                'span[data-action="form-submit-button-click"] input[type="submit"]',
+                                'input[value="Agregar dirección"]',
+                                'input[type="submit"]'
+                            ]:
+                                btn = await page.query_selector(selector)
+                                if btn:
+                                    return btn
                             return None
 
-                        # ANTES DEL PRIMER CLIC
-                        last_screenshot = await take_screenshot(page, "before_first_submit")
+                        submit_btn = await find_submit_button()
                         if submit_btn:
                             # Primer clic
-                            logger.debug("   Realizando primer clic en botón de agregar dirección...")
+                            logger.debug("   Realizando primer clic...")
                             await submit_btn.click()
                             await page.wait_for_timeout(3000)
 
-                            last_screenshot = await take_screenshot(page, "after_first_submit")
-                            logger.debug("   📸 Captura: after_first_submit")
-
-                            # Verificar si hay mensajes de error en la página
-                            error_detected = False
-                            error_text = ""
-                            # Buscar por clases comunes de error
-                            error_elem = await page.query_selector('.a-alert-error, .a-alert-warning, .a-box-error')
+                            # Verificar errores
+                            error_elem = await page.query_selector('.a-alert-error, .a-alert-warning')
                             if error_elem:
                                 error_text = await error_elem.text_content()
-                                error_detected = True
-                            else:
-                                # Buscar por texto específico de error
-                                error_texts = ["Revisa tu dirección", "Ingresa un estado", "No pudimos verificar", "No pudimos validar"]
-                                for text in error_texts:
-                                    elem = await page.query_selector(f'*:has-text("{text}")')
-                                    if elem:
-                                        error_text = text
-                                        error_detected = True
-                                        break
-
-                            if error_detected:
                                 logger.warning(f"   ⚠️ Error después del primer clic: {error_text}")
-                                logger.debug("   Realizando segundo clic debido al error...")
-                                # Volver a buscar el botón (puede haber cambiado)
-                                submit_btn2 = await page.query_selector('input[value="Agregar dirección"]')                                
+                                logger.debug("   Realizando segundo clic...")
+                                submit_btn2 = await find_submit_button()
                                 if submit_btn2:
-                                    try:
-                                        async with page.expect_navigation(timeout=15000):
-                                            await submit_btn2.click()
-                                        logger.debug("   ✅ Segundo clic realizado, navegación detectada")
-                                    except Exception as e:
-                                        logger.error(f"   ❌ Fallo al agregar dirección: {e}")
-                                        raise Exception(f"Fallo al agregar dirección: {e}")
+                                    async with page.expect_navigation(timeout=15000):
+                                        await submit_btn2.click()
+                                    logger.debug("   ✅ Segundo clic realizado, navegación detectada")
                                 else:
-                                    logger.warning("   ⚠️ No se encontró el botón para segundo clic")
-                                    account_data['address'] = "Error: botón desapareció después del primer clic"
+                                    raise Exception("Botón desapareció después del primer clic")
                             else:
-                                # No se detectó error, intentar esperar navegación
-                                logger.debug("   No se detectaron errores, esperando navegación...")
+                                # Intentar esperar navegación
                                 try:
                                     async with page.expect_navigation(timeout=15000):
-                                        # Esperar a que el primer clic provoque navegación
                                         pass
                                     logger.debug("   ✅ Navegación detectada después del primer clic")
-                                except Exception:
-                                    # Si no hubo navegación, forzar segundo clic
-                                    logger.debug("   No hubo navegación, realizando segundo clic por seguridad...")
-
-                                    submit_btn2 = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"], input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
+                                except:
+                                    # Forzar segundo clic
+                                    logger.debug("   No hubo navegación, realizando segundo clic...")
+                                    submit_btn2 = await find_submit_button()
                                     if submit_btn2:
-                                        try:
-                                            async with page.expect_navigation(timeout=15000):
-                                                await submit_btn2.click()
-                                            logger.debug("   ✅ Segundo clic realizado, navegación detectada")
-                                        except Exception as e:
-                                            logger.error(f"   ❌ Fallo al agregar dirección: {e}")
-                                            raise Exception(f"Fallo al agregar dirección: {e}")
+                                        async with page.expect_navigation(timeout=15000):
+                                            await submit_btn2.click()
+                                        logger.debug("   ✅ Segundo clic realizado")
                                     else:
-                                        logger.warning("   ⚠️ No se encontró botón para segundo clic")
-                                        account_data['address'] = "Error: botón desapareció"
+                                        raise Exception("Botón desapareció")
 
-                            # Verificar resultado después de la navegación
+                            # Verificar resultado
                             new_url = page.url
-                            logger.debug(f"   Nueva URL después del submit: {new_url}")
+                            logger.debug(f"   Nueva URL: {new_url}")
                             if "addresses" in new_url:
-                                success_msg = await page.query_selector('.a-alert-success')
-                                if success_msg:
-                                    account_data['address'] = "Dirección agregada exitosamente"
-                                    logger.debug("   ✅ Dirección agregada correctamente")
-                                else:
-                                    account_data['address'] = "Dirección agregada (sin confirmación)"
-                                    logger.debug("   ℹ️ No se detectó mensaje de éxito, pero la URL indica direcciones")
+                                account_data['address'] = "Dirección agregada exitosamente"
+                                logger.debug("   ✅ Dirección agregada")
                             else:
-                                logger.warning(f"   ⚠️ Redirigido a URL inesperada: {new_url}")
-                                error_msg = await page.query_selector('.a-alert-error')
-                                if error_msg:
-                                    error_text = await error_msg.text_content()
-                                    account_data['address'] = f"Error al agregar dirección: {error_text}"
-                                else:
-                                    account_data['address'] = "Error: redirección inesperada"
+                                raise Exception(f"Redirección inesperada a {new_url}")
                         else:
-                            logger.warning("   ⚠️ No se encontró botón de envío")
-                            account_data['address'] = "Error: no se encontró botón de envío"
-
+                            raise Exception("No se encontró botón de envío")
                     except Exception as e:
-                        logger.warning(f"⚠️ Error durante el proceso de agregar dirección: {e}")
+                        logger.warning(f"⚠️ Error agregando dirección: {e}")
                         account_data['address'] = f"Error: {e}"
-                        last_screenshot = await take_screenshot(page, "address_exception")
-                        logger.debug("   📸 Captura: address_exception")
-                        address_success = False
-
-                    # Si no se logró agregar dirección exitosamente, lanzar excepción para reintentar global
-                    if not address_success:
-                        error_msg = f"Fallo al agregar dirección: {account_data.get('address', 'desconocido')}"
-                        logger.error(f"   ❌ {error_msg}")
-                        raise Exception(error_msg)
-                    else:
-                        logger.debug("   ✅ Dirección procesada con éxito (o asumida como exitosa)")
                 else:
                     account_data['address'] = "No se agregó dirección"
-                    logger.debug("   ℹ️ Omisión de dirección")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                return account_data
+            else:
+                raise Exception(f"Registro fallido, URL: {page.url}")
 
         except Exception as e:
             logger.error(f"❌ Error en intento {global_attempt}: {e}")
             if global_attempt == max_global_retries:
                 if page:
-                    last_screensehot = await take_screenshot(page, "error_final")
+                    last_screenshot = await take_screenshot(page, "error_final")
                 return None, str(e), last_screenshot
             else:
                 logger.info(f"🔄 Reintentando después de 5 segundos (nueva IP)...")
@@ -1969,38 +1333,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             logger.debug("✅ Limpieza completada")
 
     return None, "Error desconocido", None
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # -------------------------------------------------------------------
 # FUNCIÓN PARA API
@@ -2038,7 +1370,7 @@ def after_request(response):
 def home():
     return jsonify({
         'status': 'online',
-        'service': 'Amazon Cookie Generator API (dinámico)',
+        'service': 'Amazon Cookie Generator API (mejorado)',
         'endpoints': {
             '/generate': 'POST - Generar cookie (JSON: {"country": "MX", "add_address": true})',
             '/health': 'GET - Verificar estado'
