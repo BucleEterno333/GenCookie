@@ -182,7 +182,24 @@ def solve_coordinates_captcha(image_path, hint_text=None):
     logger.debug(f"🔍 Intentando resolver captcha de coordenadas con imagen: {image_path}")
 
     # Intentar con 2captcha
-    if API_KEY_2CAPTCHA:
+    if API_KEY_ANTICAPTCHA:
+        try:
+            from anticaptchaofficial.imagecoordinates import imagecoordinates
+            solver = imagecoordinates()
+            solver.set_api_key(API_KEY_ANTICAPTCHA)
+            solver.set_comment(hint_text or "Click on all images that match the description")
+            solver.set_image_path(image_path)
+            coordinates = solver.solve_and_return_solution()
+            if coordinates:
+                logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
+                return coordinates
+            else:
+                logger.warning("⚠️ 2captcha no devolvió coordenadas")
+        except Exception as e:
+            logger.warning(f"⚠️ 2captcha falló: {e}")
+
+    # Intentar con anticaptcha
+    if not solution and API_KEY_2CAPTCHA :
         try:
             from twocaptcha import TwoCaptcha
             solver = TwoCaptcha(API_KEY_2CAPTCHA)
@@ -198,24 +215,7 @@ def solve_coordinates_captcha(image_path, hint_text=None):
                         x, y = pair.split(',')
                         points.append({'x': int(x), 'y': int(y)})
                 logger.debug(f"✅ 2captcha resolvió coordenadas: {points}")
-                return points
-            else:
-                logger.warning("⚠️ 2captcha no devolvió coordenadas")
-        except Exception as e:
-            logger.warning(f"⚠️ 2captcha falló: {e}")
-
-    # Intentar con anticaptcha
-    if not solution and API_KEY_ANTICAPTCHA:
-        try:
-            from anticaptchaofficial.imagecoordinates import imagecoordinates
-            solver = imagecoordinates()
-            solver.set_api_key(API_KEY_ANTICAPTCHA)
-            solver.set_comment(hint_text or "Click on all images that match the description")
-            solver.set_image_path(image_path)
-            coordinates = solver.solve_and_return_solution()
-            if coordinates:
-                logger.debug(f"✅ anticaptcha resolvió coordenadas: {coordinates}")
-                return coordinates
+                return points 
             else:
                 logger.warning("⚠️ anticaptcha no devolvió coordenadas")
         except Exception as e:
@@ -232,22 +232,7 @@ def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
     solution = None
     logger.debug(f"🔍 Intentando resolver captcha: site_key={site_key}, url={page_url}, is_image={is_image_captcha}")
 
-    if API_KEY_2CAPTCHA and (CAPTCHA_PROVIDER == '2captcha' or not solution):
-        try:
-            from twocaptcha import TwoCaptcha
-            solver = TwoCaptcha(API_KEY_2CAPTCHA)
-            if is_image_captcha and image_path:
-                result = solver.normal(image_path)
-                solution = result['code']
-                logger.debug(f"✅ 2captcha resolvió imagen: {solution[:10]}...")
-            else:
-                result = solver.recaptcha(sitekey=site_key, url=page_url)
-                solution = result['code']
-                logger.debug(f"✅ 2captcha resolvió recaptcha: {solution[:10]}...")
-        except Exception as e:
-            logger.warning(f"⚠️ 2captcha falló: {e}")
-
-    if not solution and API_KEY_ANTICAPTCHA:
+    if API_KEY_ANTICAPTCHA:
         try:
             from anticaptchaofficial.recaptchav2proxyless import recaptchaV2Proxyless
             from anticaptchaofficial.imagecaptcha import imagecaptcha
@@ -263,6 +248,23 @@ def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
                 solver.set_website_key(site_key)
                 solution = solver.solve_and_return_solution()
                 logger.debug(f"✅ anticaptcha resolvió recaptcha: {solution[:10]}...")
+        except Exception as e:
+            logger.warning(f"⚠️ 2captcha falló: {e}")
+
+    if not solution and API_KEY_2CAPTCHA:
+        try:
+            from twocaptcha import TwoCaptcha
+            solver = TwoCaptcha(API_KEY_2CAPTCHA)
+            if is_image_captcha and image_path:
+                result = solver.normal(image_path)
+                solution = result['code']
+                logger.debug(f"✅ 2captcha resolvió imagen: {solution[:10]}...")
+            else:
+                result = solver.recaptcha(sitekey=site_key, url=page_url)
+                solution = result['code']
+                logger.debug(f"✅ 2captcha resolvió recaptcha: {solution[:10]}...")
+
+
         except Exception as e:
             logger.error(f"❌ anticaptcha falló: {e}")
 
@@ -292,7 +294,7 @@ def solve_captcha(site_key, page_url, is_image_captcha=False, image_path=None):
 
 
 # -------------------------------------------------------------------
-# 5SIM SMS (versión mejorada con manejo de errores)
+# SMS (versión mejorada con manejo de errores)
 # -------------------------------------------------------------------
 FIVESIM_BASE_URL = "https://5sim.net/v1"
 
@@ -310,6 +312,7 @@ FIVESIM_COUNTRY_MAP = {
     'IN': 'india',
 }
 
+# Servicios SMS disponibles
 async def get_fivesim_number(country_code, product='amazon'):
     """
     Compra un número de teléfono temporal en 5sim (usando GET).
@@ -400,13 +403,115 @@ async def get_fivesim_code(order_id, timeout=180):
     return None
 
 
+async def get_hero_sms_number(country_code, service='am'):
+    """Alquila un número en Hero SMS (API compatible con SMS-Activate)."""
+    url = "https://hero-sms.com/stubs/handler_api.php"
+    params = {
+        'api_key': HERO_SMS_API_KEY,
+        'action': 'getNumberV2',
+        'service': service,
+        'country': country_code,  # Ej: 54 para México
+        'operator': 'any'
+    }
+    try:
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(None, lambda: requests.get(url, params=params, timeout=30))
+        if response.status_code == 200:
+            data = response.json()
+            if 'activationId' in data and 'phoneNumber' in data:
+                return data['phoneNumber'], data['activationId']
+        logger.warning(f"Hero SMS error: {response.text}")
+        return None
+    except Exception as e:
+        logger.warning(f"Hero SMS exception: {e}")
+        return None
+
+async def get_hero_sms_code(activation_id, timeout=180):
+    """Espera el código SMS en Hero SMS."""
+    url = "https://hero-sms.com/stubs/handler_api.php"
+    params = {
+        'api_key': HERO_SMS_API_KEY,
+        'action': 'getStatusV2',
+        'id': activation_id
+    }
+    start = time.time()
+    loop = asyncio.get_running_loop()
+    while time.time() - start < timeout:
+        try:
+            response = await loop.run_in_executor(None, lambda: requests.get(url, params=params, timeout=30))
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('sms') and data['sms'].get('code'):
+                    return data['sms']['code']
+            await asyncio.sleep(5)
+        except Exception as e:
+            logger.debug(f"Hero SMS waiting error: {e}")
+            await asyncio.sleep(5)
+    return None
+
+SMS_SERVICES = [
+    {'name': 'hero', 'enabled': bool(HERO_SMS_API_KEY), 'get_number': get_hero_sms_number, 'get_code': get_hero_sms_code},
+    {'name': '5sim', 'enabled': bool(FIVESIM_API_KEY), 'get_number': get_fivesim_number, 'get_code': get_fivesim_code},
+]
+
+async def get_phone_number(country_code):
+    """Intenta obtener número de teléfono de los servicios en orden."""
+    for service in SMS_SERVICES:
+        if not service['enabled']:
+            continue
+        logger.debug(f"Intentando con {service['name']}...")
+        try:
+            if service['name'] == 'hero':
+                # Hero SMS requiere el código de país en formato numérico (ej. 54 para MX)
+                hero_country_map = {'MX': 54, 'US': 187, 'CA': 36, 'UK': 16, 'DE': 43, 'FR': 78, 'IT': 86, 'ES': 56, 'JP': 182, 'AU': 175, 'IN': 22}
+                hero_country = hero_country_map.get(country_code)
+                if not hero_country:
+                    logger.warning(f"No hay mapeo Hero SMS para {country_code}")
+                    continue
+                result = await service['get_number'](hero_country, service='am')
+            else:
+                # 5sim usa el nombre del país en inglés
+                result = await service['get_number'](country_code, product='amazon')
+            
+            if result:
+                phone_full, service_id = result
+                # Quitar código de país según el país
+                prefix_len = {'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3,
+                              'FR': 3, 'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3}.get(country_code, 0)
+                if prefix_len and len(phone_full) > prefix_len:
+                    phone_local = phone_full[prefix_len:]
+                    phone_local = re.sub(r'\D', '', phone_local)
+                else:
+                    phone_local = phone_full
+                return {
+                    'full': phone_full,
+                    'local': phone_local,
+                    'service_id': service_id,
+                    'service_name': service['name']
+                }
+        except Exception as e:
+            logger.warning(f"Error con {service['name']}: {e}")
+            continue
+    return None
+
+async def get_sms_code(service_name, service_id, page=None, timeout=180):
+    """Obtiene código SMS según el servicio."""
+    for service in SMS_SERVICES:
+        if service['name'] == service_name and service['enabled']:
+            if service_name == 'hero':
+                return await service['get_code'](service_id, timeout=timeout)
+            else:
+                # Para 5sim, usamos wait_for_sms_with_resend que ya tiene reintentos
+                return await wait_for_sms_with_resend(service_id, page, max_retries=3, timeout_per_retry=30)
+    return None
+
 async def wait_for_sms_with_resend(order_id, page, max_retries=3, timeout_per_retry=30):
     """
     Intenta obtener el código SMS, y si no llega, hace clic en "Reenviar código" hasta max_retries veces.
     """
     for attempt in range(max_retries):
         logger.debug(f"📱 Esperando código SMS (intento {attempt+1}/{max_retries})...")
-        code = await get_fivesim_code(order_id, timeout=timeout_per_retry)
+        code = await get_sms_code(order_id, timeout=timeout_per_retry)
         if code:
             return code
         # Si no se obtuvo código, hacer clic en reenviar
@@ -421,6 +526,8 @@ async def wait_for_sms_with_resend(order_id, page, max_retries=3, timeout_per_re
         except Exception as e:
             logger.warning(f"   ⚠️ Error al hacer clic en reenviar: {e}")
     return None
+
+
 
 
 
@@ -796,43 +903,15 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
             # ----- PASO 3: Obtener número de teléfono temporal -----
             logger.debug("📱 [PASO 3] Obteniendo número de teléfono temporal...")
-            phone_number = None
-            order_id = None
-
-            # Intentar con 5sim
-            if FIVESIM_API_KEY:
-                sms_info = await get_fivesim_number(country_code, product='amazon')
-                if sms_info:
-                    full_phone, order_id = sms_info
-                    logger.debug(f"   ✅ Número 5sim obtenido: {full_phone} (order_id: {order_id})")
-                    # Quitar código de país
-                    country_prefix_length = {
-                        'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3,
-                        'FR': 3, 'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3,
-                    }
-                    prefix_len = country_prefix_length.get(country_code, 0)
-                    if prefix_len and len(full_phone) > prefix_len:
-                        phone_number = full_phone[prefix_len:]
-                        phone_number = re.sub(r'\D', '', phone_number)
-                        logger.debug(f"   ✅ Número local (sin código): {phone_number}")
-                    else:
-                        phone_number = full_phone
-                        logger.warning(f"   ⚠️ No se pudo quitar código de país, se usará completo: {phone_number}")
-                else:
-                    logger.warning("   ⚠️ 5sim falló, intentando con HeroSMS...")
-                    # Aquí podrías llamar a get_hero_sms_number si está implementada
-                    if HERO_SMS_API_KEY:
-                        # Implementar get_hero_sms_number similar
-                        logger.error("❌ HeroSMS no implementado en este ejemplo")
-                        raise Exception("No se pudo obtener número de teléfono")
-                    else:
-                        logger.error("❌ No hay API de 5sim ni HeroSMS configurada")
-                        raise Exception("No se pudo obtener número de teléfono")
-            else:
-                logger.error("❌ No hay API key de 5sim configurada")
-                raise Exception("Se requiere número de teléfono pero no hay API de SMS")
-
+            phone_info = await get_phone_number(country_code)
+            if not phone_info:
+                raise Exception("No se pudo obtener número de teléfono de ningún servicio")
+            phone_number = phone_info['local']
+            service_id = phone_info['service_id']
+            service_name = phone_info['service_name']
+            logger.debug(f"   ✅ Número obtenido: {phone_number} (servicio: {service_name}, ID: {service_id})")
             account_data['phone'] = phone_number
+
 
             # ----- PASO 4: Generar credenciales (nombre y contraseña) -----
             logger.debug("🔑 [PASO 4] Generando credenciales...")
@@ -1061,6 +1140,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
             if not continue_button:
                 raise Exception("No se encontró botón Continuar")
 
+            await continue_button.click()
             await continue_button.click()
             await page.wait_for_load_state('networkidle', timeout=15000)
             await page.wait_for_timeout(2000)
@@ -1717,10 +1797,6 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
 
                         # ANTES DEL PRIMER CLIC
                         last_screenshot = await take_screenshot(page, "before_first_submit")
-                        logger.debug("   📸 Captura: before_first_submit")
-
-                                  # ---- Enviar formulario ----
-                        submit_btn = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"], input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
                         if submit_btn:
                             # Primer clic
                             logger.debug("   Realizando primer clic en botón de agregar dirección...")
@@ -1752,7 +1828,7 @@ async def create_amazon_account(country_code, email=None, token=None, service=No
                                 logger.warning(f"   ⚠️ Error después del primer clic: {error_text}")
                                 logger.debug("   Realizando segundo clic debido al error...")
                                 # Volver a buscar el botón (puede haber cambiado)
-                                submit_btn2 = await page.query_selector('input#address-ui-widgets-form-submit-button, input[type="submit"], input[aria-labelledby="address-ui-widgets-form-submit-button-announce"]')
+                                submit_btn2 = await page.query_selector('input[value="Agregar dirección"]')                                
                                 if submit_btn2:
                                     try:
                                         async with page.expect_navigation(timeout=15000):
