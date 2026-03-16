@@ -1163,7 +1163,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
                             last_screenshot = await take_screenshot(page, "add_address_form_direct")
                             logger.debug("   📸 Captura: add_address_form_direct")
 
-                        # Datos de dirección
+                        # Datos de dirección (para MX usamos dirección USA)
                         address_data = {
                             'MX': {
                                 'countryCode': 'US',
@@ -1185,22 +1185,33 @@ async def create_amazon_account(country_code, add_address_flag=True):
                             },
                         }
                         country_data = address_data.get(country_code, address_data['US'])
+                        target_country = country_data['countryCode']  # 'US'
                         logger.debug(f"   Datos a ingresar: {country_data}")
 
-                        # ---- Seleccionar país ----
+                        # ---- Seleccionar país con verificación ----
                         try:
                             logger.debug("   Seleccionando país...")
+                            # Buscar el dropdown de país (el botón que muestra el país actual)
                             country_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
                             if country_dropdown:
                                 await country_dropdown.click()
                                 await page.wait_for_timeout(1000)
-                                us_option = await page.query_selector('a:has-text("Estados Unidos")')
-                                if not us_option:
-                                    us_option = await page.query_selector('a[data-value*="US"]')
+                                
+                                # Buscar la opción "Estados Unidos" por texto o por data-value
+                                us_option = await page.query_selector(f'a:has-text("Estados Unidos"), a[data-value*="{target_country}"]')
                                 if us_option:
                                     await us_option.click()
-                                    logger.debug("   ✅ País seleccionado")
-                                    await page.wait_for_timeout(1000)
+                                    logger.debug("   ✅ Clic en Estados Unidos")
+                                    # Esperar a que el formulario se actualice
+                                    await page.wait_for_timeout(3000)
+                                    
+                                    # Verificar que el país se haya cambiado correctamente
+                                    country_button_text = await page.text_content('span.a-button-text[data-action="a-dropdown-button"]')
+                                    if country_button_text and "Estados Unidos" in country_button_text:
+                                        logger.debug("   ✅ País cambiado a Estados Unidos confirmado")
+                                    else:
+                                        logger.warning("   ⚠️ No se pudo confirmar el cambio de país, puede que haya fallado")
+                                        # Opcional: reintentar
                                 else:
                                     logger.warning("   ⚠️ No se encontró la opción Estados Unidos")
                             else:
@@ -1208,12 +1219,27 @@ async def create_amazon_account(country_code, add_address_flag=True):
                         except Exception as e:
                             logger.warning(f"   ⚠️ Error seleccionando país: {e}")
 
-                        # Llenar campos
+                        # Esperar a que el formulario termine de cargar después del cambio de país
+                        await page.wait_for_timeout(2000)
+
+                        # ---- Llenar campos con fallbacks ----
                         logger.debug("   Llenando campos...")
                         await page.fill('#address-ui-widgets-enterAddressFullName', country_data['fullName'])
                         await page.fill('#address-ui-widgets-enterAddressPhoneNumber', country_data['phone'])
                         await page.fill('#address-ui-widgets-enterAddressLine1', country_data['line1'])
-                        await page.fill('#address-ui-widgets-enterAddressCity', country_data['city'])
+
+                        # Ciudad (puede ser un input diferente)
+                        city_input = await page.query_selector('#address-ui-widgets-enterAddressCity-input')
+                        if not city_input:
+                            city_container = await page.query_selector('#address-ui-widgets-enterAddressCity')
+                            if city_container:
+                                city_input = await city_container.query_selector('input')
+                        if city_input:
+                            await city_input.fill(country_data['city'])
+                        else:
+                            logger.warning("   ⚠️ No se encontró campo de ciudad, intentando selector genérico")
+                            await page.fill('input[aria-label*="Ciudad"]', country_data['city'])
+
                         logger.debug("   ✅ Campos básicos llenados")
 
                         # ---- Seleccionar estado ----
