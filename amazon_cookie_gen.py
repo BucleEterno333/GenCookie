@@ -449,26 +449,44 @@ SMS_SERVICES = [
     {'name': '5sim', 'enabled': bool(FIVESIM_API_KEY), 'get_number': get_fivesim_number, 'get_code': get_fivesim_code},
 ]
 
-async def get_phone_number(country_code):
-    """Intenta obtener número de teléfono de los servicios en orden."""
+ACCOUNT_TO_PURCHASE_COUNTRY = {
+    'MX': 'ID',  # Para cuentas mexicanas, comprar números de Indonesia
+    'US': 'ID',  # Para cuentas gringas, comprar números de USA
+    # ... puedes ajustar según prefieras
+}
+    
+
+FIVESIM_COUNTRY_MAP = {
+    # ... existentes ...
+    'ID': 'indonesia',  # Agregar Indonesia
+}
+
+
+
+async def get_phone_number(account_country):
+    # Determinar qué país usar para la compra
+    purchase_country = ACCOUNT_TO_PURCHASE_COUNTRY.get(account_country, account_country)
+    logger.debug(f"Cuenta: {account_country}, comprando número de: {purchase_country}")
+    
     for service in SMS_SERVICES:
         if not service['enabled']:
             continue
         logger.debug(f"Intentando con {service['name']}...")
         try:
             if service['name'] == 'hero':
-                # Hero requiere código numérico de país
+                # Hero requiere código numérico
                 hero_country_map = {'MX': 54, 'US': 187, 'CA': 36, 'UK': 16, 'DE': 43, 'FR': 78, 'IT': 86, 'ES': 56, 'JP': 182, 'AU': 175, 'IN': 22}
-                hero_country = hero_country_map.get(country_code)
-                if not hero_country:
-                    logger.warning(f"No hay mapeo Hero SMS para {country_code}")
+                # Necesitamos mapear purchase_country (ISO) a código numérico
+                purchase_country_num = hero_country_map.get(purchase_country)
+                if not purchase_country_num:
+                    logger.warning(f"No hay mapeo Hero SMS para {purchase_country}")
                     continue
-                result = await service['get_number'](hero_country, service='am')
+                result = await service['get_number'](purchase_country_num, service='am')
                 if result:
                     phone_full, service_id = result
-                    # Quitar código de país (Hero devuelve con código, ej. +5255...)
-                    prefix_len = {'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2,
-                                 'FR': 2, 'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}.get(country_code, 0)
+                    # Quitar código de país según el país de compra (Hero devuelve con código)
+                    # Usamos el mapeo de prefijos para el país de compra
+                    prefix_len = {'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2, 'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}.get(purchase_country, 0)
                     if prefix_len and len(phone_full) > prefix_len:
                         phone_local = phone_full[prefix_len:]
                         phone_local = re.sub(r'\D', '', phone_local)
@@ -478,15 +496,20 @@ async def get_phone_number(country_code):
                         'full': phone_full,
                         'local': phone_local,
                         'service_id': service_id,
-                        'service_name': service['name']
+                        'service_name': service['name'],
+                        'purchase_country': purchase_country  # <-- Guardamos el país de compra
                     }
             else:  # 5sim
-                result = await service['get_number'](country_code, product='amazon')
+                # 5sim usa nombres de país en inglés, mapeamos purchase_country a ese nombre
+                country_name = FIVESIM_COUNTRY_MAP.get(purchase_country)
+                if not country_name:
+                    logger.warning(f"No hay mapeo 5sim para {purchase_country}")
+                    continue
+                result = await service['get_number'](purchase_country, product='amazon')  # Nota: get_fivesim_number espera el código ISO
                 if result:
                     phone_full, service_id = result
-                    # 5sim a veces incluye código de país sin +, ejemplo: 521234567890 (para MX son 3 dígitos)
-                    prefix_len = {'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3,
-                                 'FR': 3, 'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3}.get(country_code, 0)
+                    # 5sim a veces devuelve con código de país (ej. 521234567890 para Indonesia)
+                    prefix_len = {'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3, 'FR': 3, 'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3, 'ID': 3}.get(purchase_country, 0)
                     if prefix_len and len(phone_full) > prefix_len:
                         phone_local = phone_full[prefix_len:]
                         phone_local = re.sub(r'\D', '', phone_local)
@@ -496,12 +519,15 @@ async def get_phone_number(country_code):
                         'full': phone_full,
                         'local': phone_local,
                         'service_id': service_id,
-                        'service_name': service['name']
+                        'service_name': service['name'],
+                        'purchase_country': purchase_country
                     }
         except Exception as e:
             logger.warning(f"Error con {service['name']}: {e}")
             continue
     return None
+
+
 
 async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30):
     """
@@ -618,8 +644,11 @@ async def create_amazon_account(country_code, add_address_flag=True):
             phone_number = phone_info['local']
             service_id = phone_info['service_id']
             service_name = phone_info['service_name']
+            purchase_country = phone_info.get('purchase_country', country_code)  # Si no viene, usar el de cuenta
             logger.debug(f"   ✅ Número obtenido: {phone_number} (servicio: {service_name}, ID: {service_id})")
             account_data['phone'] = phone_number
+            account_data['purchase_country'] = purchase_country  # Guardar para usarlo después
+
 
             # ----- PASO 4: Generar credenciales (nombre y contraseña) -----
             logger.debug("🔑 [PASO 4] Generando credenciales...")
@@ -834,6 +863,92 @@ async def create_amazon_account(country_code, add_address_flag=True):
             await phone_field.fill(phone_number)
             logger.debug(f"   ✅ Número ingresado: {phone_number}")
             last_screenshot = await take_screenshot(page, "phone_llenado")
+
+            # ----- PASO 9.5: Seleccionar código de país correcto según el número -----
+            logger.debug("📞 [PASO 9.5] Verificando código de país del número...")
+            
+            # Mapeo de código de país (ISO) a código de llamada (calling code)
+            country_calling_code = {
+                'MX': '52',
+                'US': '1',
+                'CA': '1',
+                'UK': '44',
+                'DE': '49',
+                'FR': '33',
+                'IT': '39',
+                'ES': '34',
+                'JP': '81',
+                'AU': '61',
+                'IN': '91',
+                'ID': '62',
+            }
+            
+            # Mapeo de código de país (ISO) a valor ISO para el dropdown
+            country_code_to_iso = {
+                'MX': 'MX',
+                'US': 'US',
+                'CA': 'CA',
+                'UK': 'GB',  # Reino Unido
+                'DE': 'DE',
+                'FR': 'FR',
+                'IT': 'IT',
+                'ES': 'ES',
+                'JP': 'JP',
+                'AU': 'AU',
+                'IN': 'IN',
+                'ID': '62',
+            }
+            
+            target_country = purchase_country  
+            calling_code = country_calling_code.get(target_country, '52')
+            iso_value = country_code_to_iso.get(target_country, 'MX')
+            
+            logger.debug(f"   País objetivo: {target_country}, código de llamada: +{calling_code}, valor ISO: {iso_value}")
+            
+            # Intentar seleccionar el país en el dropdown
+            # Primero buscamos el select nativo
+            country_select = await page.query_selector('#claim-input-dropdown-select-element')
+            if country_select:
+                try:
+                    # Intentar seleccionar por valor ISO
+                    await country_select.select_option(value=iso_value)
+                    logger.debug(f"   ✅ País seleccionado por valor ISO: {iso_value}")
+                    await page.wait_for_timeout(1000)  # Esperar actualización
+                except Exception as e:
+                    logger.warning(f"   ⚠️ No se pudo seleccionar por valor ISO: {e}")
+                    # Si falla, intentar por texto en el dropdown personalizado
+                    await select_country_via_dropdown(page, calling_code, iso_value)
+            else:
+                # Si no hay select nativo, usar dropdown personalizado
+                await select_country_via_dropdown(page, calling_code, iso_value)
+
+            # Función auxiliar para seleccionar país desde dropdown personalizado
+            async def select_country_via_dropdown(page, calling_code, iso_value):
+                dropdown_button = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
+                if not dropdown_button:
+                    logger.warning("   ⚠️ No se encontró dropdown de país")
+                    return
+                
+                await dropdown_button.click()
+                await page.wait_for_timeout(1000)
+                
+                # Buscar la opción por varios métodos
+                option = None
+                # 1. Por texto exacto (ej. "MX +52")
+                option = await page.query_selector(f'li:has-text("{iso_value} +{calling_code}")')
+                # 2. Por texto que contenga el código de llamada
+                if not option:
+                    option = await page.query_selector(f'li:has-text("+{calling_code}")')
+                # 3. Por data-value que contenga el ISO
+                if not option:
+                    option = await page.query_selector(f'li[data-value*="{iso_value}"]')
+                
+                if option:
+                    await option.click()
+                    logger.debug(f"   ✅ País seleccionado desde dropdown: {iso_value}")
+                    await page.wait_for_timeout(1000)
+                else:
+                    logger.warning(f"   ⚠️ No se encontró opción para país {target_country}")
 
             # ----- PASO 10: Hacer clic en Continuar -----
             logger.debug("🖱️ [PASO 10] Haciendo clic en Continuar...")
