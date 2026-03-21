@@ -916,59 +916,55 @@ async def create_amazon_account(country_code, add_address_flag=True):
             
             logger.debug(f"   País objetivo: {target_country}, código de llamada: +{calling_code}, ISO2: {iso2_value}, nombre: {country_name}")
             
-
-            # Hacer clic en el botón del dropdown de país
+            # Abrir el dropdown de país
             dropdown_button = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
             if not dropdown_button:
-                logger.warning("   ⚠️ No se encontró el botón del dropdown de país")
-            else:
-                await dropdown_button.click()
-                await page.wait_for_timeout(1000)
-
-
-            # Primero intentar con el select nativo (si existe)
-            country_select = await page.query_selector('#claim-input-dropdown-select-element')
-            if country_select:
-                try:
-                    # Intentar seleccionar por valor ISO-2 (ej. "ID")
-                    await country_select.select_option(value=iso2_value)
-                    logger.debug(f"   ✅ País seleccionado por valor ISO-2: {iso2_value}")
-                    await page.wait_for_timeout(1000)
-                except Exception as e:
-                    logger.warning(f"   ⚠️ No se pudo seleccionar por valor ISO-2: {e}")
-                    # Si falla, usar dropdown personalizado
-                    await select_country_via_dropdown(page, calling_code, country_name)
-            else:
-                # Si no hay select nativo, usar dropdown personalizado
-                await select_country_via_dropdown(page, calling_code, country_name)
-
-            # Función auxiliar para seleccionar país desde dropdown personalizado
-            async def select_country_via_dropdown(page, calling_code, country_name):
-                dropdown_button = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
-                if not dropdown_button:
-                    logger.warning("   ⚠️ No se encontró dropdown de país")
-                    return
-                
-                await dropdown_button.click()
-                await page.wait_for_timeout(1000)
-                
-                # Buscar la opción por varios métodos
-                option = None
-                # 1. Por texto exacto que contenga el nombre del país y código (ej. "Indonesia +62")
-                option = await page.query_selector(f'li:has-text("{country_name} +{calling_code}")')
-                # 2. Por texto que contenga solo el código de llamada
-                if not option:
-                    option = await page.query_selector(f'li:has-text("+{calling_code}")')
-                # 3. Por texto que contenga el nombre del país
-                if not option:
-                    option = await page.query_selector(f'li:has-text("{country_name}")')
-                
+                logger.error("   ❌ No se encontró el botón del dropdown de país")
+                raise Exception("No se encontró el dropdown de país")
+            
+            await dropdown_button.click()
+            # Esperar a que las opciones aparezcan
+            await page.wait_for_timeout(1500)
+            
+            # Buscar la opción por varios métodos
+            option = None
+            
+            # 1. Primero por data-value (el más fiable)
+            option = await page.query_selector('a[data-value*="ID"]')
+            if option:
+                logger.debug(f"   ✅ Opción encontrada por data-value: ID")
+            
+            # 2. Si no, buscar por texto combinado (Indonesia +62)
+            if not option:
+                # Obtener todas las opciones
+                options = await page.query_selector_all('a.a-dropdown-link')
+                for opt in options:
+                    # Obtener el texto completo (incluyendo hijos)
+                    text = await opt.text_content()
+                    if 'Indonesia' in text and '+62' in text:
+                        option = opt
+                        logger.debug(f"   ✅ Opción encontrada por texto: {text}")
+                        break
+            
+            # 3. Por código de llamada
+            if not option:
+                option = await page.query_selector('a:has-text("+62")')
                 if option:
-                    await option.click()
-                    logger.debug(f"   ✅ País seleccionado desde dropdown: {country_name}")
-                    await page.wait_for_timeout(1000)
-                else:
-                    logger.warning(f"   ⚠️ No se encontró opción para país {country_name}")
+                    logger.debug(f"   ✅ Opción encontrada por código: +62")
+            
+            if not option:
+                # Guardar debug de todas las opciones
+                all_options = await page.query_selector_all('a.a-dropdown-link')
+                for i, opt in enumerate(all_options):
+                    text = await opt.text_content()
+                    logger.debug(f"   Opción {i}: {text}")
+                await page.screenshot(path='debug_no_option.png')
+                raise Exception("No se pudo encontrar la opción para Indonesia")
+            
+            await option.click()
+            logger.debug(f"   ✅ País seleccionado: Indonesia +62")
+            # Esperar a que el formulario se actualice
+            await page.wait_for_timeout(2000)
 
             # ----- PASO 10: Hacer clic en Continuar -----
             logger.debug("🖱️ [PASO 10] Haciendo clic en Continuar...")
