@@ -916,6 +916,16 @@ async def create_amazon_account(country_code, add_address_flag=True):
             
             logger.debug(f"   País objetivo: {target_country}, código de llamada: +{calling_code}, ISO2: {iso2_value}, nombre: {country_name}")
             
+
+            # Hacer clic en el botón del dropdown de país
+            dropdown_button = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
+            if not dropdown_button:
+                logger.warning("   ⚠️ No se encontró el botón del dropdown de país")
+            else:
+                await dropdown_button.click()
+                await page.wait_for_timeout(1000)
+
+
             # Primero intentar con el select nativo (si existe)
             country_select = await page.query_selector('#claim-input-dropdown-select-element')
             if country_select:
