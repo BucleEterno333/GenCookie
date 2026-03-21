@@ -877,8 +877,8 @@ async def create_amazon_account(country_code, add_address_flag=True):
                 'ID': '62',
             }
             
-            # Mapeo de código de país (ISO) a valor ISO para el dropdown
-            country_code_to_iso = {
+            # Mapeo de código de país (ISO) a valor ISO-2 para el select nativo
+            country_code_to_iso2 = {
                 'MX': 'MX',
                 'US': 'US',
                 'CA': 'CA',
@@ -890,34 +890,50 @@ async def create_amazon_account(country_code, add_address_flag=True):
                 'JP': 'JP',
                 'AU': 'AU',
                 'IN': 'IN',
-                'ID': 'ID',
+                'ID': 'ID',  # Indonesia
+            }
+            
+            # Mapeo de código de país (ISO) a nombre en español para el dropdown personalizado
+            country_name_spanish = {
+                'MX': 'México',
+                'US': 'Estados Unidos',
+                'CA': 'Canadá',
+                'UK': 'Reino Unido',
+                'DE': 'Alemania',
+                'FR': 'Francia',
+                'IT': 'Italia',
+                'ES': 'España',
+                'JP': 'Japón',
+                'AU': 'Australia',
+                'IN': 'India',
+                'ID': 'Indonesia',
             }
             
             target_country = purchase_country  
             calling_code = country_calling_code.get(target_country, '52')
-            iso_value = country_code_to_iso.get(target_country, 'MX')
+            iso2_value = country_code_to_iso2.get(target_country, 'MX')
+            country_name = country_name_spanish.get(target_country, target_country)
             
-            logger.debug(f"   País objetivo: {target_country}, código de llamada: +{calling_code}, valor ISO: {iso_value}")
+            logger.debug(f"   País objetivo: {target_country}, código de llamada: +{calling_code}, ISO2: {iso2_value}, nombre: {country_name}")
             
-            # Intentar seleccionar el país en el dropdown
-            # Primero buscamos el select nativo
+            # Primero intentar con el select nativo (si existe)
             country_select = await page.query_selector('#claim-input-dropdown-select-element')
             if country_select:
                 try:
-                    # Intentar seleccionar por valor ISO
-                    await country_select.select_option(value=iso_value)
-                    logger.debug(f"   ✅ País seleccionado por valor ISO: {iso_value}")
-                    await page.wait_for_timeout(1000)  # Esperar actualización
+                    # Intentar seleccionar por valor ISO-2 (ej. "ID")
+                    await country_select.select_option(value=iso2_value)
+                    logger.debug(f"   ✅ País seleccionado por valor ISO-2: {iso2_value}")
+                    await page.wait_for_timeout(1000)
                 except Exception as e:
-                    logger.warning(f"   ⚠️ No se pudo seleccionar por valor ISO: {e}")
-                    # Si falla, intentar por texto en el dropdown personalizado
-                    await select_country_via_dropdown(page, calling_code, iso_value)
+                    logger.warning(f"   ⚠️ No se pudo seleccionar por valor ISO-2: {e}")
+                    # Si falla, usar dropdown personalizado
+                    await select_country_via_dropdown(page, calling_code, country_name)
             else:
                 # Si no hay select nativo, usar dropdown personalizado
-                await select_country_via_dropdown(page, calling_code, iso_value)
+                await select_country_via_dropdown(page, calling_code, country_name)
 
             # Función auxiliar para seleccionar país desde dropdown personalizado
-            async def select_country_via_dropdown(page, calling_code, iso_value):
+            async def select_country_via_dropdown(page, calling_code, country_name):
                 dropdown_button = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
                 if not dropdown_button:
                     logger.warning("   ⚠️ No se encontró dropdown de país")
@@ -928,21 +944,21 @@ async def create_amazon_account(country_code, add_address_flag=True):
                 
                 # Buscar la opción por varios métodos
                 option = None
-                # 1. Por texto exacto (ej. "MX +52")
-                option = await page.query_selector(f'li:has-text("{iso_value} +{calling_code}")')
-                # 2. Por texto que contenga el código de llamada
+                # 1. Por texto exacto que contenga el nombre del país y código (ej. "Indonesia +62")
+                option = await page.query_selector(f'li:has-text("{country_name} +{calling_code}")')
+                # 2. Por texto que contenga solo el código de llamada
                 if not option:
                     option = await page.query_selector(f'li:has-text("+{calling_code}")')
-                # 3. Por data-value que contenga el ISO
+                # 3. Por texto que contenga el nombre del país
                 if not option:
-                    option = await page.query_selector(f'li[data-value*="{iso_value}"]')
+                    option = await page.query_selector(f'li:has-text("{country_name}")')
                 
                 if option:
                     await option.click()
-                    logger.debug(f"   ✅ País seleccionado desde dropdown: {iso_value}")
+                    logger.debug(f"   ✅ País seleccionado desde dropdown: {country_name}")
                     await page.wait_for_timeout(1000)
                 else:
-                    logger.warning(f"   ⚠️ No se encontró opción para país {target_country}")
+                    logger.warning(f"   ⚠️ No se encontró opción para país {country_name}")
 
             # ----- PASO 10: Hacer clic en Continuar -----
             logger.debug("🖱️ [PASO 10] Haciendo clic en Continuar...")
