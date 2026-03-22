@@ -828,7 +828,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
 
             # ----- PASO 10: Hacer clic en Continuar -----
             logger.debug("🖱️ Haciendo clic en Continuar...")
-            continue_selectors = ['input#continue', 'input.a-button-input', 'button#continue']
+            continue_selectors = ['input.a-button-input', 'button#continue']
             continue_clicked = False
             for selector in continue_selectors:
                 if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
@@ -917,6 +917,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
             logger.debug("🔍 Verificando captcha después del envío...")
             if await wait_for_text(page, "Resuelve esta adivinanza", timeout=5*1000) or await wait_for_text(page, "Elija todo", timeout=5*1000):
                 logger.warning("⚠️ Captcha de selección de imágenes detectado")
+                await page.wait_for_timeout(5000)
                 last_screenshot = await take_screenshot(page, "captcha_seleccion")
                 canvas_element = await page.query_selector('canvas')
                 img_element = await page.query_selector('img[src*="captcha"]')
@@ -940,7 +941,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
                         f.write(img_data)
                     click_element = img_element
                 else:
-                    logger.warning("   ⚠️ No se encontró canvas ni imagen, esperando 9 segundos más...")
+                    logger.warning("   ⚠️ No se encontró canvas ni imagen, esperando otros 5 segundos más...")
                     await page.wait_for_timeout(9000)
                     canvas_element = await page.query_selector('canvas')
                     img_element = await page.query_selector('img[src*="captcha"]')
