@@ -487,7 +487,7 @@ async def get_phone_number(account_country):
                     else:
                         phone_local = phone_full
                     return {
-                        'full': phone_full,
+                        'full': f'+ phone_full',
                         'local': phone_local,
                         'service_id': service_id,
                         'service_name': service['name'],
