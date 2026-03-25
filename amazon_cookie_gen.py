@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Amazon Cookie Generator - Versión API REST optimizada para mínimo consumo de proxy
-- Bloqueo de imágenes, CSS, fuentes y recursos no esenciales
-- Navegación rápida con domcontentloaded
-- Capturas de pantalla reducidas (opcional)
-- Timeouts ajustables
+Amazon Cookie Generator - Versión API REST optimizada para velocidad
+- Playwright con tiempos de espera dinámicos y controlables
+- Logs detallados con tiempos de cada acción
+- Reintentos globales con backoff
+- Soporte para múltiples servicios SMS y captchas
 """
 
 import os
@@ -51,10 +51,7 @@ FIVESIM_API_KEY = os.getenv('FIVESIM_API_KEY', '')
 WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10'))          # Espera general para elementos
 NAVIGATION_TIMEOUT = int(os.getenv('NAVIGATION_TIMEOUT', '30'))  # Espera de navegación
 ACTION_TIMEOUT = int(os.getenv('ACTION_TIMEOUT', '5'))          # Espera para acciones específicas (clics, llenado)
-MAX_RETRIES = int(os.getenv('MAX_RETRIES', '1'))               # Reintentos globales
-
-# Opción para reducir calidad de capturas (si se usa)
-SCREENSHOT_QUALITY = int(os.getenv('SCREENSHOT_QUALITY', '30'))  # Calidad JPEG (0-100)
+MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2'))               # Reintentos globales
 
 # Proxy
 PROXY_AUTH = None
@@ -184,7 +181,10 @@ def get_str(string, start, end, occurrence=1):
 # CAPTCHA RESOLUTION (coordenadas) - VERSIÓN HTTP DIRECTA
 # -------------------------------------------------------------------
 def solve_2captcha_coordinates(image_path, hint):
-    """Resuelve captcha de coordenadas usando 2captcha API HTTP."""
+    """
+    Resuelve captcha de coordenadas usando 2captcha API HTTP.
+    Retorna lista de puntos [{'x': int, 'y': int}] o None.
+    """
     import base64
     with open(image_path, 'rb') as f:
         img_base64 = base64.b64encode(f.read()).decode('utf-8')
@@ -243,7 +243,10 @@ def solve_2captcha_coordinates(image_path, hint):
         return None
 
 def solve_anticaptcha_coordinates(image_path, hint):
-    """Resuelve captcha de coordenadas usando Anti-Captcha API HTTP."""
+    """
+    Resuelve captcha de coordenadas usando Anti-Captcha API HTTP.
+    Retorna lista de puntos [{'x': int, 'y': int}] o None.
+    """
     import base64
     with open(image_path, 'rb') as f:
         img_base64 = base64.b64encode(f.read()).decode('utf-8')
@@ -528,50 +531,24 @@ async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeo
     return None
 
 # -------------------------------------------------------------------
-# FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA (optimizada)
+# FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA
 # -------------------------------------------------------------------
 async def take_screenshot(page, step_name):
     try:
-        # Captura con calidad reducida y formato JPEG si es posible
-        # Nota: playwright no permite calidad directamente, pero podemos convertir después
-        # Para ahorrar ancho de banda, reducimos tamaño de imagen
-        screenshot_bytes = await page.screenshot(type='jpeg', quality=SCREENSHOT_QUALITY)
+        screenshot_bytes = await page.screenshot()
         screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
-        logger.debug(f"📸 Screenshot tomado en paso: {step_name} (tamaño: {len(screenshot_bytes)} bytes)")
+        logger.debug(f"📸 Screenshot tomado en paso: {step_name}")
         return screenshot_b64
     except Exception as e:
         logger.warning(f"⚠️ Error tomando screenshot en paso {step_name}: {e}")
         return None
-    
-
-
-async def safe_get_content(page, timeout=20):
-    """Obtiene el contenido de la página con manejo de errores."""
-    try:
-        await page.wait_for_function('document.readyState === "complete"', timeout=timeout*1000)
-        await page.wait_for_timeout(500)
-        return await page.content()
-    except Exception as e:
-        logger.warning(f"⚠️ Error en safe_get_content: {e}")
-        await page.wait_for_timeout(2000)
-        return await page.content()
 
 # -------------------------------------------------------------------
-# FUNCIONES OPTIMIZADAS PARA PLAYWright (con bloqueo de recursos)
+# FUNCIONES OPTIMIZADAS PARA PLAYWright
 # -------------------------------------------------------------------
-async def block_resources(route):
-    """Bloquea solo recursos pesados, deja CSS y JS para funcionalidad."""
-    resource_type = route.request.resource_type
-    if resource_type in ['']:
-        await route.abort()
-    else:
-        await route.continue_()
-
 async def smart_goto(page, url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000):
     start = time.time()
     logger.debug(f"🌐 Navegando a {url} (wait_until={wait_until})")
-    # Aplicar bloqueo de recursos antes de la navegación
-    await page.route('**/*', block_resources)
     await page.goto(url, wait_until=wait_until, timeout=timeout)
     elapsed = time.time() - start
     logger.debug(f"   ✅ Navegación completada en {elapsed:.2f}s")
@@ -818,38 +795,10 @@ async def create_amazon_account(country_code, add_address_flag=True):
             page = await context.new_page()
             logger.debug("   ✅ Contexto y página creados")
 
-            # ----- PASO 7: Navegar a la URL base con bloqueo de recursos -----
+            # ----- PASO 7: Navegar a la URL base -----
             base_url = base_urls[country_code]
             await smart_goto(page, base_url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
             last_screenshot = await take_screenshot(page, "home_page")
-
-
-            # ----- PASO 7.5: Manejar posible página de bienvenida "Continuar a Compras" -----
-            logger.debug("🛒 [PASO 7.5] Verificando página de bienvenida o redirección...")
-            continue_shopping_selectors = [
-                'input[value="Continuar a Compras"]',
-                'button:has-text("Continuar a Compras")',
-                'a:has-text("Continuar a Compras")',
-                'input[value="Continue to Shopping"]',
-                'button:has-text("Continue to Shopping")',
-                'input[value="Seguir comprando"]',
-                'button:has-text("Seguir comprando")'
-            ]
-            for selector in continue_shopping_selectors:
-                try:
-                    btn = await page.wait_for_selector(selector, state='visible', timeout=200)
-                    if btn:
-                        logger.debug(f"   ✅ Botón de continuar encontrado: {selector}")
-                        await btn.click()
-                        await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
-                        logger.debug("   ✅ Continuar a compras clickeado")
-                        await page.wait_for_timeout(2000)
-                        break
-                except:
-                    continue
-            else:
-                logger.debug("   ℹ️ No se detectó página de bienvenida, continuando normal")
-
 
             # ----- PASO 8: Hacer clic en "Hola, identifícate" -----
             logger.debug("👤 Buscando enlace de inicio de sesión...")
@@ -966,7 +915,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
 
             # ----- PASO 14: Detectar captcha -----
             logger.debug("🔍 Verificando captcha después del envío...")
-            if await wait_for_text(page, "Resuelve esta adivinanza", timeout=3*1000) or await wait_for_text(page, "Elija todo", timeout=1*1000):
+            if await wait_for_text(page, "Resuelve esta adivinanza", timeout=5*1000) or await wait_for_text(page, "Elija todo", timeout=5*1000):
                 logger.warning("⚠️ Captcha de selección de imágenes detectado")
                 await page.wait_for_timeout(5000)
                 last_screenshot = await take_screenshot(page, "captcha_seleccion")
@@ -1052,46 +1001,24 @@ async def create_amazon_account(country_code, add_address_flag=True):
                     logger.warning("⚠️ No se encontró botón de confirmar")
                 await page.wait_for_timeout(2000)  # pequeña pausa tras confirmar
 
-
-            # ----- PASO 15: Verificación por SMS (con posible redirección a WhatsApp) -----
-            logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
-            await page.wait_for_timeout(5000)
-            content = await safe_get_content(page)
-
-            if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
-                logger.warning("⚠️ Página de verificación con WhatsApp detectada, seleccionando SMS...")
-                sms_option = await page.query_selector('#secondary_channel_button input.a-button-input')
-                if not sms_option:
-                    sms_option = await page.query_selector('#secondary_channel_button')
-                if not sms_option:
-                    sms_option = await page.query_selector('xpath=//*[contains(text(), "Enviar código por SMS")]')
-                if sms_option:
-                    await page.wait_for_timeout(500)
-                    await sms_option.click()
-                    logger.debug("   ✅ Clic en 'Enviar código por SMS'")
-                    await page.wait_for_load_state('load', timeout=15000)
-                else:
-                    logger.warning("   ⚠️ No se encontró la opción de SMS, puede que ya esté en la página de código")
-
-            # Esperar el campo de código
+            # ----- PASO 15: Verificación por SMS -----
+            logger.debug("📱 Verificando página de verificación de número...")
             try:
-                code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                await page.wait_for_selector('#cvf-input-code', state='visible', timeout=WAIT_TIMEOUT*1000)
                 logger.debug("   📱 Página de ingreso de código SMS detectada")
-            except Exception as e:
-                # Si no aparece, verificar si hay mensaje de error
-                error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
-                if error_msg:
-                    error_text = await error_msg.text_content()
-                    if "Hemos enviado tu OTP" in error_text:
-                        logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
-                        await page.wait_for_timeout(3000)
-                        code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
-                    else:
-                        logger.error(f"❌ Error en verificación SMS: {error_text}")
-                        raise Exception(f"Error en verificación SMS: {error_text}")
+            except Exception:
+                # Quizás hay que seleccionar SMS en lugar de WhatsApp
+                if await page.query_selector('#secondary_channel_button'):
+                    await smart_click(page, '#secondary_channel_button', timeout=ACTION_TIMEOUT*1000)
+                    logger.debug("   ✅ Clic en 'Enviar código por SMS'")
+                    await page.wait_for_selector('#cvf-input-code', state='visible', timeout=WAIT_TIMEOUT*1000)
                 else:
-                    raise
-            
+                    error_msg = await page.text_content('.a-alert-content, .a-alert-error')
+                    if error_msg:
+                        raise Exception(f"Error en verificación SMS: {error_msg}")
+                    else:
+                        raise Exception("No se pudo acceder al campo de código SMS")
+
             # Obtener el código SMS
             sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30)
             if sms_code:
@@ -1129,7 +1056,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
                         if add_link:
                             await add_link.click()
                             logger.debug("   ✅ Clic en 'Agregar dirección'")
-                            await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1600)
+                            await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
                             last_screenshot = await take_screenshot(page, "after_add_click")
                         else:
                             logger.warning("   ⚠️ No se encontró enlace, yendo a URL directa")
@@ -1159,204 +1086,59 @@ async def create_amazon_account(country_code, add_address_flag=True):
                         }
                         country_data = address_data.get(country_code, address_data['US'])
 
+                        # Seleccionar país
+                        country_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
+                        if country_dropdown:
+                            await country_dropdown.click()
+                            await page.wait_for_timeout(1000)  # esperar animación
+                            us_option = await page.query_selector('a:has-text("Estados Unidos"), a[data-value*="US"]')
+                            if us_option:
+                                await us_option.click()
+                                await page.wait_for_timeout(2000)  # esperar actualización del formulario
+                        else:
+                            logger.warning("   ⚠️ No se encontró dropdown de país")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                        # ----- Seleccionar país (Estados Unidos) -----
-                        logger.debug("   🌍 Seleccionando país...")
-
-                        def get_current_country():
-                            try:
-                                return page.evaluate("""
-                                    (() => {
-                                        const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
-                                        return btn ? btn.innerText.trim() : '';
-                                    })()
-                                """)
-                            except Exception:
-                                return ""
-
-                        # 1. Intentar con dropdown visual
-                        country_changed = False
-                        try:
-                            country_dropdown = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=3000)
-                            if country_dropdown:
-                                current = await country_dropdown.text_content()
-                                logger.debug(f"   País actual antes de clic: {current.strip()}")
-                                await country_dropdown.click()
-                                await page.wait_for_timeout(1000)
-                                us_option = await page.query_selector('a:has-text("Estados Unidos"), a[data-value="US"]')
-                                if us_option:
-                                    await us_option.click()
-                                    await page.wait_for_timeout(2000)
-                                    new_country = await get_current_country()
-                                    if "Estados Unidos" in new_country or "United States" in new_country:
-                                        logger.debug("   ✅ País cambiado a Estados Unidos (verificado)")
-                                        country_changed = True
-                                    else:
-                                        logger.warning(f"   ⚠️ País no cambió después del clic visual: {new_country}")
-                                else:
-                                    logger.debug("   Opción 'Estados Unidos' no encontrada en dropdown")
-                        except Exception as e:
-                            logger.debug(f"   🔄 Dropdown visual falló: {e}")
-
-                        # 2. Fallback JavaScript directo (sin errores de sintaxis)
-                        if not country_changed:
-                            try:
-                                await page.evaluate("""
-                                    (() => {
-                                        // Buscar campo oculto del país
-                                        let countryField = document.querySelector('input[name="countryCode"]');
-                                        if (!countryField) {
-                                            countryField = document.querySelector('#address-ui-widgets-enterAddressCountryCode');
-                                        }
-                                        if (countryField) {
-                                            countryField.value = 'US';
-                                            countryField.dispatchEvent(new Event('change', { bubbles: true }));
-                                            countryField.dispatchEvent(new Event('input', { bubbles: true }));
-                                        } else {
-                                            // Si no hay campo oculto, forzar dropdown
-                                            const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
-                                            if (btn) btn.click();
-                                            setTimeout(() => {
-                                                const opt = Array.from(document.querySelectorAll('li a')).find(a =>
-                                                    a.textContent.includes('Estados Unidos') || a.getAttribute('data-value') === 'US'
-                                                );
-                                                if (opt) opt.click();
-                                            }, 200);
-                                        }
-                                    })()
-                                """)
-                                await page.wait_for_timeout(2000)
-                                new_country = await get_current_country()
-                                if "Estados Unidos" in new_country or "United States" in new_country:
-                                    logger.debug("   ✅ País cambiado a US mediante JavaScript (verificado)")
-                                    country_changed = True
-                                else:
-                                    logger.warning(f"   ⚠️ País no cambió con JS: {new_country}")
-                            except Exception as e2:
-                                logger.debug(f"   🔄 Fallback JavaScript falló: {e2}")
-
-                        # 3. Último recurso: escribir manualmente "Estados Unidos" y Enter
-                        if not country_changed:
-                            try:
-                                dropdown_btn = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
-                                if dropdown_btn:
-                                    await dropdown_btn.click()
-                                    await page.wait_for_timeout(500)
-                                    search_input = await page.query_selector('input[type="search"], input[aria-label*="Buscar"]')
-                                    if search_input:
-                                        await search_input.fill("Estados Unidos")
-                                        await page.keyboard.press("Enter")
-                                        await page.wait_for_timeout(1000)
-                                        # Esperar a que aparezca el primer resultado y hacer clic
-                                        first_result = await page.wait_for_selector('li[role="option"]', timeout=3000)
-                                        if first_result:
-                                            await first_result.click()
-                                            await page.wait_for_timeout(2000)
-                                            new_country = await get_current_country()
-                                            if "Estados Unidos" in new_country or "United States" in new_country:
-                                                logger.debug("   ✅ País seleccionado por búsqueda + Enter (verificado)")
-                                                country_changed = True
-                                            else:
-                                                logger.warning(f"   ⚠️ País no cambió con búsqueda: {new_country}")
-                                        else:
-                                            logger.warning("   No se encontró resultado después de buscar")
-                                    else:
-                                        logger.warning("   No hay input de búsqueda en el dropdown")
-                                else:
-                                    logger.warning("   No se pudo abrir dropdown")
-                            except Exception as e3:
-                                logger.warning(f"   ⚠️ Fallback de escritura manual falló: {e3}")
-
-                        # Si después de todo no cambió, forzar modificación directa en DOM
-                        if not country_changed:
-                            await page.evaluate("""
-                                (() => {
-                                    const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
-                                    if (btn) {
-                                        btn.innerText = 'Estados Unidos';
-                                        const hidden = document.querySelector('input[name="countryCode"]');
-                                        if (hidden) hidden.value = 'US';
-                                    }
-                                })()
-                            """)
-                            logger.warning("   ⚠️ Forzado cambio de país en DOM, puede que no se refleje en el backend")
-
-                        # Esperar a que el formulario se actualice (aparición del campo de estado)
-                        try:
-                            await page.wait_for_selector('#address-ui-widgets-enterAddressStateOrRegion', timeout=WAIT_TIMEOUT*1000)
-                            logger.debug("   ✅ Formulario actualizado, campo de estado disponible")
-                        except Exception:
-                            logger.warning("   ⚠️ No se detectó campo de estado, puede que el país no se haya cambiado correctamente")
-
-                        # --- Ahora llenar los campos ---
+                        # Llenar campos
                         await smart_fill(page, '#address-ui-widgets-enterAddressFullName', country_data['fullName'])
                         await smart_fill(page, '#address-ui-widgets-enterAddressPhoneNumber', country_data['phone'])
                         await smart_fill(page, '#address-ui-widgets-enterAddressLine1', country_data['line1'])
-                        # Ciudad
                         city_input = await page.query_selector('#address-ui-widgets-enterAddressCity-input, #address-ui-widgets-enterAddressCity input')
                         if city_input:
                             await city_input.fill(country_data['city'])
                         else:
                             await smart_fill(page, 'input[aria-label*="Ciudad"]', country_data['city'])
-                        # Código postal
+
+                        # Seleccionar estado (dropdown)
+                        state_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
+                        if state_dropdown:
+                            await state_dropdown.click()
+                            await page.wait_for_timeout(1000)
+                            state_option = await page.query_selector(f'a:has-text("{country_data["state"]}"), a[data-value*="{country_data["state"]}"]')
+                            if state_option:
+                                await state_option.click()
+                                await page.wait_for_timeout(1000)
+                        else:
+                            logger.warning("   ⚠️ No se encontró dropdown de estado")
+
                         await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', country_data['postalCode'])
 
-                        # --- Enviar formulario con manejo de overlay ---
-                        logger.debug("   📤 Enviando formulario de dirección...")
+                        # Enviar formulario (con doble clic si es necesario)
                         submit_btn = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
                         if submit_btn:
-                            # Intentar hacer clic con force=true si hay overlay
-                            try:
-                                await submit_btn.click(timeout=30000)
-                            except Exception as click_err:
-                                # Si falla por interceptación, usar evaluate para clic programático
-                                logger.debug(f"   ⚠️ Clic normal falló: {click_err}, intentando con evaluate")
-                                await page.evaluate("""
-                                    (() => {
-                                        const btn = document.querySelector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]');
-                                        if (btn) btn.click();
-                                    })()
-                                """)
-                            # Esperar posible error después del clic
-                            await page.wait_for_timeout(3000)
+                            await submit_btn.click()
+                            await page.wait_for_timeout(3000)  # esperar error si ocurre
                             error_elem = await page.query_selector('.a-alert-error, .a-alert-warning')
                             if error_elem:
-                                error_text = await error_elem.text_content()
-                                logger.debug(f"   ⚠️ Primer clic produjo error: {error_text}, realizando segundo clic")
-                                # Segundo clic con navegación
-                                async with page.expect_navigation(timeout=NAVIGATION_TIMEOUT*1000):
-                                    await submit_btn.click()
-                                logger.debug("   ✅ Segundo clic realizado, navegación detectada")
+                                logger.debug("   ⚠️ Primer clic produjo error, realizando segundo clic")
+                                submit_btn2 = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
+                                if submit_btn2:
+                                    async with page.expect_navigation(timeout=NAVIGATION_TIMEOUT*1000):
+                                        await submit_btn2.click()
+                                    logger.debug("   ✅ Segundo clic realizado, navegación detectada")
+                                else:
+                                    raise Exception("Botón desapareció después del primer clic")
                             else:
-                                # Si no hubo error, asumir éxito
+                                # Si no hubo error, asumimos que el primer clic funcionó
                                 logger.debug("   ✅ Dirección agregada sin error")
                         else:
                             raise Exception("No se encontró botón de envío")
@@ -1367,16 +1149,6 @@ async def create_amazon_account(country_code, add_address_flag=True):
                             logger.debug("   ✅ Dirección agregada")
                         else:
                             raise Exception(f"Redirección inesperada a {page.url}")
-
-
-
-
-
-
-
-
-
-
                     except Exception as e:
                         logger.warning(f"⚠️ Error agregando dirección: {e}")
                         account_data['address'] = f"Error: {e}"
@@ -1455,7 +1227,7 @@ def after_request(response):
 def home():
     return jsonify({
         'status': 'online',
-        'service': 'Amazon Cookie Generator API (optimizado - mínimo consumo)',
+        'service': 'Amazon Cookie Generator API (optimizado)',
         'endpoints': {
             '/generate': 'POST - Generar cookie (JSON: {"country": "MX", "add_address": true})',
             '/health': 'GET - Verificar estado'
@@ -1470,8 +1242,7 @@ def health():
         'status': 'healthy',
         'timestamp': time.time(),
         'proxy': 'configured' if PROXY_HOST_PORT else 'not configured',
-        'captcha': bool(API_KEY_2CAPTCHA or API_KEY_ANTICAPTCHA),
-        'resource_blocking': 'enabled'
+        'captcha': bool(API_KEY_2CAPTCHA or API_KEY_ANTICAPTCHA)
     })
 
 @app.route('/generate', methods=['POST', 'OPTIONS'])
@@ -1515,9 +1286,7 @@ def diagnostic():
                 'NAVIGATION_TIMEOUT': NAVIGATION_TIMEOUT,
                 'ACTION_TIMEOUT': ACTION_TIMEOUT,
                 'MAX_RETRIES': MAX_RETRIES
-            },
-            'resource_blocking': True,
-            'screenshot_quality': SCREENSHOT_QUALITY
+            }
         }
     })
 
@@ -1530,7 +1299,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.cli:
-        print("🍪 Generador de Cookies Amazon - Modo CLI (optimizado - mínimo consumo)")
+        print("🍪 Generador de Cookies Amazon - Modo CLI (optimizado)")
         if not API_KEY_2CAPTCHA and not API_KEY_ANTICAPTCHA:
             print("❌ ERROR: Configura al menos una API de captcha")
             sys.exit(1)
@@ -1565,5 +1334,5 @@ if __name__ == '__main__':
             elif op == '2':
                 break
     else:
-        print(f"🚀 Iniciando API optimizada (mínimo consumo) en {API_HOST}:{API_PORT}")
+        print(f"🚀 Iniciando API optimizada en {API_HOST}:{API_PORT}")
         app.run(host=API_HOST, port=API_PORT, debug=False, threaded=True)
