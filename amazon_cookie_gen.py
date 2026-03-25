@@ -1158,19 +1158,33 @@ async def create_amazon_account(country_code, add_address_flag=True):
                             },
                         }
                         country_data = address_data.get(country_code, address_data['US'])
-
-                        # Seleccionar país
-                        country_dropdown = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=WAIT_TIMEOUT*1000)
-                        if country_dropdown:
-                            await country_dropdown.click()
-                            # Esperar a que aparezca la opción de Estados Unidos en el DOM (no necesariamente visible)
-                            try:
-                                us_option = await page.wait_for_selector('a:has-text("Estados Unidos"), a[data-value="US"]', timeout=WAIT_TIMEOUT*1000)
-                                await us_option.click()
-                                # Esperar a que el formulario se actualice (puede haber un pequeño retraso)
-                                await page.wait_for_timeout(2000)
-                            except Exception as e:
-                                logger.warning(f"   ⚠️ No se pudo seleccionar Estados Unidos: {e}")
+                        # Seleccionar país (Estados Unidos)
+                        try:
+                            # 1. Encontrar y abrir el dropdown
+                            dropdown_button = await page.wait_for_selector(
+                                '#address-ui-widgets-countryCode .a-button, #address-ui-widgets-countryCode .a-dropdown-button',
+                                timeout=WAIT_TIMEOUT * 1000
+                            )
+                            await dropdown_button.click()
+                            logger.debug("   ✅ Dropdown de país abierto")
+                            
+                            # 2. Esperar a que aparezca el contenedor de opciones
+                            await page.wait_for_selector('.a-dropdown-options', state='visible', timeout=5000)
+                            
+                            # 3. Seleccionar la opción "Estados Unidos"
+                            us_option = await page.wait_for_selector(
+                                'li.a-dropdown-item a:has-text("Estados Unidos")',
+                                timeout=WAIT_TIMEOUT * 1000
+                            )
+                            await us_option.click()
+                            logger.debug("   ✅ País seleccionado: Estados Unidos")
+                            
+                            # 4. Pequeña pausa para que el formulario se actualice
+                            await page.wait_for_timeout(2000)
+                            
+                        except Exception as e:
+                            logger.warning(f"   ⚠️ Error seleccionando país: {e}")
+                            # Opcional: continuar con el país por defecto (México) pero ajustar datos de dirección
                         else:
                             logger.warning("   ⚠️ No se encontró dropdown de seleccion de país de la dirección")
                         # Llenar campos
