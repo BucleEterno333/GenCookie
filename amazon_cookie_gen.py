@@ -1117,77 +1117,82 @@ async def create_amazon_account(country_code, add_address_flag=True):
                 account_data['cookie_string'] = cookie_string
                 logger.debug(f"   🍪 Cookies obtenidas: {len(cookie_dict)} cookies")
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
                 # ----- PASO 17: Agregar dirección (opcional) -----
                 if add_address_flag:
                     logger.debug("📍 Agregando dirección...")
                     try:
-                        await smart_goto(page, address_book_urls[country_code], wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
-                        last_screenshot = await take_screenshot(page, "address_book_page")
-
-                        # Buscar y hacer clic en "Agregar dirección"
-                        add_link = await page.query_selector('a[href*="/a/addresses/add"], a:has-text("Agregar dirección")')
-                        if add_link:
-                            await add_link.click()
-                            logger.debug("   ✅ Clic en 'Agregar dirección'")
-                            await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
-                            last_screenshot = await take_screenshot(page, "after_add_click")
-                        else:
-                            logger.warning("   ⚠️ No se encontró enlace, yendo a URL directa")
-                            await smart_goto(page, add_address_urls[country_code], wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
-                            last_screenshot = await take_screenshot(page, "add_address_form_direct")
-
-                        # Datos de dirección
-                        address_data = {
-                            'MX': {
-                                'countryCode': 'US',
-                                'fullName': 'John Doe',
-                                'phone': f'1{random.randint(1000000000,9999999999)}',
-                                'line1': '123 Main Street',
-                                'city': 'New York',
-                                'state': 'NY',
-                                'postalCode': '10001'
-                            },
-                            'US': {
-                                'countryCode': 'US',
-                                'fullName': 'John Doe',
-                                'phone': f'1{random.randint(1000000000,9999999999)}',
-                                'line1': '123 Main Street',
-                                'city': 'New York',
-                                'state': 'NY',
-                                'postalCode': '10001'
-                            },
-                        }
-                        country_data = address_data.get(country_code, address_data['US'])
-                        # Seleccionar país (Estados Unidos)
+                        # Desactivar bloqueo de recursos temporalmente por si el dropdown lo necesita
+                        await page.unroute('**/*', block_resources)
+                        
+                        # Ir a la página de agregar dirección (URL directa más confiable)
+                        await smart_goto(page, add_address_urls[country_code], wait_until='domcontentloaded', timeout=20000)
+                        
+                        # Esperar a que aparezca el campo de nombre (formulario listo)
+                        await page.wait_for_selector('#address-ui-widgets-enterAddressFullName', timeout=15000)
+                        last_screenshot = await take_screenshot(page, "add_address_form")
+                        
+                        # --- Seleccionar país Estados Unidos ---
                         try:
-                            # 1. Encontrar y abrir el dropdown
+                            # 1. Buscar el botón del dropdown
                             dropdown_button = await page.wait_for_selector(
-                                '#address-ui-widgets-countryCode .a-button, #address-ui-widgets-countryCode .a-dropdown-button',
-                                timeout=WAIT_TIMEOUT * 1000
+                                'span.a-button-text[data-action="a-dropdown-button"]',
+                                timeout=15000
                             )
                             await dropdown_button.click()
                             logger.debug("   ✅ Dropdown de país abierto")
                             
-                            # 2. Esperar a que aparezca el contenedor de opciones
+                            # 2. Esperar opciones
                             await page.wait_for_selector('.a-dropdown-options', state='visible', timeout=5000)
                             
-                            # 3. Seleccionar la opción "Estados Unidos"
+                            # 3. Seleccionar Estados Unidos
                             us_option = await page.wait_for_selector(
                                 'li.a-dropdown-item a:has-text("Estados Unidos")',
-                                timeout=WAIT_TIMEOUT * 1000
+                                timeout=10000
                             )
                             await us_option.click()
                             logger.debug("   ✅ País seleccionado: Estados Unidos")
-                            
-                            # 4. Pequeña pausa para que el formulario se actualice
                             await page.wait_for_timeout(2000)
-                            
                         except Exception as e:
-                            logger.warning(f"   ⚠️ Error seleccionando país: {e}")
-                            # Opcional: continuar con el país por defecto (México) pero ajustar datos de dirección
-                        else:
-                            logger.warning("   ⚠️ No se encontró dropdown de seleccion de país de la dirección")
+                            logger.warning(f"   ⚠️ Error seleccionando país (dropdown): {e}")
+                            # Fallback: intentar con JavaScript
+                            await page.evaluate("""
+                                const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
+                                if (btn) {
+                                    btn.click();
+                                    setTimeout(() => {
+                                        const opt = document.querySelector('li.a-dropdown-item a:has-text("Estados Unidos")');
+                                        if (opt) opt.click();
+                                    }, 500);
+                                }
+                            """)
+                            await page.wait_for_timeout(3000)
+                        
                         # Llenar campos
+                        country_data = address_data.get(country_code, address_data['US'])
                         await smart_fill(page, '#address-ui-widgets-enterAddressFullName', country_data['fullName'])
                         await smart_fill(page, '#address-ui-widgets-enterAddressPhoneNumber', country_data['phone'])
                         await smart_fill(page, '#address-ui-widgets-enterAddressLine1', country_data['line1'])
@@ -1243,6 +1248,9 @@ async def create_amazon_account(country_code, add_address_flag=True):
                     except Exception as e:
                         logger.warning(f"⚠️ Error agregando dirección: {e}")
                         account_data['address'] = f"Error: {e}"
+                    finally:
+                        # Volver a activar bloqueo de recursos
+                        await page.route('**/*', block_resources)
                 else:
                     account_data['address'] = "No se agregó dirección"
 
