@@ -444,7 +444,7 @@ SMS_SERVICES = [
 ]
 
 ACCOUNT_TO_PURCHASE_COUNTRY = {
-    'MX': 'MX',
+    'MX': 'ID',
     'US': 'ID',
 }
 
