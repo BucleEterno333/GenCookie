@@ -547,9 +547,9 @@ async def take_screenshot(page, step_name):
 # FUNCIONES OPTIMIZADAS PARA PLAYWright (con bloqueo de recursos)
 # -------------------------------------------------------------------
 async def block_resources(route):
-    """Bloquea imágenes, CSS, fuentes y otros recursos no esenciales."""
+    """Bloquea solo recursos pesados, deja CSS y JS para funcionalidad."""
     resource_type = route.request.resource_type
-    if resource_type in ['image', 'stylesheet', 'font', 'media']:
+    if resource_type in ['image', 'font', 'media']:
         await route.abort()
     else:
         await route.continue_()
