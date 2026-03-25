@@ -1011,24 +1011,64 @@ async def create_amazon_account(country_code, add_address_flag=True):
                     logger.warning("⚠️ No se encontró botón de confirmar")
                 await page.wait_for_timeout(2000)  # pequeña pausa tras confirmar
 
-            # ----- PASO 15: Verificación por SMS -----
-            logger.debug("📱 Verificando página de verificación de número...")
-            try:
-                await page.wait_for_selector('#cvf-input-code', state='visible', timeout=WAIT_TIMEOUT*1000)
-                logger.debug("   📱 Página de ingreso de código SMS detectada")
-            except Exception:
-                # Quizás hay que seleccionar SMS en lugar de WhatsApp
-                if await page.query_selector('#secondary_channel_button'):
-                    await smart_click(page, '#secondary_channel_button', timeout=ACTION_TIMEOUT*1000)
-                    logger.debug("   ✅ Clic en 'Enviar código por SMS'")
-                    await page.wait_for_selector('#cvf-input-code', state='visible', timeout=WAIT_TIMEOUT*1000)
-                else:
-                    error_msg = await page.text_content('.a-alert-content, .a-alert-error')
-                    if error_msg:
-                        raise Exception(f"Error en verificación SMS: {error_msg}")
-                    else:
-                        raise Exception("No se pudo acceder al campo de código SMS")
 
+            # ----- PASO 15: Verificación por SMS (con posible redirección a WhatsApp) -----
+            logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
+            await page.wait_for_timeout(5000)
+            content = await safe_get_content(page)
+
+            if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
+                logger.warning("⚠️ Página de verificación con WhatsApp detectada, seleccionando SMS...")
+                sms_option = await page.query_selector('#secondary_channel_button input.a-button-input')
+                if not sms_option:
+                    sms_option = await page.query_selector('#secondary_channel_button')
+                if not sms_option:
+                    sms_option = await page.query_selector('xpath=//*[contains(text(), "Enviar código por SMS")]')
+                if sms_option:
+                    await page.wait_for_timeout(500)
+                    await sms_option.click()
+                    logger.debug("   ✅ Clic en 'Enviar código por SMS'")
+                    await page.wait_for_load_state('load', timeout=15000)
+                else:
+                    logger.warning("   ⚠️ No se encontró la opción de SMS, puede que ya esté en la página de código")
+
+            # Esperar el campo de código
+            try:
+                code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                logger.debug("   📱 Página de ingreso de código SMS detectada")
+            except Exception as e:
+                # Si no aparece, verificar si hay mensaje de error
+                error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
+                if error_msg:
+                    error_text = await error_msg.text_content()
+                    if "Hemos enviado tu OTP" in error_text:
+                        logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
+                        await page.wait_for_timeout(3000)
+                        code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                    else:
+                        logger.error(f"❌ Error en verificación SMS: {error_text}")
+                        raise Exception(f"Error en verificación SMS: {error_text}")
+                else:
+                    raise
+
+            # Obtener el código SMS
+            sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30)
+            if sms_code:
+                # Volver a buscar el campo por si cambió
+                code_input = await page.query_selector('#cvf-input-code')
+                if not code_input or not await code_input.is_visible():
+                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=10000)
+                await code_input.fill(sms_code)
+                logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
+                verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
+                if verify_btn:
+                    await verify_btn.click()
+                    await page.wait_for_load_state('load', timeout=20000)
+                else:
+                    logger.warning("   ⚠️ No se encontró botón de verificar")
+            else:
+                raise Exception("No se pudo obtener código de verificación SMS")
+            
             # Obtener el código SMS
             sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30)
             if sms_code:
