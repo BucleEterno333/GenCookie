@@ -1171,7 +1171,8 @@ async def create_amazon_account(country_code, add_address_flag=True):
                                 await page.wait_for_timeout(2000)
                             except Exception as e:
                                 logger.warning(f"   ⚠️ No se pudo seleccionar Estados Unidos: {e}")
-
+                        else:
+                            logger.warning("   ⚠️ No se encontró dropdown de seleccion de país de la dirección")
                         # Llenar campos
                         await smart_fill(page, '#address-ui-widgets-enterAddressFullName', country_data['fullName'])
                         await smart_fill(page, '#address-ui-widgets-enterAddressPhoneNumber', country_data['phone'])
@@ -1214,6 +1215,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
                                     raise Exception("Botón desapareció después del primer clic")
                             else:
                                 # Si no hubo error, asumimos que el primer clic funcionó
+                                last_screenshot = await take_screenshot(page, "sin.error.despues.del.primer.click")
                                 logger.debug("   ✅ Dirección agregada sin error")
                         else:
                             raise Exception("No se encontró botón de envío")
