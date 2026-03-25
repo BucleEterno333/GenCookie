@@ -1172,30 +1172,76 @@ async def create_amazon_account(country_code, add_address_flag=True):
 
 
 
-                        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
                         # ----- Seleccionar país (Estados Unidos) -----
                         logger.debug("   🌍 Seleccionando país...")
 
-                        # 1. Intentar con dropdown visual (método estándar)
+                        def log_country_status():
+                            """Para depuración, lee el país actual desde la UI."""
+                            try:
+                                country_text = page.evaluate("""
+                                    const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
+                                    return btn ? btn.innerText.trim() : null;
+                                """)
+                                logger.debug(f"   📍 País actual en UI: {country_text}")
+                                return country_text
+                            except:
+                                return None
+
+                        # 1. Intento con dropdown visual
                         try:
                             country_dropdown = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=3000)
                             if country_dropdown:
+                                # Guardar el texto actual para comparar después
+                                current_country = await country_dropdown.text_content()
+                                logger.debug(f"   País actual antes de clic: {current_country.strip()}")
+                                
                                 await country_dropdown.click()
                                 await page.wait_for_timeout(1000)
+                                
                                 us_option = await page.query_selector('a:has-text("Estados Unidos"), a[data-value="US"]')
                                 if us_option:
                                     await us_option.click()
-                                    logger.debug("   ✅ País seleccionado vía dropdown visual")
-                                    # Esperar a que el formulario se actualice
                                     await page.wait_for_timeout(2000)
+                                    # Verificar si realmente cambió
+                                    new_country = await page.evaluate("""
+                                        const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
+                                        return btn ? btn.innerText.trim() : '';
+                                    """)
+                                    if "Estados Unidos" in new_country or "United States" in new_country:
+                                        logger.debug("   ✅ País cambiado a Estados Unidos (verificado)")
+                                        country_changed = True
+                                    else:
+                                        logger.warning(f"   ⚠️ País no cambió después del clic visual. Sigue siendo: {new_country}")
+                                        raise Exception("País no cambió")
                                 else:
                                     raise Exception("Opción 'Estados Unidos' no encontrada")
                             else:
                                 raise Exception("Dropdown no encontrado")
                         except Exception as e:
-                            logger.debug(f"   🔄 Fallback 1 (dropdown) falló: {e}")
+                            logger.debug(f"   🔄 Fallback 1 (dropdown visual) falló: {e}")
+                            country_changed = False
 
-                            # 2. Fallback mediante JavaScript directo
+                        # 2. Fallback JavaScript directo
+                        if not country_changed:
                             try:
                                 await page.evaluate("""
                                     // Buscar campo oculto del país
@@ -1208,7 +1254,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
                                         countryField.dispatchEvent(new Event('change', { bubbles: true }));
                                         countryField.dispatchEvent(new Event('input', { bubbles: true }));
                                     } else {
-                                        // Si no hay campo oculto, intentar con el dropdown forzado
+                                        // Si no hay campo oculto, forzar dropdown
                                         const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
                                         if (btn) btn.click();
                                         setTimeout(() => {
@@ -1220,52 +1266,123 @@ async def create_amazon_account(country_code, add_address_flag=True):
                                     }
                                 """)
                                 await page.wait_for_timeout(2000)
-                                logger.debug("   ✅ País cambiado a US mediante JavaScript")
+                                # Verificar cambio
+                                new_country = await page.evaluate("""
+                                    const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
+                                    return btn ? btn.innerText.trim() : '';
+                                """)
+                                if "Estados Unidos" in new_country or "United States" in new_country:
+                                    logger.debug("   ✅ País cambiado a US mediante JavaScript (verificado)")
+                                    country_changed = True
+                                else:
+                                    raise Exception("País no cambió con JS")
                             except Exception as e2:
                                 logger.debug(f"   🔄 Fallback 2 (JavaScript) falló: {e2}")
 
-                                # 3. Fallback último: escribir "Estados Unidos" y presionar Enter
-                                logger.debug("   📝 Intentando escribir 'Estados Unidos' manualmente...")
-                                try:
-                                    # Buscar input de texto que pueda aceptar país (puede ser el mismo botón o un input)
-                                    country_input = await page.query_selector('#address-ui-widgets-enterAddressCountryCode, input[aria-label*="País"], input[aria-label*="Country"]')
-                                    if not country_input:
-                                        # Si no hay input, a veces el campo se muestra como texto con un botón, pero probamos con el botón dropdown de nuevo
-                                        dropdown_btn = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
-                                        if dropdown_btn:
-                                            await dropdown_btn.click()
-                                            await page.wait_for_timeout(500)
-                                            # Escribir directamente en el input de búsqueda que puede aparecer
-                                            search_input = await page.query_selector('input[type="search"]')
-                                            if search_input:
-                                                await search_input.fill("Estados Unidos")
-                                                await page.keyboard.press("Enter")
-                                                await page.wait_for_timeout(1000)
-                                                # Seleccionar el primer resultado
-                                                first_result = await page.query_selector('li[role="option"]')
-                                                if first_result:
-                                                    await first_result.click()
-                                                    logger.debug("   ✅ País seleccionado por búsqueda + Enter")
-                                            else:
-                                                # Si no hay input de búsqueda, escribir directamente en el campo oculto no funciona, fallamos
-                                                raise Exception("No se encontró input para escribir país")
-                                        else:
-                                            raise Exception("No hay dropdown ni input visible")
-                                    else:
-                                        # Tenemos un input de texto, escribimos y damos Enter
-                                        await country_input.fill("Estados Unidos")
+                        # 3. Último recurso: escribir manualmente "Estados Unidos" y Enter
+                        if not country_changed:
+                            try:
+                                # Buscar input de búsqueda dentro del dropdown o un campo de texto
+                                dropdown_btn = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
+                                if dropdown_btn:
+                                    await dropdown_btn.click()
+                                    await page.wait_for_timeout(500)
+                                    search_input = await page.query_selector('input[type="search"], input[aria-label*="Buscar"]')
+                                    if search_input:
+                                        await search_input.fill("Estados Unidos")
                                         await page.keyboard.press("Enter")
                                         await page.wait_for_timeout(1000)
-                                        logger.debug("   ✅ País seleccionado escribiendo y Enter")
-                                except Exception as e3:
-                                    logger.warning(f"⚠️ No se pudo seleccionar país por ningún método: {e3}")
+                                        # Seleccionar primer resultado (si aparece)
+                                        first_result = await page.query_selector('li[role="option"]')
+                                        if first_result:
+                                            await first_result.click()
+                                            await page.wait_for_timeout(2000)
+                                            # Verificar
+                                            new_country = await page.evaluate("""
+                                                const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
+                                                return btn ? btn.innerText.trim() : '';
+                                            """)
+                                            if "Estados Unidos" in new_country or "United States" in new_country:
+                                                logger.debug("   ✅ País seleccionado por búsqueda + Enter (verificado)")
+                                                country_changed = True
+                                            else:
+                                                raise Exception("País no cambió con búsqueda")
+                                        else:
+                                            raise Exception("No se encontró resultado")
+                                    else:
+                                        raise Exception("No hay input de búsqueda")
+                                else:
+                                    raise Exception("No se pudo abrir dropdown")
+                            except Exception as e3:
+                                logger.warning(f"⚠️ No se pudo seleccionar país por ningún método: {e3}")
 
-                        # Verificar que el formulario se actualizó (aparece el campo de estado)
+                        # Si después de todo no cambió, forzar con JavaScript que modifique el DOM directamente
+                        if not country_changed:
+                            await page.evaluate("""
+                                const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
+                                if (btn) {
+                                    btn.innerText = 'Estados Unidos';
+                                    const hidden = document.querySelector('input[name="countryCode"]');
+                                    if (hidden) hidden.value = 'US';
+                                }
+                            """)
+                            logger.warning("   ⚠️ Forzado cambio de país en DOM, puede que no se refleje en el backend")
+
+                        # Esperar a que el formulario se actualice (aparición del campo de estado)
                         try:
                             await page.wait_for_selector('#address-ui-widgets-enterAddressStateOrRegion', timeout=WAIT_TIMEOUT*1000)
                             logger.debug("   ✅ Formulario actualizado, campo de estado disponible")
                         except Exception:
                             logger.warning("   ⚠️ No se detectó campo de estado, puede que el país no se haya cambiado correctamente")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
                         # Llenar campos
                         await smart_fill(page, '#address-ui-widgets-enterAddressFullName', country_data['fullName'])
