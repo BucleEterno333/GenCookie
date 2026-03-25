@@ -837,7 +837,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
             ]
             for selector in continue_shopping_selectors:
                 try:
-                    btn = await page.wait_for_selector(selector, state='visible', timeout=2000)
+                    btn = await page.wait_for_selector(selector, state='visible', timeout=200)
                     if btn:
                         logger.debug(f"   ✅ Botón de continuar encontrado: {selector}")
                         await btn.click()
@@ -1091,24 +1091,6 @@ async def create_amazon_account(country_code, add_address_flag=True):
                         raise Exception(f"Error en verificación SMS: {error_text}")
                 else:
                     raise
-
-            # Obtener el código SMS
-            sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30)
-            if sms_code:
-                # Volver a buscar el campo por si cambió
-                code_input = await page.query_selector('#cvf-input-code')
-                if not code_input or not await code_input.is_visible():
-                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=10000)
-                await code_input.fill(sms_code)
-                logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
-                verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
-                if verify_btn:
-                    await verify_btn.click()
-                    await page.wait_for_load_state('load', timeout=20000)
-                else:
-                    logger.warning("   ⚠️ No se encontró botón de verificar")
-            else:
-                raise Exception("No se pudo obtener código de verificación SMS")
             
             # Obtener el código SMS
             sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30)
