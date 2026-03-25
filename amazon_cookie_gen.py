@@ -1097,16 +1097,27 @@ async def create_amazon_account(country_code, add_address_flag=True):
                         country_data = address_data.get(country_code, address_data['US'])
 
                         # Seleccionar país
-                        country_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
-                        if country_dropdown:
-                            await country_dropdown.click()
-                            await page.wait_for_timeout(1000)  # esperar animación
-                            us_option = await page.query_selector('a:has-text("Estados Unidos"), a[data-value*="US"]')
-                            if us_option:
-                                await us_option.click()
-                                await page.wait_for_timeout(2000)  # esperar actualización del formulario
-                        else:
-                            logger.warning("   ⚠️ No se encontró dropdown de país")
+                        await page.evaluate("""
+                            // Buscar el contenedor del dropdown de país
+                            const countryDropdown = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
+                            if (countryDropdown) {
+                                // El valor que queremos: 'US' para Estados Unidos
+                                // Buscar la opción correspondiente dentro del menú (aunque no esté visible)
+                                const targetOption = Array.from(document.querySelectorAll('li a')).find(a => 
+                                    a.textContent.includes('Estados Unidos') || a.getAttribute('data-value') === 'US'
+                                );
+                                if (targetOption) {
+                                    // Disparar el clic en la opción
+                                    targetOption.click();
+                                } else {
+                                    // Alternativa: forzar el valor directamente si existe un input hidden
+                                    const hiddenCountry = document.querySelector('input[name="countryCode"]');
+                                    if (hiddenCountry) hiddenCountry.value = 'US';
+                                }
+                            }
+                        """)
+                        # Esperar a que el formulario se actualice
+                        await page.wait_for_timeout(2000)
 
                         # Llenar campos
                         await smart_fill(page, '#address-ui-widgets-enterAddressFullName', country_data['fullName'])
