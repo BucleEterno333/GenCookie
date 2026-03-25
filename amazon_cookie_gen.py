@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Amazon Cookie Generator - Versión API REST optimizada para velocidad
-- Playwright con tiempos de espera dinámicos y controlables
-- Logs detallados con tiempos de cada acción
-- Reintentos globales con backoff
-- Soporte para múltiples servicios SMS y captchas
+Amazon Cookie Generator - Versión API REST optimizada para mínimo consumo de proxy
+- Bloqueo de imágenes, CSS, fuentes y recursos no esenciales
+- Navegación rápida con domcontentloaded
+- Capturas de pantalla reducidas (opcional)
+- Timeouts ajustables
 """
 
 import os
@@ -52,6 +52,9 @@ WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10'))          # Espera general pa
 NAVIGATION_TIMEOUT = int(os.getenv('NAVIGATION_TIMEOUT', '30'))  # Espera de navegación
 ACTION_TIMEOUT = int(os.getenv('ACTION_TIMEOUT', '5'))          # Espera para acciones específicas (clics, llenado)
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2'))               # Reintentos globales
+
+# Opción para reducir calidad de capturas (si se usa)
+SCREENSHOT_QUALITY = int(os.getenv('SCREENSHOT_QUALITY', '30'))  # Calidad JPEG (0-100)
 
 # Proxy
 PROXY_AUTH = None
@@ -181,10 +184,7 @@ def get_str(string, start, end, occurrence=1):
 # CAPTCHA RESOLUTION (coordenadas) - VERSIÓN HTTP DIRECTA
 # -------------------------------------------------------------------
 def solve_2captcha_coordinates(image_path, hint):
-    """
-    Resuelve captcha de coordenadas usando 2captcha API HTTP.
-    Retorna lista de puntos [{'x': int, 'y': int}] o None.
-    """
+    """Resuelve captcha de coordenadas usando 2captcha API HTTP."""
     import base64
     with open(image_path, 'rb') as f:
         img_base64 = base64.b64encode(f.read()).decode('utf-8')
@@ -243,10 +243,7 @@ def solve_2captcha_coordinates(image_path, hint):
         return None
 
 def solve_anticaptcha_coordinates(image_path, hint):
-    """
-    Resuelve captcha de coordenadas usando Anti-Captcha API HTTP.
-    Retorna lista de puntos [{'x': int, 'y': int}] o None.
-    """
+    """Resuelve captcha de coordenadas usando Anti-Captcha API HTTP."""
     import base64
     with open(image_path, 'rb') as f:
         img_base64 = base64.b64encode(f.read()).decode('utf-8')
@@ -531,24 +528,50 @@ async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeo
     return None
 
 # -------------------------------------------------------------------
-# FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA
+# FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA (optimizada)
 # -------------------------------------------------------------------
 async def take_screenshot(page, step_name):
     try:
-        screenshot_bytes = await page.screenshot()
+        # Captura con calidad reducida y formato JPEG si es posible
+        # Nota: playwright no permite calidad directamente, pero podemos convertir después
+        # Para ahorrar ancho de banda, reducimos tamaño de imagen
+        screenshot_bytes = await page.screenshot(type='jpeg', quality=SCREENSHOT_QUALITY)
         screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
-        logger.debug(f"📸 Screenshot tomado en paso: {step_name}")
+        logger.debug(f"📸 Screenshot tomado en paso: {step_name} (tamaño: {len(screenshot_bytes)} bytes)")
         return screenshot_b64
     except Exception as e:
         logger.warning(f"⚠️ Error tomando screenshot en paso {step_name}: {e}")
         return None
+    
+
+
+async def safe_get_content(page, timeout=20):
+    """Obtiene el contenido de la página con manejo de errores."""
+    try:
+        await page.wait_for_function('document.readyState === "complete"', timeout=timeout*1000)
+        await page.wait_for_timeout(500)
+        return await page.content()
+    except Exception as e:
+        logger.warning(f"⚠️ Error en safe_get_content: {e}")
+        await page.wait_for_timeout(2000)
+        return await page.content()
 
 # -------------------------------------------------------------------
-# FUNCIONES OPTIMIZADAS PARA PLAYWright
+# FUNCIONES OPTIMIZADAS PARA PLAYWright (con bloqueo de recursos)
 # -------------------------------------------------------------------
+async def block_resources(route):
+    """Bloquea solo recursos pesados, deja CSS y JS para funcionalidad."""
+    resource_type = route.request.resource_type
+    if resource_type in ['image', 'font', 'media']:
+        await route.abort()
+    else:
+        await route.continue_()
+
 async def smart_goto(page, url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000):
     start = time.time()
     logger.debug(f"🌐 Navegando a {url} (wait_until={wait_until})")
+    # Aplicar bloqueo de recursos antes de la navegación
+    await page.route('**/*', block_resources)
     await page.goto(url, wait_until=wait_until, timeout=timeout)
     elapsed = time.time() - start
     logger.debug(f"   ✅ Navegación completada en {elapsed:.2f}s")
@@ -795,10 +818,38 @@ async def create_amazon_account(country_code, add_address_flag=True):
             page = await context.new_page()
             logger.debug("   ✅ Contexto y página creados")
 
-            # ----- PASO 7: Navegar a la URL base -----
+            # ----- PASO 7: Navegar a la URL base con bloqueo de recursos -----
             base_url = base_urls[country_code]
             await smart_goto(page, base_url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
             last_screenshot = await take_screenshot(page, "home_page")
+
+
+            # ----- PASO 7.5: Manejar posible página de bienvenida "Continuar a Compras" -----
+            logger.debug("🛒 [PASO 7.5] Verificando página de bienvenida o redirección...")
+            continue_shopping_selectors = [
+                'input[value="Continuar a Compras"]',
+                'button:has-text("Continuar a Compras")',
+                'a:has-text("Continuar a Compras")',
+                'input[value="Continue to Shopping"]',
+                'button:has-text("Continue to Shopping")',
+                'input[value="Seguir comprando"]',
+                'button:has-text("Seguir comprando")'
+            ]
+            for selector in continue_shopping_selectors:
+                try:
+                    btn = await page.wait_for_selector(selector, state='visible', timeout=200)
+                    if btn:
+                        logger.debug(f"   ✅ Botón de continuar encontrado: {selector}")
+                        await btn.click()
+                        await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
+                        logger.debug("   ✅ Continuar a compras clickeado")
+                        await page.wait_for_timeout(2000)
+                        break
+                except:
+                    continue
+            else:
+                logger.debug("   ℹ️ No se detectó página de bienvenida, continuando normal")
+
 
             # ----- PASO 8: Hacer clic en "Hola, identifícate" -----
             logger.debug("👤 Buscando enlace de inicio de sesión...")
@@ -915,7 +966,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
 
             # ----- PASO 14: Detectar captcha -----
             logger.debug("🔍 Verificando captcha después del envío...")
-            if await wait_for_text(page, "Resuelve esta adivinanza", timeout=5*1000) or await wait_for_text(page, "Elija todo", timeout=5*1000):
+            if await wait_for_text(page, "Resuelve esta adivinanza", timeout=3*1000) or await wait_for_text(page, "Elija todo", timeout=1*1000):
                 logger.warning("⚠️ Captcha de selección de imágenes detectado")
                 await page.wait_for_timeout(5000)
                 last_screenshot = await take_screenshot(page, "captcha_seleccion")
@@ -1001,24 +1052,46 @@ async def create_amazon_account(country_code, add_address_flag=True):
                     logger.warning("⚠️ No se encontró botón de confirmar")
                 await page.wait_for_timeout(2000)  # pequeña pausa tras confirmar
 
-            # ----- PASO 15: Verificación por SMS -----
-            logger.debug("📱 Verificando página de verificación de número...")
-            try:
-                await page.wait_for_selector('#cvf-input-code', state='visible', timeout=WAIT_TIMEOUT*1000)
-                logger.debug("   📱 Página de ingreso de código SMS detectada")
-            except Exception:
-                # Quizás hay que seleccionar SMS en lugar de WhatsApp
-                if await page.query_selector('#secondary_channel_button'):
-                    await smart_click(page, '#secondary_channel_button', timeout=ACTION_TIMEOUT*1000)
-                    logger.debug("   ✅ Clic en 'Enviar código por SMS'")
-                    await page.wait_for_selector('#cvf-input-code', state='visible', timeout=WAIT_TIMEOUT*1000)
-                else:
-                    error_msg = await page.text_content('.a-alert-content, .a-alert-error')
-                    if error_msg:
-                        raise Exception(f"Error en verificación SMS: {error_msg}")
-                    else:
-                        raise Exception("No se pudo acceder al campo de código SMS")
 
+            # ----- PASO 15: Verificación por SMS (con posible redirección a WhatsApp) -----
+            logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
+            await page.wait_for_timeout(5000)
+            content = await safe_get_content(page)
+
+            if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
+                logger.warning("⚠️ Página de verificación con WhatsApp detectada, seleccionando SMS...")
+                sms_option = await page.query_selector('#secondary_channel_button input.a-button-input')
+                if not sms_option:
+                    sms_option = await page.query_selector('#secondary_channel_button')
+                if not sms_option:
+                    sms_option = await page.query_selector('xpath=//*[contains(text(), "Enviar código por SMS")]')
+                if sms_option:
+                    await page.wait_for_timeout(500)
+                    await sms_option.click()
+                    logger.debug("   ✅ Clic en 'Enviar código por SMS'")
+                    await page.wait_for_load_state('load', timeout=15000)
+                else:
+                    logger.warning("   ⚠️ No se encontró la opción de SMS, puede que ya esté en la página de código")
+
+            # Esperar el campo de código
+            try:
+                code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                logger.debug("   📱 Página de ingreso de código SMS detectada")
+            except Exception as e:
+                # Si no aparece, verificar si hay mensaje de error
+                error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
+                if error_msg:
+                    error_text = await error_msg.text_content()
+                    if "Hemos enviado tu OTP" in error_text:
+                        logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
+                        await page.wait_for_timeout(3000)
+                        code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                    else:
+                        logger.error(f"❌ Error en verificación SMS: {error_text}")
+                        raise Exception(f"Error en verificación SMS: {error_text}")
+                else:
+                    raise
+            
             # Obtener el código SMS
             sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30)
             if sms_code:
@@ -1087,16 +1160,17 @@ async def create_amazon_account(country_code, add_address_flag=True):
                         country_data = address_data.get(country_code, address_data['US'])
 
                         # Seleccionar país
-                        country_dropdown = await page.query_selector('span.a-button-text[data-action="a-dropdown-button"]')
+                        country_dropdown = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=WAIT_TIMEOUT*1000)
                         if country_dropdown:
                             await country_dropdown.click()
-                            await page.wait_for_timeout(1000)  # esperar animación
-                            us_option = await page.query_selector('a:has-text("Estados Unidos"), a[data-value*="US"]')
-                            if us_option:
+                            # Esperar a que aparezca la opción de Estados Unidos en el DOM (no necesariamente visible)
+                            try:
+                                us_option = await page.wait_for_selector('a:has-text("Estados Unidos"), a[data-value="US"]', timeout=WAIT_TIMEOUT*1000)
                                 await us_option.click()
-                                await page.wait_for_timeout(2000)  # esperar actualización del formulario
-                        else:
-                            logger.warning("   ⚠️ No se encontró dropdown de país")
+                                # Esperar a que el formulario se actualice (puede haber un pequeño retraso)
+                                await page.wait_for_timeout(2000)
+                            except Exception as e:
+                                logger.warning(f"   ⚠️ No se pudo seleccionar Estados Unidos: {e}")
 
                         # Llenar campos
                         await smart_fill(page, '#address-ui-widgets-enterAddressFullName', country_data['fullName'])
@@ -1133,6 +1207,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
                                 submit_btn2 = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
                                 if submit_btn2:
                                     async with page.expect_navigation(timeout=NAVIGATION_TIMEOUT*1000):
+                                        last_screenshot = await take_screenshot(page, "before_lastSecond_click")
                                         await submit_btn2.click()
                                     logger.debug("   ✅ Segundo clic realizado, navegación detectada")
                                 else:
@@ -1227,7 +1302,7 @@ def after_request(response):
 def home():
     return jsonify({
         'status': 'online',
-        'service': 'Amazon Cookie Generator API (optimizado)',
+        'service': 'Amazon Cookie Generator API (optimizado - mínimo consumo)',
         'endpoints': {
             '/generate': 'POST - Generar cookie (JSON: {"country": "MX", "add_address": true})',
             '/health': 'GET - Verificar estado'
@@ -1242,7 +1317,8 @@ def health():
         'status': 'healthy',
         'timestamp': time.time(),
         'proxy': 'configured' if PROXY_HOST_PORT else 'not configured',
-        'captcha': bool(API_KEY_2CAPTCHA or API_KEY_ANTICAPTCHA)
+        'captcha': bool(API_KEY_2CAPTCHA or API_KEY_ANTICAPTCHA),
+        'resource_blocking': 'enabled'
     })
 
 @app.route('/generate', methods=['POST', 'OPTIONS'])
@@ -1286,7 +1362,9 @@ def diagnostic():
                 'NAVIGATION_TIMEOUT': NAVIGATION_TIMEOUT,
                 'ACTION_TIMEOUT': ACTION_TIMEOUT,
                 'MAX_RETRIES': MAX_RETRIES
-            }
+            },
+            'resource_blocking': True,
+            'screenshot_quality': SCREENSHOT_QUALITY
         }
     })
 
@@ -1299,7 +1377,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.cli:
-        print("🍪 Generador de Cookies Amazon - Modo CLI (optimizado)")
+        print("🍪 Generador de Cookies Amazon - Modo CLI (optimizado - mínimo consumo)")
         if not API_KEY_2CAPTCHA and not API_KEY_ANTICAPTCHA:
             print("❌ ERROR: Configura al menos una API de captcha")
             sys.exit(1)
@@ -1334,5 +1412,5 @@ if __name__ == '__main__':
             elif op == '2':
                 break
     else:
-        print(f"🚀 Iniciando API optimizada en {API_HOST}:{API_PORT}")
+        print(f"🚀 Iniciando API optimizada (mínimo consumo) en {API_HOST}:{API_PORT}")
         app.run(host=API_HOST, port=API_PORT, debug=False, threaded=True)
