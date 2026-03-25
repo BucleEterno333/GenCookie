@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Amazon Cookie Generator - Versión API REST optimizada para velocidad
-- Playwright con tiempos de espera dinámicos y controlables
-- Logs detallados con tiempos de cada acción
-- Reintentos globales con backoff
-- Soporte para múltiples servicios SMS y captchas
+Amazon Cookie Generator - Versión API REST optimizada para mínimo consumo de proxy
+- Bloqueo de imágenes, CSS, fuentes y recursos no esenciales
+- Navegación rápida con domcontentloaded
+- Capturas de pantalla reducidas (opcional)
+- Timeouts ajustables
 """
 
 import os
@@ -52,6 +52,9 @@ WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10'))          # Espera general pa
 NAVIGATION_TIMEOUT = int(os.getenv('NAVIGATION_TIMEOUT', '30'))  # Espera de navegación
 ACTION_TIMEOUT = int(os.getenv('ACTION_TIMEOUT', '5'))          # Espera para acciones específicas (clics, llenado)
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2'))               # Reintentos globales
+
+# Opción para reducir calidad de capturas (si se usa)
+SCREENSHOT_QUALITY = int(os.getenv('SCREENSHOT_QUALITY', '30'))  # Calidad JPEG (0-100)
 
 # Proxy
 PROXY_AUTH = None
@@ -181,10 +184,7 @@ def get_str(string, start, end, occurrence=1):
 # CAPTCHA RESOLUTION (coordenadas) - VERSIÓN HTTP DIRECTA
 # -------------------------------------------------------------------
 def solve_2captcha_coordinates(image_path, hint):
-    """
-    Resuelve captcha de coordenadas usando 2captcha API HTTP.
-    Retorna lista de puntos [{'x': int, 'y': int}] o None.
-    """
+    """Resuelve captcha de coordenadas usando 2captcha API HTTP."""
     import base64
     with open(image_path, 'rb') as f:
         img_base64 = base64.b64encode(f.read()).decode('utf-8')
@@ -243,10 +243,7 @@ def solve_2captcha_coordinates(image_path, hint):
         return None
 
 def solve_anticaptcha_coordinates(image_path, hint):
-    """
-    Resuelve captcha de coordenadas usando Anti-Captcha API HTTP.
-    Retorna lista de puntos [{'x': int, 'y': int}] o None.
-    """
+    """Resuelve captcha de coordenadas usando Anti-Captcha API HTTP."""
     import base64
     with open(image_path, 'rb') as f:
         img_base64 = base64.b64encode(f.read()).decode('utf-8')
@@ -531,24 +528,37 @@ async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeo
     return None
 
 # -------------------------------------------------------------------
-# FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA
+# FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA (optimizada)
 # -------------------------------------------------------------------
 async def take_screenshot(page, step_name):
     try:
-        screenshot_bytes = await page.screenshot()
+        # Captura con calidad reducida y formato JPEG si es posible
+        # Nota: playwright no permite calidad directamente, pero podemos convertir después
+        # Para ahorrar ancho de banda, reducimos tamaño de imagen
+        screenshot_bytes = await page.screenshot(type='jpeg', quality=SCREENSHOT_QUALITY)
         screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
-        logger.debug(f"📸 Screenshot tomado en paso: {step_name}")
+        logger.debug(f"📸 Screenshot tomado en paso: {step_name} (tamaño: {len(screenshot_bytes)} bytes)")
         return screenshot_b64
     except Exception as e:
         logger.warning(f"⚠️ Error tomando screenshot en paso {step_name}: {e}")
         return None
 
 # -------------------------------------------------------------------
-# FUNCIONES OPTIMIZADAS PARA PLAYWright
+# FUNCIONES OPTIMIZADAS PARA PLAYWright (con bloqueo de recursos)
 # -------------------------------------------------------------------
+async def block_resources(route):
+    """Bloquea imágenes, CSS, fuentes y otros recursos no esenciales."""
+    resource_type = route.request.resource_type
+    if resource_type in ['image', 'stylesheet', 'font', 'media']:
+        await route.abort()
+    else:
+        await route.continue_()
+
 async def smart_goto(page, url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000):
     start = time.time()
     logger.debug(f"🌐 Navegando a {url} (wait_until={wait_until})")
+    # Aplicar bloqueo de recursos antes de la navegación
+    await page.route('**/*', block_resources)
     await page.goto(url, wait_until=wait_until, timeout=timeout)
     elapsed = time.time() - start
     logger.debug(f"   ✅ Navegación completada en {elapsed:.2f}s")
@@ -795,7 +805,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
             page = await context.new_page()
             logger.debug("   ✅ Contexto y página creados")
 
-            # ----- PASO 7: Navegar a la URL base -----
+            # ----- PASO 7: Navegar a la URL base con bloqueo de recursos -----
             base_url = base_urls[country_code]
             await smart_goto(page, base_url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
             last_screenshot = await take_screenshot(page, "home_page")
@@ -915,7 +925,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
 
             # ----- PASO 14: Detectar captcha -----
             logger.debug("🔍 Verificando captcha después del envío...")
-            if await wait_for_text(page, "Resuelve esta adivinanza", timeout=5*1000) or await wait_for_text(page, "Elija todo", timeout=5*1000):
+            if await wait_for_text(page, "Resuelve esta adivinanza", timeout=3*1000) or await wait_for_text(page, "Elija todo", timeout=1*1000):
                 logger.warning("⚠️ Captcha de selección de imágenes detectado")
                 await page.wait_for_timeout(5000)
                 last_screenshot = await take_screenshot(page, "captcha_seleccion")
@@ -1227,7 +1237,7 @@ def after_request(response):
 def home():
     return jsonify({
         'status': 'online',
-        'service': 'Amazon Cookie Generator API (optimizado)',
+        'service': 'Amazon Cookie Generator API (optimizado - mínimo consumo)',
         'endpoints': {
             '/generate': 'POST - Generar cookie (JSON: {"country": "MX", "add_address": true})',
             '/health': 'GET - Verificar estado'
@@ -1242,7 +1252,8 @@ def health():
         'status': 'healthy',
         'timestamp': time.time(),
         'proxy': 'configured' if PROXY_HOST_PORT else 'not configured',
-        'captcha': bool(API_KEY_2CAPTCHA or API_KEY_ANTICAPTCHA)
+        'captcha': bool(API_KEY_2CAPTCHA or API_KEY_ANTICAPTCHA),
+        'resource_blocking': 'enabled'
     })
 
 @app.route('/generate', methods=['POST', 'OPTIONS'])
@@ -1286,7 +1297,9 @@ def diagnostic():
                 'NAVIGATION_TIMEOUT': NAVIGATION_TIMEOUT,
                 'ACTION_TIMEOUT': ACTION_TIMEOUT,
                 'MAX_RETRIES': MAX_RETRIES
-            }
+            },
+            'resource_blocking': True,
+            'screenshot_quality': SCREENSHOT_QUALITY
         }
     })
 
@@ -1299,7 +1312,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.cli:
-        print("🍪 Generador de Cookies Amazon - Modo CLI (optimizado)")
+        print("🍪 Generador de Cookies Amazon - Modo CLI (optimizado - mínimo consumo)")
         if not API_KEY_2CAPTCHA and not API_KEY_ANTICAPTCHA:
             print("❌ ERROR: Configura al menos una API de captcha")
             sys.exit(1)
@@ -1334,5 +1347,5 @@ if __name__ == '__main__':
             elif op == '2':
                 break
     else:
-        print(f"🚀 Iniciando API optimizada en {API_HOST}:{API_PORT}")
+        print(f"🚀 Iniciando API optimizada (mínimo consumo) en {API_HOST}:{API_PORT}")
         app.run(host=API_HOST, port=API_PORT, debug=False, threaded=True)
