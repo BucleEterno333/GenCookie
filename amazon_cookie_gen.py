@@ -542,6 +542,19 @@ async def take_screenshot(page, step_name):
     except Exception as e:
         logger.warning(f"⚠️ Error tomando screenshot en paso {step_name}: {e}")
         return None
+    
+
+
+async def safe_get_content(page, timeout=20):
+    """Obtiene el contenido de la página con manejo de errores."""
+    try:
+        await page.wait_for_function('document.readyState === "complete"', timeout=timeout*1000)
+        await page.wait_for_timeout(500)
+        return await page.content()
+    except Exception as e:
+        logger.warning(f"⚠️ Error en safe_get_content: {e}")
+        await page.wait_for_timeout(2000)
+        return await page.content()
 
 # -------------------------------------------------------------------
 # FUNCIONES OPTIMIZADAS PARA PLAYWright (con bloqueo de recursos)
