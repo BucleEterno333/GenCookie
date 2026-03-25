@@ -1097,27 +1097,17 @@ async def create_amazon_account(country_code, add_address_flag=True):
                         country_data = address_data.get(country_code, address_data['US'])
 
                         # Seleccionar país
-                        await page.evaluate("""
-                            // Buscar el contenedor del dropdown de país
-                            const countryDropdown = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
-                            if (countryDropdown) {
-                                // El valor que queremos: 'US' para Estados Unidos
-                                // Buscar la opción correspondiente dentro del menú (aunque no esté visible)
-                                const targetOption = Array.from(document.querySelectorAll('li a')).find(a => 
-                                    a.textContent.includes('Estados Unidos') || a.getAttribute('data-value') === 'US'
-                                );
-                                if (targetOption) {
-                                    // Disparar el clic en la opción
-                                    targetOption.click();
-                                } else {
-                                    // Alternativa: forzar el valor directamente si existe un input hidden
-                                    const hiddenCountry = document.querySelector('input[name="countryCode"]');
-                                    if (hiddenCountry) hiddenCountry.value = 'US';
-                                }
-                            }
-                        """)
-                        # Esperar a que el formulario se actualice
-                        await page.wait_for_timeout(2000)
+                        country_dropdown = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=WAIT_TIMEOUT*1000)
+                        if country_dropdown:
+                            await country_dropdown.click()
+                            # Esperar a que aparezca la opción de Estados Unidos en el DOM (no necesariamente visible)
+                            try:
+                                us_option = await page.wait_for_selector('a:has-text("Estados Unidos"), a[data-value="US"]', timeout=WAIT_TIMEOUT*1000)
+                                await us_option.click()
+                                # Esperar a que el formulario se actualice (puede haber un pequeño retraso)
+                                await page.wait_for_timeout(2000)
+                            except Exception as e:
+                                logger.warning(f"   ⚠️ No se pudo seleccionar Estados Unidos: {e}")
 
                         # Llenar campos
                         await smart_fill(page, '#address-ui-widgets-enterAddressFullName', country_data['fullName'])
