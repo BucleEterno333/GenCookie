@@ -519,62 +519,103 @@ ACCOUNT_TO_PURCHASE_COUNTRY = {
     'US': 'US',
 }
 
+
+
+
 async def get_phone_number(account_country):
-    purchase_country = ACCOUNT_TO_PURCHASE_COUNTRY.get(account_country, account_country)
-    logger.debug(f"Cuenta: {account_country}, comprando número de: {purchase_country}")
+    # Mapeo de códigos de país a números para Hero SMS
+    hero_country_map = {'ID': 6, 'MX': 54, 'US': 187, 'CA': 36, 'UK': 16, 'DE': 43,
+                        'FR': 78, 'IT': 86, 'ES': 56, 'JP': 182, 'AU': 175, 'IN': 22}
     
+    # Prefijos para extraer número local (dígitos después del código país)
+    prefix_len = {'ID': 2, 'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2,
+                  'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}
+    # Para 5sim, los prefijos pueden variar, usamos mismos valores por simplicidad
+
+    prefix_len_simbolo = {'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3, 'FR': 3, 'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3, 'ID': 3}.get(purchase_country, 0)
+
+
+    # Orden de países por precio (barato a caro) para Hero (basado en experiencia)
+    hero_order = ['ID', 'MX', 'US', 'CA', 'UK', 'DE', 'FR', 'IT', 'ES', 'JP', 'AU', 'IN']
+    # Asegurar que todos los países soportados estén en el orden
+    all_countries = list(base_urls.keys())
+    hero_order = [c for c in hero_order if c in all_countries] + [c for c in all_countries if c not in hero_order]
+
+    # Para 5sim, obtener precios reales
+    fivesim_prices = await get_fivesim_prices()
+    if fivesim_prices:
+        fivesim_order = list(fivesim_prices.keys())  # ya ordenado por precio
+    else:
+        fivesim_order = hero_order  # fallback al mismo orden
+
+    # Recorrer servicios SMS disponibles
     for service in SMS_SERVICES:
         if not service['enabled']:
             continue
         logger.debug(f"Intentando con {service['name']}...")
-        try:
-            if service['name'] == 'hero':
-                hero_country_map = {'MX': 54, 'US': 187, 'CA': 36, 'UK': 16, 'DE': 43, 'FR': 78, 'IT': 86, 'ES': 56, 'JP': 182, 'AU': 175, 'IN': 22, 'ID': 6}
-                purchase_country_num = hero_country_map.get(purchase_country)
-                if not purchase_country_num:
-                    logger.warning(f"No hay mapeo Hero SMS para {purchase_country}")
-                    continue
-                result = await service['get_number'](purchase_country_num, service='am')
-                if result:
-                    phone_full, service_id = result
-                    prefix_len = {'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2, 'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2, 'ID': 2}.get(purchase_country, 0)
-                    if prefix_len and len(phone_full) > prefix_len:
-                        phone_local = phone_full[prefix_len:]
-                        phone_local = re.sub(r'\D', '', phone_local)
-                    else:
-                        phone_local = phone_full
-                    return {
-                        'full': f'+{phone_full}',
-                        'local': phone_local,
-                        'service_id': service_id,
-                        'service_name': service['name'],
-                        'purchase_country': purchase_country
-                    }
-            else:  # 5sim
-                country_name = FIVESIM_COUNTRY_MAP.get(purchase_country)
-                if not country_name:
-                    logger.warning(f"No hay mapeo 5sim para {purchase_country}")
-                    continue
-                result = await service['get_number'](purchase_country, product='amazon')
-                if result:
-                    phone_full, service_id = result
-                    prefix_len = {'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3, 'FR': 3, 'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3, 'ID': 3}.get(purchase_country, 0)
-                    if prefix_len and len(phone_full) > prefix_len:
-                        phone_local = phone_full[prefix_len:]
-                        phone_local = re.sub(r'\D', '', phone_local)
-                    else:
-                        phone_local = phone_full
-                    return {
-                        'full': phone_full,
-                        'local': phone_local,
-                        'service_id': service_id,
-                        'service_name': service['name'],
-                        'purchase_country': purchase_country
-                    }
-        except Exception as e:
-            logger.warning(f"Error con {service['name']}: {e}")
-            continue
+        
+        # Elegir orden de países según servicio
+        if service['name'] == '5sim':
+            country_order = fivesim_order
+        elif service['name'] == 'hero':
+            country_order = hero_order
+        else:
+            country_order = [account_country]  # fallback
+        
+        for purchase_country in country_order:
+            logger.debug(f"   Probando país {purchase_country}...")
+            try:
+                if service['name'] == 'hero':
+                    # Mapear país a número para Hero
+                    purchase_country_num = hero_country_map.get(purchase_country)
+                    if not purchase_country_num:
+                        logger.debug(f"   No hay mapeo Hero SMS para {purchase_country}")
+                        continue
+                    result = await service['get_number'](purchase_country_num, service='am')
+                    if result:
+                        phone_full, service_id = result
+                        # Extraer número local (sin código país)
+                        local_len = prefix_len.get(purchase_country, 0)
+                        if local_len and len(phone_full) > local_len:
+                            phone_local = phone_full[local_len:]
+                            phone_local = re.sub(r'\D', '', phone_local)
+                        else:
+                            phone_local = phone_full
+                        return {
+                            'full': f'+{phone_full}',
+                            'local': phone_local,
+                            'service_id': service_id,
+                            'service_name': service['name'],
+                            'purchase_country': purchase_country
+                        }
+                elif service['name'] == '5sim':
+                    # Llamar a get_fivesim_number con el país ISO (ej. 'MX')
+                    result = await service['get_number'](purchase_country, product='amazon')
+                    if result:
+                        phone_full, service_id = result
+                        local_len = prefix_len_simbolo.get(purchase_country, 0)
+                        if local_len and len(phone_full) > local_len:
+                            phone_local = phone_full[local_len:]
+                            phone_local = re.sub(r'\D', '', phone_local)
+                        else:
+                            phone_local = phone_full
+                        return {
+                            'full': phone_full,
+                            'local': phone_local,
+                            'service_id': service_id,
+                            'service_name': service['name'],
+                            'purchase_country': purchase_country
+                        }
+                # Si en el futuro hay otros servicios, manejarlos aquí
+            except Exception as e:
+                logger.warning(f"   Error con {service['name']} en {purchase_country}: {e}")
+                continue
     return None
+
+
+
+
+
 
 
 
@@ -1202,18 +1243,6 @@ async def create_amazon_account(country_code, add_address_flag=True):
             else:
                 raise Exception("No se pudo obtener código de verificación SMS")
             
-            if sms_code:
-                code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=ACTION_TIMEOUT*1000)
-                await code_input.fill(sms_code)
-                logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
-                verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
-                if verify_btn:
-                    await verify_btn.click()
-                    await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
-                else:
-                    logger.warning("   ⚠️ No se encontró botón de verificar")
-            else:
-                raise Exception("No se pudo obtener código de verificación SMS")
 
             # ----- PASO 16: Verificar éxito -----
             if 'your-account' in page.url.lower() or 'account' in page.url.lower() or 'welcome' in page.url.lower():
