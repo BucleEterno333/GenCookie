@@ -1275,23 +1275,21 @@ async def create_amazon_account(country_code, add_address_flag=True):
 
 
 
-
-
-                # ----- PASO 17: Agregar dirección (opcional) -----
+            # ----- PASO 17: Agregar dirección (opcional) -----
                 if add_address_flag:
                     logger.debug("📍 Agregando dirección...")
                     try:
-                        # Desactivar bloqueo de recursos por si afecta al dropdown
+                        # Desactivar bloqueo de recursos temporalmente (por si el dropdown necesita alguna imagen)
                         await page.unroute('**/*', block_resources)
                         
                         # Ir a la página de agregar dirección
                         await smart_goto(page, add_address_urls[country_code], wait_until='domcontentloaded', timeout=20000)
                         
-                        # Esperar a que el formulario esté listo
-                        await page.wait_for_selector('input[type="text"], input[type="tel"]', timeout=15000)
+                        # Esperar a que aparezca un campo del formulario (calle o nombre)
+                        await page.wait_for_selector('#address-ui-widgets-enterAddressLine1, #address-ui-widgets-enterAddressFullName', timeout=15000)
                         last_screenshot = await take_screenshot(page, "add_address_form")
                         
-                        # --- Datos predefinidos ---
+                        # Datos de dirección por país (puedes ampliar)
                         address_data = {
                             'US': {
                                 'fullName': 'John Doe',
@@ -1305,55 +1303,51 @@ async def create_amazon_account(country_code, add_address_flag=True):
                                 'street': 'Calzada Ignacio Zaragoza 1584',
                                 'postal_code': '09100',
                                 'city': 'Ciudad de México',
-                                'state': 'CDMX'
+                                'state': 'CDMX',
+                                'phone': f"55{random.randint(10000000, 99999999)}"
                             }
                         }
                         
-                        # --- Intentar cambiar país a Estados Unidos (solo si no es MX, o incluso si es MX intentamos) ---
-                        # Pero el usuario quiere primero intentar con US y luego fallback a MX
-                        # Así que hacemos un intento de cambio a US independientemente del país original
-                        country_changed = False
+                        # --- Configuración del país deseado para la dirección ---
+                        # Por defecto usamos México, pero si quieres cambiar a otro país, ajusta aquí
+                        target_country = 'MX'   # Cambiar a 'US' para Estados Unidos
+                        # Si en el futuro el frontend envía el país, se puede recibir como parámetro
                         
-                        # Múltiples estrategias para abrir dropdown y seleccionar US
-                        for strategy in ['selector1', 'selector2', 'js']:
-                            if country_changed:
-                                break
-                            try:
-                                if strategy == 'selector1':
-                                    dropdown_btn = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=3000)
-                                    await dropdown_btn.click()
-                                    await page.wait_for_selector('.a-dropdown-options', state='visible', timeout=3000)
-                                    us_option = await page.wait_for_selector('li.a-dropdown-item a:has-text("Estados Unidos")', timeout=3000)
-                                    await us_option.click()
-                                    country_changed = True
-                                    logger.debug("   ✅ País cambiado a EE.UU. (selector1)")
-                                elif strategy == 'selector2':
-                                    dropdown_btn = await page.wait_for_selector('#address-ui-widgets-countryCode .a-button', timeout=3000)
-                                    await dropdown_btn.click()
-                                    await page.wait_for_selector('.a-dropdown-options', state='visible', timeout=3000)
-                                    us_option = await page.wait_for_selector('li.a-dropdown-item a:has-text("Estados Unidos")', timeout=3000)
-                                    await us_option.click()
-                                    country_changed = True
-                                    logger.debug("   ✅ País cambiado a EE.UU. (selector2)")
-                                elif strategy == 'js':
-                                    await page.evaluate("""
-                                        const btn = document.querySelector('span.a-button-text[data-action="a-dropdown-button"]');
-                                        if (btn) {
-                                            btn.click();
-                                            setTimeout(() => {
-                                                const opt = document.querySelector('li.a-dropdown-item a:has-text("Estados Unidos")');
-                                                if (opt) opt.click();
-                                            }, 500);
-                                        }
-                                    """)
-                                    await page.wait_for_timeout(3000)
-                            except Exception as e:
-                                logger.debug(f"   Estrategia {strategy} falló: {e}")
+                        # --- Selección de país mediante dropdown (solo si el país no es México, o si quieres forzar cambio) ---
+                        # Nota: si el país actual ya es MX y quieres MX, no hace falta cambiar. Solo cambiamos si target_country != country_code
+                        # Pero como la página carga con el país de la cuenta (MX), solo cambiamos si queremos otro país.
+                        if target_country != country_code:
+                            logger.debug(f"🌎 Cambiando país a {target_country} (desde {country_code})")
+                            
+                            # 1. Abrir el dropdown de país
+                            dropdown_btn = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=5000)
+                            await dropdown_btn.click()
+                            await page.wait_for_timeout(1000)  # pequeña pausa para que se despliegue
+                            
+                            # 2. Escribir la primera letra del país deseado
+                            #    Para Estados Unidos: "E" (por "Estados Unidos") o "U" (por "United States")
+                            #    Para México: "M"
+                            first_letter = 'E' if target_country == 'US' else 'M'   # ajustar según necesidad
+                            await page.keyboard.type(first_letter)
+                            await page.wait_for_timeout(1000)  # esperar filtrado
+                            
+                            # 3. Hacer clic en una coordenada específica (ajusta según la posición de la primera opción)
+                            #    Puedes usar la función page.mouse.click(x, y)
+                            #    Por ejemplo, x=500, y=300 (coordenadas aproximadas del primer elemento del dropdown)
+                            #    O también puedes esperar a que aparezca un elemento con el texto exacto y hacer clic en él
+                            #    Usamos coordenadas por simplicidad y para evitar problemas con selectores cambiantes
+                            click_x = 500   # ajusta según tu pantalla (valor entre 0 y viewport width)
+                            click_y = 300   # ajusta según tu pantalla (valor entre 0 y viewport height)
+                            await page.mouse.click(click_x, click_y)
+                            await page.wait_for_timeout(2000)  # esperar a que se actualice el formulario
+                            logger.debug(f"   ✅ País cambiado a {target_country} mediante coordenadas")
+                        else:
+                            logger.debug(f"   🇲🇽 Usando país actual {country_code} para dirección")
                         
-                        # --- Llenar según si se pudo cambiar o no ---
-                        if country_changed:
-                            # Usar datos de Estados Unidos
+                        # --- Llenar datos según el país seleccionado ---
+                        if target_country == 'US':
                             data = address_data['US']
+                            # Campos para Estados Unidos
                             await smart_fill(page, '#address-ui-widgets-enterAddressFullName', data['fullName'])
                             await smart_fill(page, '#address-ui-widgets-enterAddressPhoneNumber', data['phone'])
                             await smart_fill(page, '#address-ui-widgets-enterAddressLine1', data['line1'])
@@ -1367,49 +1361,45 @@ async def create_amazon_account(country_code, add_address_flag=True):
                             
                             # Estado (dropdown)
                             try:
-                                state_dropdown = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=5000)
+                                state_dropdown = await page.wait_for_selector('#address-ui-widgets-enterAddressStateOrRegion .a-button, .a-dropdown-button', timeout=5000)
                                 await state_dropdown.click()
                                 await page.wait_for_selector('.a-dropdown-options', state='visible', timeout=5000)
-                                state_option = await page.wait_for_selector(f"a:has-text('{data['state']}')", timeout=5000)
-                                await state_option.click()
+                                # Aquí podrías usar también la técnica de teclear la primera letra
+                                await page.keyboard.type(data['state'][0])  # escribe la primera letra del estado
+                                await page.wait_for_timeout(500)
+                                # Hacer clic en coordenada (puedes ajustar)
+                                await page.mouse.click(click_x, click_y + 100)  # desplazar un poco hacia abajo
                                 logger.debug(f"   ✅ Estado seleccionado: {data['state']}")
                             except Exception as e:
                                 logger.warning(f"   ⚠️ No se pudo seleccionar estado: {e}")
                             
                             # Código postal
                             await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', data['postalCode'])
-                        else:
-                            # Fallback: usar flujo mexicano (no se cambió país)
-                            logger.debug("🇲🇽 No se pudo cambiar a EE.UU., usando flujo mexicano")
-                            mx_data = address_data['MX']
+                        
+                        else:   # México (por defecto)
+                            data = address_data['MX']
+                            # Campos para México
+                            await smart_fill(page, '#address-ui-widgets-enterAddressLine1', data['street'])
+                            await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', data['postal_code'])
                             
-                            # Llenar calle
-                            street_input = await page.wait_for_selector('input[aria-label*="Calle"], input[placeholder*="Calle"], #address-ui-widgets-enterAddressLine1', timeout=10000)
-                            await street_input.fill(mx_data['street'])
-                            
-                            # Llenar código postal
-                            postal_input = await page.wait_for_selector('input[aria-label*="Código postal"], input[placeholder*="Código postal"], #address-ui-widgets-enterAddressPostalCode', timeout=10000)
-                            await postal_input.fill(mx_data['postal_code'])
-                            
-                            # Clic en "Validar código postal"
-                            validate_btn = await page.query_selector('button:has-text("Validar código postal"), input[value*="Validar"]')
+                            # Validar código postal
+                            validate_btn = await page.wait_for_selector('#address-ui-widgets-enterAddressPostalCode-submit', timeout=5000)
                             if validate_btn:
                                 await validate_btn.click()
                                 await page.wait_for_timeout(3000)
                             
-                            # Campos opcionales
-                            city_input = await page.query_selector('input[aria-label*="Ciudad"], #address-ui-widgets-enterAddressCity')
+                            # Campos opcionales después de validar
+                            city_input = await page.query_selector('#address-ui-widgets-enterAddressCity')
                             if city_input and not await city_input.input_value():
-                                await city_input.fill(mx_data['city'])
-                            state_input = await page.query_selector('input[aria-label*="Estado"], #address-ui-widgets-enterAddressState')
+                                await city_input.fill(data['city'])
+                            state_input = await page.query_selector('#address-ui-widgets-enterAddressState')
                             if state_input and not await state_input.input_value():
-                                await state_input.fill(mx_data['state'])
-                            phone_input = await page.query_selector('input[aria-label*="Teléfono"], #address-ui-widgets-enterAddressPhoneNumber')
+                                await state_input.fill(data['state'])
+                            phone_input = await page.query_selector('#address-ui-widgets-enterAddressPhoneNumber')
                             if phone_input and not await phone_input.input_value():
-                                mex_phone = f"55{random.randint(10000000, 99999999)}"
-                                await phone_input.fill(mex_phone)
+                                await phone_input.fill(data['phone'])
                         
-                        # --- Envío común ---
+                        # --- Envío del formulario (común) ---
                         submit_btn = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
                         if submit_btn:
                             await submit_btn.click()
@@ -1422,11 +1412,14 @@ async def create_amazon_account(country_code, add_address_flag=True):
                                     async with page.expect_navigation(timeout=NAVIGATION_TIMEOUT*1000):
                                         await submit_btn2.click()
                                     logger.debug("   ✅ Segundo clic realizado, navegación detectada")
+                                else:
+                                    logger.warning("   ⚠️ Botón desapareció después del primer clic")
                             else:
                                 logger.debug("   ✅ Dirección agregada sin error")
                         else:
                             logger.warning("   ⚠️ No se encontró botón de envío")
                         
+                        # Verificar resultado
                         if "addresses" in page.url:
                             account_data['address'] = "Dirección agregada exitosamente"
                             logger.debug("   ✅ Dirección agregada")
@@ -1437,13 +1430,10 @@ async def create_amazon_account(country_code, add_address_flag=True):
                         logger.warning(f"⚠️ Error agregando dirección: {e}")
                         account_data['address'] = f"Error: {e}"
                     finally:
+                        # Reactivar bloqueo de recursos
                         await page.route('**/*', block_resources)
                 else:
                     account_data['address'] = "No se agregó dirección"
-
-
-
-
 
 
 
