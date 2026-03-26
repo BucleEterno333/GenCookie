@@ -521,7 +521,6 @@ ACCOUNT_TO_PURCHASE_COUNTRY = {
 
 
 
-
 async def get_phone_number(account_country):
     # Mapeo de códigos de país a números para Hero SMS
     hero_country_map = {'ID': 6, 'MX': 54, 'US': 187, 'CA': 36, 'UK': 16, 'DE': 43,
@@ -530,10 +529,9 @@ async def get_phone_number(account_country):
     # Prefijos para extraer número local (dígitos después del código país)
     prefix_len = {'ID': 2, 'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2,
                   'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}
-    # Para 5sim, los prefijos pueden variar, usamos mismos valores por simplicidad
-
-    prefix_len_simbolo = {'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3, 'FR': 3, 'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3, 'ID': 3}.get(purchase_country, 0)
-
+    
+    prefix_len_plus = {'ID': 2, 'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2,
+                  'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}
 
     # Orden de países por precio (barato a caro) para Hero (basado en experiencia)
     hero_order = ['ID', 'MX', 'US', 'CA', 'UK', 'DE', 'FR', 'IT', 'ES', 'JP', 'AU', 'IN']
@@ -560,13 +558,12 @@ async def get_phone_number(account_country):
         elif service['name'] == 'hero':
             country_order = hero_order
         else:
-            country_order = [account_country]  # fallback
+            country_order = [account_country]  # fallback, pero no debería ocurrir
         
         for purchase_country in country_order:
             logger.debug(f"   Probando país {purchase_country}...")
             try:
                 if service['name'] == 'hero':
-                    # Mapear país a número para Hero
                     purchase_country_num = hero_country_map.get(purchase_country)
                     if not purchase_country_num:
                         logger.debug(f"   No hay mapeo Hero SMS para {purchase_country}")
@@ -574,7 +571,6 @@ async def get_phone_number(account_country):
                     result = await service['get_number'](purchase_country_num, service='am')
                     if result:
                         phone_full, service_id = result
-                        # Extraer número local (sin código país)
                         local_len = prefix_len.get(purchase_country, 0)
                         if local_len and len(phone_full) > local_len:
                             phone_local = phone_full[local_len:]
@@ -589,11 +585,10 @@ async def get_phone_number(account_country):
                             'purchase_country': purchase_country
                         }
                 elif service['name'] == '5sim':
-                    # Llamar a get_fivesim_number con el país ISO (ej. 'MX')
                     result = await service['get_number'](purchase_country, product='amazon')
                     if result:
                         phone_full, service_id = result
-                        local_len = prefix_len_simbolo.get(purchase_country, 0)
+                        local_len = prefix_len_plus.get(purchase_country, 0)
                         if local_len and len(phone_full) > local_len:
                             phone_local = phone_full[local_len:]
                             phone_local = re.sub(r'\D', '', phone_local)
@@ -607,18 +602,23 @@ async def get_phone_number(account_country):
                             'purchase_country': purchase_country
                         }
                 # Si en el futuro hay otros servicios, manejarlos aquí
+                else:
+                    # Para otros servicios no definidos, intentar con el país original
+                    result = await service['get_number'](account_country, service='amazon')
+                    if result:
+                        phone_full, service_id = result
+                        phone_local = re.sub(r'\D', '', phone_full)
+                        return {
+                            'full': phone_full,
+                            'local': phone_local,
+                            'service_id': service_id,
+                            'service_name': service['name'],
+                            'purchase_country': account_country
+                        }
             except Exception as e:
                 logger.warning(f"   Error con {service['name']} en {purchase_country}: {e}")
                 continue
     return None
-
-
-
-
-
-
-
-
 
 
 
