@@ -514,11 +514,6 @@ SMS_SERVICES = [
     {'name': '5sim', 'enabled': bool(FIVESIM_API_KEY), 'get_number': get_fivesim_number, 'get_code': get_fivesim_code},
 ]
 
-ACCOUNT_TO_PURCHASE_COUNTRY = {
-    'MX': 'ID',
-    'US': 'US',
-}
-
 
 
 async def get_phone_number(account_country):
@@ -535,9 +530,7 @@ async def get_phone_number(account_country):
 
     # Orden de países por precio (barato a caro) para Hero (basado en experiencia)
     hero_order = ['ID', 'MX', 'US', 'CA', 'UK', 'DE', 'FR', 'IT', 'ES', 'JP', 'AU', 'IN']
-    # Asegurar que todos los países soportados estén en el orden
-    all_countries = list(base_urls.keys())
-    hero_order = [c for c in hero_order if c in all_countries] + [c for c in all_countries if c not in hero_order]
+
 
     # Para 5sim, obtener precios reales
     fivesim_prices = await get_fivesim_prices()
