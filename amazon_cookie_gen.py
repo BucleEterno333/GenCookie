@@ -297,47 +297,60 @@ def solve_anticaptcha_coordinates(image_path, hint):
 # SMS SERVICES (sin cambios)
 # -------------------------------------------------------------------
 FIVESIM_BASE_URL = "https://5sim.net/v1"
+
 FIVESIM_COUNTRY_MAP = {
-    'MX': 'mexico',
-    'US': 'usa',
-    'CA': 'canada',
-    'UK': 'uk',
-    'DE': 'germany',
-    'FR': 'france',
-    'IT': 'italy',
-    'ES': 'spain',
-    'JP': 'japan',
-    'AU': 'australia',
-    'IN': 'india',
-    'ID': 'indonesia',
+    'KG': 'kyrgyzstan',
+    'PL': 'poland',
+    'CO': 'colombia',
+    'LV': 'latvia',
+    'PK': 'pakistan',
+    'TJ': 'tajikistan',
+    'KE': 'kenya',
 }
 
+
+COUNTRY_NAME_TO_CODE = {v: k for k, v in FIVESIM_COUNTRY_MAP.items()}
+
 async def get_fivesim_prices():
-    """Obtiene precios de 5sim para amazon, ordenados por precio ascendente."""
+    """Obtiene precios de 5sim para amazon con operador 'any', ordenados por precio."""
     if not FIVESIM_API_KEY:
         return {}
     url = "https://5sim.net/v1/guest/prices"
     try:
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, lambda: requests.get(url, timeout=10))
-        if response.status_code == 200:
-            data = response.json()
-            prices = {}
-            for country, operators in data.items():
-                # Buscar operador 'any' para amazon
-                if 'any' in operators and 'amazon' in operators['any']:
-                    price = operators['any']['amazon']
-                    # Guardar precio en USD
-                    prices[country] = price
-            # Ordenar por precio ascendente
-            sorted_prices = sorted(prices.items(), key=lambda x: x[1])
-            logger.debug(f"📊 5sim precios: {sorted_prices}")
-            return dict(sorted_prices)
-        else:
+        if response.status_code != 200:
             logger.warning(f"⚠️ No se pudo obtener precios de 5sim: {response.status_code}")
+            return {}
+
+        data = response.json()
+        prices = {}
+
+        # La estructura es: data[country][product][operator] = {cost, count, rate}
+        for country_name, products in data.items():
+            if 'amazon' not in products:
+                continue
+            operators = products['amazon']
+            if 'any' not in operators:
+                continue
+            info = operators['any']
+            cost = info.get('cost')
+            count = info.get('count', 0)
+            if cost is not None and count > 0:
+                # Convertir nombre del país a código ISO usando el mapeo inverso
+                iso_code = COUNTRY_NAME_TO_CODE.get(country_name)
+                if iso_code:
+                    prices[iso_code] = float(cost)
+                else:
+                    logger.debug(f"⚠️ País '{country_name}' no mapeado a ISO, se ignora")
+
+        # Ordenar por precio ascendente (más barato primero)
+        sorted_prices = sorted(prices.items(), key=lambda x: x[1])
+        logger.debug(f"📊 5sim precios ordenados: {sorted_prices}")
+        return dict(sorted_prices)
     except Exception as e:
         logger.warning(f"⚠️ Error obteniendo precios de 5sim: {e}")
-    return {}
+        return {}
 
 async def get_fivesim_number(country_code, product='amazon'):
     if not FIVESIM_API_KEY:
@@ -517,19 +530,28 @@ SMS_SERVICES = [
 
 
 async def get_phone_number(account_country):
-    # Mapeo de códigos de país a números para Hero SMS
-    hero_country_map = {'ID': 6, 'MX': 54, 'US': 187, 'CA': 36, 'UK': 16, 'DE': 43,
-                        'FR': 78, 'IT': 86, 'ES': 56, 'JP': 182, 'AU': 175, 'IN': 22}
-    
+
     # Prefijos para extraer número local (dígitos después del código país)
     prefix_len = {'ID': 2, 'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2,
                   'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}
     
-    prefix_len_plus = {'ID': 2, 'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2,
-                  'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}
+    prefix_len_plus = {'ID': 3, 'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3, 'FR': 3,
+                  'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3}
+
+    # Mapeo de códigos de país a números para Hero SMS
+    hero_country_map = {
+        'BR': 73,   # Brazil +55 $0.03
+        'CM': 41,   # Cameroon +237 $0.03
+        'MY': 7,    # Malaysia +60 $0.035
+        'KZ': 2,    # Kazakhstan +7 $0.035
+        'ID': 6,    # Indonesia +62 $0.045
+        'MA': 37,   # Morocco +212 $0.045
+        'KG': 11,   # Kyrgyzstan +996 $0.045
+        'CO': 33,   # Colombia +57 $0.05
+    }
 
     # Orden de países por precio (barato a caro) para Hero (basado en experiencia)
-    hero_order = ['ID', 'MX', 'US', 'CA', 'UK', 'DE', 'FR', 'IT', 'ES', 'JP', 'AU', 'IN']
+    hero_order = ['BR', 'CM', 'MY', 'KZ', 'ID', 'MA', 'KG', 'CO']
 
 
     # Para 5sim, obtener precios reales
