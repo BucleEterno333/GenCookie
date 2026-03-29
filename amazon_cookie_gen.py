@@ -537,7 +537,7 @@ async def get_phone_number(account_country):
                   'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}
     
     prefix_len_plus = {'ID': 3, 'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3, 'FR': 3,
-                  'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3}
+                  'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3, 'KG': 3, 'PL': 3, 'CO': 3, 'LV': 3, 'PK': 3, 'TJ': 3, 'KE': 3}
 
     # Mapeo de códigos de país a números para Hero SMS
     hero_country_map = {
@@ -553,7 +553,10 @@ async def get_phone_number(account_country):
     }
 
     # Orden de países por precio (barato a caro) para Hero (basado en experiencia)
-    hero_order = ['MX', 'CM', 'MY', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO']
+    hero_order = ['BR', 'CM', 'MY', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX' ]
+
+    FIVESIM_MANUAL_ORDER = ['KG', 'PL', 'CO', 'LV', 'PK', 'TJ', 'KE']
+
 
 
     # Para 5sim, obtener precios reales
@@ -561,7 +564,7 @@ async def get_phone_number(account_country):
     if fivesim_prices:
         fivesim_order = list(fivesim_prices.keys())  # ya ordenado por precio
     else:
-        fivesim_order = hero_order  # fallback al mismo orden
+        fivesim_order = FIVESIM_MANUAL_ORDER    # fallback al orden de 5sim
 
     # Recorrer servicios SMS disponibles
     for service in SMS_SERVICES:
