@@ -990,6 +990,10 @@ async def create_amazon_account(country_code, add_address_flag=True):
                 logger.debug("   ℹ️ No se detectó página de bienvenida, continuando normal")
 
 
+
+                
+            await page.wait_for_timeout(5000)
+
             # ----- PASO 8: Hacer clic en "Hola, identifícate" -----
             logger.debug("👤 Buscando enlace de inicio de sesión...")
             login_selectors = [
