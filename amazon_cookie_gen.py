@@ -51,7 +51,7 @@ FIVESIM_API_KEY = os.getenv('FIVESIM_API_KEY', '')
 WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10'))          # Espera general para elementos
 NAVIGATION_TIMEOUT = int(os.getenv('NAVIGATION_TIMEOUT', '30'))  # Espera de navegación
 ACTION_TIMEOUT = int(os.getenv('ACTION_TIMEOUT', '5'))          # Espera para acciones específicas (clics, llenado)
-MAX_RETRIES = int(os.getenv('MAX_RETRIES', '8'))               # Reintentos globales
+MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2'))               # Reintentos globales
 
 # Opción para reducir calidad de capturas (si se usa)
 SCREENSHOT_QUALITY = int(os.getenv('SCREENSHOT_QUALITY', '30'))  # Calidad JPEG (0-100)
@@ -1328,15 +1328,15 @@ async def create_amazon_account(country_code, add_address_flag=True):
                 else:
                     raise
             
-            # Obtener el código SMS con timeout de 20 segundos y cancelación si no llega
+            # Obtener el código SMS con timeout de 30 segundos y cancelación si no llega
             sms_code = None
             if service_name == 'hero':
-                sms_code = await get_hero_sms_code(service_id, timeout=20)
+                sms_code = await get_hero_sms_code(service_id, timeout=30)
                 if not sms_code:
                     await cancel_hero_sms(service_id)
                     raise Exception("Timeout esperando código SMS de Hero")
             elif service_name == '5sim':
-                sms_code = await get_fivesim_code(service_id, timeout=20)
+                sms_code = await get_fivesim_code(service_id, timeout=30)
                 if not sms_code:
                     await cancel_fivesim(service_id)
                     raise Exception("Timeout esperando código SMS de 5sim")
