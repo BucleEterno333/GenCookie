@@ -294,7 +294,7 @@ def solve_anticaptcha_coordinates(image_path, hint):
         return None
 
 # -------------------------------------------------------------------
-# SMS SERVICES (sin cambios)
+# SMS SERVICES
 # -------------------------------------------------------------------
 FIVESIM_BASE_URL = "https://5sim.net/v1"
 
@@ -525,13 +525,17 @@ async def cancel_hero_sms(activation_id):
 SMS_SERVICES = [
     {'name': 'hero', 'enabled': bool(HERO_SMS_API_KEY), 'get_number': get_hero_sms_number, 'get_code': get_hero_sms_code},
     {'name': '5sim', 'enabled': bool(FIVESIM_API_KEY), 'get_number': get_fivesim_number, 'get_code': get_fivesim_code},
-    
 ]
 
-
-
-async def get_phone_number(account_country):
-
+# ===================================================================
+# FUNCIÓN PRINCIPAL PARA OBTENER NÚMERO (CORREGIDA)
+# ===================================================================
+async def get_phone_number(account_country, force_service=None, force_country=None):
+    """
+    Obtiene un número de teléfono.
+    Si force_service y force_country se proporcionan, intenta solo ese servicio/país.
+    De lo contrario, sigue el orden por precio de cada servicio.
+    """
     # Prefijos para extraer número local (dígitos después del código país)
     prefix_len = {'ID': 2, 'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2,
                   'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}
@@ -552,36 +556,89 @@ async def get_phone_number(account_country):
         'MX': 54,   # México +52 $0.08
     }
 
-    # Orden de países por precio (barato a caro) para Hero (basado en experiencia)
-    hero_order = [ 'CM', 'BR', 'MY', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
+    # Orden de países por precio (barato a caro) para Hero
+    hero_order = ['CM', 'BR', 'MY', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
 
-#   FIVESIM_MANUAL_ORDER = ['KG' no hay, 'PL' compra caro, 'CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
-
+    # Orden manual para 5sim (si no se pueden obtener precios)
     FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
-
-
 
     # Para 5sim, obtener precios reales
     fivesim_prices = await get_fivesim_prices()
     if fivesim_prices:
         fivesim_order = list(fivesim_prices.keys())  # ya ordenado por precio
     else:
-        fivesim_order = FIVESIM_MANUAL_ORDER    # fallback al orden de 5sim
+        fivesim_order = FIVESIM_MANUAL_ORDER
 
-    # Recorrer servicios SMS disponibles
+    # Si se forzó un servicio y país, intentar solo eso
+    if force_service and force_country:
+        logger.debug(f"🔒 Forzando servicio={force_service}, país={force_country}")
+        # Buscar el servicio
+        target_service = None
+        for s in SMS_SERVICES:
+            if s['name'] == force_service and s['enabled']:
+                target_service = s
+                break
+        if not target_service:
+            logger.warning(f"   ❌ Servicio {force_service} no disponible")
+            return None
+
+        try:
+            if force_service == 'hero':
+                country_num = hero_country_map.get(force_country)
+                if not country_num:
+                    logger.debug(f"   No hay mapeo Hero para {force_country}")
+                    return None
+                result = await target_service['get_number'](country_num, service='am')
+                if result:
+                    phone_full, service_id = result
+                    local_len = prefix_len.get(force_country, 0)
+                    if local_len and len(phone_full) > local_len:
+                        phone_local = phone_full[local_len:]
+                        phone_local = re.sub(r'\D', '', phone_local)
+                    else:
+                        phone_local = phone_full
+                    return {
+                        'full': f'+{phone_full}',
+                        'local': phone_local,
+                        'service_id': service_id,
+                        'service_name': force_service,
+                        'purchase_country': force_country
+                    }
+            elif force_service == '5sim':
+                result = await target_service['get_number'](force_country, product='amazon')
+                if result:
+                    phone_full, service_id = result
+                    local_len = prefix_len_plus.get(force_country, 0)
+                    if local_len and len(phone_full) > local_len:
+                        phone_local = phone_full[local_len:]
+                        phone_local = re.sub(r'\D', '', phone_local)
+                    else:
+                        phone_local = phone_full
+                    return {
+                        'full': phone_full,
+                        'local': phone_local,
+                        'service_id': service_id,
+                        'service_name': force_service,
+                        'purchase_country': force_country
+                    }
+        except Exception as e:
+            logger.warning(f"   Error obteniendo número forzado: {e}")
+        return None
+
+    # Si no hay fuerza, recorrer servicios normalmente
     for service in SMS_SERVICES:
         if not service['enabled']:
             continue
         logger.debug(f"Intentando con {service['name']}...")
-        
+
         # Elegir orden de países según servicio
         if service['name'] == '5sim':
             country_order = fivesim_order
         elif service['name'] == 'hero':
             country_order = hero_order
         else:
-            country_order = [account_country]  # fallback, pero no debería ocurrir
-        
+            country_order = [account_country]
+
         for purchase_country in country_order:
             logger.debug(f"   Probando país {purchase_country}...")
             try:
@@ -623,9 +680,8 @@ async def get_phone_number(account_country):
                             'service_name': service['name'],
                             'purchase_country': purchase_country
                         }
-                # Si en el futuro hay otros servicios, manejarlos aquí
+                # Otros servicios (no implementados)
                 else:
-                    # Para otros servicios no definidos, intentar con el país original
                     result = await service['get_number'](account_country, service='amazon')
                     if result:
                         phone_full, service_id = result
@@ -641,10 +697,6 @@ async def get_phone_number(account_country):
                 logger.warning(f"   Error con {service['name']} en {purchase_country}: {e}")
                 continue
     return None
-
-
-
-
 
 async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30):
     for attempt in range(max_retries):
@@ -673,9 +725,6 @@ async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeo
 # -------------------------------------------------------------------
 async def take_screenshot(page, step_name):
     try:
-        # Captura con calidad reducida y formato JPEG si es posible
-        # Nota: playwright no permite calidad directamente, pero podemos convertir después
-        # Para ahorrar ancho de banda, reducimos tamaño de imagen
         screenshot_bytes = await page.screenshot(type='jpeg', quality=SCREENSHOT_QUALITY)
         screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
         logger.debug(f"📸 Screenshot tomado en paso: {step_name} (tamaño: {len(screenshot_bytes)} bytes)")
@@ -683,8 +732,6 @@ async def take_screenshot(page, step_name):
     except Exception as e:
         logger.warning(f"⚠️ Error tomando screenshot en paso {step_name}: {e}")
         return None
-    
-
 
 async def safe_get_content(page, timeout=20):
     """Obtiene el contenido de la página con manejo de errores."""
@@ -698,7 +745,7 @@ async def safe_get_content(page, timeout=20):
         return await page.content()
 
 # -------------------------------------------------------------------
-# FUNCIONES OPTIMIZADAS PARA PLAYWright (con bloqueo de recursos)
+# FUNCIONES OPTIMIZADAS PARA PLAYWRIGHT (con bloqueo de recursos)
 # -------------------------------------------------------------------
 async def block_resources(route):
     """Bloquea solo recursos pesados, deja CSS y JS para funcionalidad."""
@@ -711,7 +758,6 @@ async def block_resources(route):
 async def block_heavy_resources(route):
     """Bloquea todo excepto HTML, JS (para que el DOM funcione)."""
     resource_type = route.request.resource_type
-    # Bloquear imágenes, fuentes, medios y estilos
     if resource_type in ['image', 'font', 'media', 'stylesheet']:
         await route.abort()
     else:
@@ -720,7 +766,6 @@ async def block_heavy_resources(route):
 async def smart_goto(page, url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000):
     start = time.time()
     logger.debug(f"🌐 Navegando a {url} (wait_until={wait_until})")
-    # Aplicar bloqueo de recursos antes de la navegación
     await page.route('**/*', block_resources)
     await page.goto(url, wait_until=wait_until, timeout=timeout)
     elapsed = time.time() - start
@@ -969,18 +1014,12 @@ async def create_amazon_account(country_code, add_address_flag=True):
             logger.debug("   ✅ Contexto y página creados")
 
             # ----- PASO 7: Navegar a la URL base con bloqueo de recursos -----
-            # Después de crear la página
             base_url = base_urls[country_code]
             await page.route('**/*', block_heavy_resources)   # Bloquea CSS temporalmente
-            # Navegación rápida: solo espera la respuesta del servidor
             await page.goto(base_url, wait_until='commit', timeout=NAVIGATION_TIMEOUT*1000)
-            # Espera que aparezca el enlace de login (necesita solo HTML)
             await page.wait_for_selector('a[data-nav-role="signin"]', timeout=WAIT_TIMEOUT*1000*2)
-            # Después de que la página principal esté lista, quita el bloqueo pesado
             await page.unroute('**/*', block_heavy_resources)
-            # Ahora aplica el bloqueo ligero para el resto de la navegación (deja CSS)
             await page.route('**/*', block_resources)
-
 
             # ----- PASO 7.5: Manejar posible página de bienvenida "Continuar a Compras" -----
             logger.debug("🛒 [PASO 7.5] Verificando página de bienvenida o redirección...")
@@ -1007,7 +1046,6 @@ async def create_amazon_account(country_code, add_address_flag=True):
                     continue
             else:
                 logger.debug("   ℹ️ No se detectó página de bienvenida, continuando normal")
-
 
             logger.debug("👤 Buscando enlace de inicio de sesión...")
             selector = 'a[data-nav-role="signin"]'
@@ -1038,34 +1076,33 @@ async def create_amazon_account(country_code, add_address_flag=True):
             max_phone_attempts = 3
             phone_attempt = 1
             phone_success = False
+            current_service = phone_info['service_name']
+            current_country = phone_info['purchase_country']
 
             while phone_attempt <= max_phone_attempts and not phone_success:
-                # Si es el primer intento, ya tenemos número y hemos hecho clic en continuar
                 if phone_attempt == 1:
                     # Verificar si la URL contiene "claim?" (número ya registrado)
                     if "claim?" in page.url.lower():
                         logger.warning(f"⚠️ Número ya registrado (intento {phone_attempt}/{max_phone_attempts}). Intentando cambiar...")
-                        # Buscar y hacer clic en el enlace "Cambiar"
                         change_link = await page.query_selector('#ap_change_login_claim')
                         if change_link:
                             await change_link.click()
                             await page.wait_for_load_state('domcontentloaded')
-                            # Esperar que aparezca de nuevo el campo de teléfono
                             await page.wait_for_selector(phone_field_selector, state='visible', timeout=WAIT_TIMEOUT*1000)
                             # Cancelar la activación anterior
                             if phone_info and service_id:
-                                if service_name_actual == 'hero':
+                                if service_name == 'hero':
                                     await cancel_hero_sms(service_id)
-                                elif service_name_actual == '5sim':
+                                elif service_name == '5sim':
                                     await cancel_fivesim(service_id)
                             # Obtener un nuevo número (mismo servicio/país)
-                            phone_info = await get_phone_number_for(service_name, purchase_country)
+                            phone_info = await get_phone_number(country_code, force_service=current_service, force_country=current_country)
                             if not phone_info:
                                 logger.warning("   ❌ No se pudo obtener otro número, pasando al siguiente intento global.")
                                 raise Exception("No hay números disponibles para este país/servicio")
                             phone_number = phone_info['local']
                             service_id = phone_info['service_id']
-                            service_name_actual = phone_info['service_name']
+                            service_name = phone_info['service_name']
                             purchase_country_used = phone_info['purchase_country']
                             account_data['phone'] = phone_number
                             account_data['purchase_country'] = purchase_country_used
@@ -1075,40 +1112,34 @@ async def create_amazon_account(country_code, add_address_flag=True):
                             for selector in continue_selectors:
                                 if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
                                     break
-                            # Incrementar contador y volver a verificar
                             phone_attempt += 1
                             continue
                         else:
                             logger.warning("   ⚠️ No se encontró enlace para cambiar número")
                             raise Exception("No se pudo cambiar de número")
                     else:
-                        # No hay claim, éxito
                         phone_success = True
                 else:
                     # Intentos posteriores (ya hemos cambiado número)
-                    # Si seguimos en claim, repetimos el proceso
                     if "claim?" in page.url.lower():
                         logger.warning(f"⚠️ Nuevo número también registrado (intento {phone_attempt}/{max_phone_attempts}). Volviendo a cambiar...")
-                        # Hacer clic en "Cambiar" nuevamente
                         change_link = await page.query_selector('#ap_change_login_claim')
                         if change_link:
                             await change_link.click()
                             await page.wait_for_load_state('domcontentloaded')
                             await page.wait_for_selector(phone_field_selector, state='visible', timeout=WAIT_TIMEOUT*1000)
-                            # Cancelar la activación anterior
                             if phone_info and service_id:
-                                if service_name_actual == 'hero':
+                                if service_name == 'hero':
                                     await cancel_hero_sms(service_id)
-                                elif service_name_actual == '5sim':
+                                elif service_name == '5sim':
                                     await cancel_fivesim(service_id)
-                            # Obtener otro número (mismo servicio/país)
-                            phone_info = await get_phone_number_for(service_name, purchase_country)
+                            phone_info = await get_phone_number(country_code, force_service=current_service, force_country=current_country)
                             if not phone_info:
                                 logger.warning("   ❌ No hay más números, pasando al siguiente intento global.")
                                 raise Exception("No hay números disponibles para este país/servicio")
                             phone_number = phone_info['local']
                             service_id = phone_info['service_id']
-                            service_name_actual = phone_info['service_name']
+                            service_name = phone_info['service_name']
                             purchase_country_used = phone_info['purchase_country']
                             account_data['phone'] = phone_number
                             account_data['purchase_country'] = purchase_country_used
@@ -1122,13 +1153,12 @@ async def create_amazon_account(country_code, add_address_flag=True):
                             logger.warning("   ⚠️ No se encontró enlace para cambiar número")
                             raise Exception("No se pudo cambiar de número")
                     else:
-                        # Ya no está en claim, éxito
                         phone_success = True
 
             if not phone_success:
                 raise Exception("Se agotaron los intentos de cambio de número")
 
-
+            await page.wait_for_timeout(4000)
 
             # ----- PASO 11: Página intermedia "Proceder a crear una cuenta" -----
             logger.debug("🔍 Verificando página intermedia...")
@@ -1145,7 +1175,6 @@ async def create_amazon_account(country_code, add_address_flag=True):
                     proceed_clicked = True
                     break
             if proceed_clicked:
-                # Esperar a que aparezca el formulario de registro
                 try:
                     await page.wait_for_selector('#ap_customer_name', state='visible', timeout=WAIT_TIMEOUT*1000)
                     logger.debug("   ✅ Formulario de registro cargado")
@@ -1272,7 +1301,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
                             abs_x = box['x'] + int(point['x'])
                             abs_y = box['y'] + int(point['y'])
                             await page.mouse.click(abs_x, abs_y)
-                            await asyncio.sleep(0.3)  # breve pausa entre clics
+                            await asyncio.sleep(0.3)
                         except Exception as e:
                             logger.warning(f"   ⚠️ Error al hacer clic: {e}")
                 else:
@@ -1286,10 +1315,9 @@ async def create_amazon_account(country_code, add_address_flag=True):
                     await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
                 else:
                     logger.warning("⚠️ No se encontró botón de confirmar")
-                await page.wait_for_timeout(2000)  # pequeña pausa tras confirmar
+                await page.wait_for_timeout(2000)
 
-
-            # ----- PASO 15: Verificación por SMS (con posible redirección a WhatsApp) -----
+            # ----- PASO 15: Verificación por SMS -----
             logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
             await page.wait_for_timeout(5000)
             content = await safe_get_content(page)
@@ -1314,7 +1342,6 @@ async def create_amazon_account(country_code, add_address_flag=True):
                 code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
                 logger.debug("   📱 Página de ingreso de código SMS detectada")
             except Exception as e:
-                # Si no aparece, verificar si hay mensaje de error
                 error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
                 if error_msg:
                     error_text = await error_msg.text_content()
@@ -1327,7 +1354,7 @@ async def create_amazon_account(country_code, add_address_flag=True):
                         raise Exception(f"Error en verificación SMS: {error_text}")
                 else:
                     raise
-            
+
             # Obtener el código SMS con timeout de 30 segundos y cancelación si no llega
             sms_code = None
             if service_name == 'hero':
@@ -1341,12 +1368,10 @@ async def create_amazon_account(country_code, add_address_flag=True):
                     await cancel_fivesim(service_id)
                     raise Exception("Timeout esperando código SMS de 5sim")
             else:
-                # Por si se agregara otro servicio en el futuro
                 sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=1, timeout_per_retry=20)
                 if not sms_code:
                     raise Exception(f"Timeout esperando código SMS de {service_name}")
 
-            # Si llegamos aquí, tenemos código
             if sms_code:
                 code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=ACTION_TIMEOUT*1000)
                 await code_input.fill(sms_code)
@@ -1359,7 +1384,6 @@ async def create_amazon_account(country_code, add_address_flag=True):
                     logger.warning("   ⚠️ No se encontró botón de verificar")
             else:
                 raise Exception("No se pudo obtener código de verificación SMS")
-            
 
             # ----- PASO 16: Verificar éxito -----
             if 'your-account' in page.url.lower() or 'account' in page.url.lower() or 'welcome' in page.url.lower():
@@ -1371,42 +1395,15 @@ async def create_amazon_account(country_code, add_address_flag=True):
                 account_data['cookie_string'] = cookie_string
                 logger.debug(f"   🍪 Cookies obtenidas: {len(cookie_dict)} cookies")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            # ----- PASO 17: Agregar dirección (opcional) -----
+                # ----- PASO 17: Agregar dirección (opcional) -----
                 if add_address_flag:
                     logger.debug("📍 Agregando dirección...")
                     try:
-                        # Desactivar bloqueo de recursos temporalmente (por si el dropdown necesita alguna imagen)
                         await page.unroute('**/*', block_resources)
-                        
-                        # Ir a la página de agregar dirección
                         await smart_goto(page, add_address_urls[country_code], wait_until='domcontentloaded', timeout=20000)
-                        
-                        # Esperar a que aparezca un campo del formulario (calle o nombre)
                         await page.wait_for_selector('#address-ui-widgets-enterAddressLine1, #address-ui-widgets-enterAddressFullName', timeout=15000)
                         last_screenshot = await take_screenshot(page, "add_address_form")
-                        
-                        # Datos de dirección por país (puedes ampliar)
+
                         address_data = {
                             'US': {
                                 'fullName': 'John Doe',
@@ -1424,95 +1421,60 @@ async def create_amazon_account(country_code, add_address_flag=True):
                                 'phone': f"55{random.randint(10000000, 99999999)}"
                             }
                         }
-                        
-                        # --- Configuración del país deseado para la dirección ---
-                        # Por defecto usamos México, pero si quieres cambiar a otro país, ajusta aquí
-                        target_country = 'MX'   # Cambiar a 'US' para Estados Unidos
-                        # Si en el futuro el frontend envía el país, se puede recibir como parámetro
-                        
-                        # --- Selección de país mediante dropdown (solo si el país no es México, o si quieres forzar cambio) ---
-                        # Nota: si el país actual ya es MX y quieres MX, no hace falta cambiar. Solo cambiamos si target_country != country_code
-                        # Pero como la página carga con el país de la cuenta (MX), solo cambiamos si queremos otro país.
+
+                        target_country = 'MX'
                         if target_country != country_code:
                             logger.debug(f"🌎 Cambiando país a {target_country} (desde {country_code})")
-                            
-                            # 1. Abrir el dropdown de país
                             dropdown_btn = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=5000)
                             await dropdown_btn.click()
-                            await page.wait_for_timeout(1000)  # pequeña pausa para que se despliegue
-                            
-                            # 2. Escribir la primera letra del país deseado
-                            #    Para Estados Unidos: "E" (por "Estados Unidos") o "U" (por "United States")
-                            #    Para México: "M"
-                            first_letter = 'E' if target_country == 'US' else 'M'   # ajustar según necesidad
+                            await page.wait_for_timeout(1000)
+                            first_letter = 'E' if target_country == 'US' else 'M'
                             await page.keyboard.type(first_letter)
-                            await page.wait_for_timeout(1000)  # esperar filtrado
-                            
-                            # 3. Hacer clic en una coordenada específica (ajusta según la posición de la primera opción)
-                            #    Puedes usar la función page.mouse.click(x, y)
-                            #    Por ejemplo, x=500, y=300 (coordenadas aproximadas del primer elemento del dropdown)
-                            #    O también puedes esperar a que aparezca un elemento con el texto exacto y hacer clic en él
-                            #    Usamos coordenadas por simplicidad y para evitar problemas con selectores cambiantes
-                            click_x = 500   # ajusta según tu pantalla (valor entre 0 y viewport width)
-                            click_y = 300   # ajusta según tu pantalla (valor entre 0 y viewport height)
+                            await page.wait_for_timeout(1000)
+                            click_x = 500
+                            click_y = 300
                             await page.mouse.click(click_x, click_y)
-                            await page.wait_for_timeout(2000)  # esperar a que se actualice el formulario
+                            await page.wait_for_timeout(2000)
                             logger.debug(f"   ✅ País cambiado a {target_country} mediante coordenadas")
                         else:
                             logger.debug(f"   🇲🇽 Usando país actual {country_code} para dirección")
-                        
-                        # --- Llenar datos según el país seleccionado ---
+
                         if target_country == 'US':
                             data = address_data['US']
-                            # Campos para Estados Unidos
                             await smart_fill(page, '#address-ui-widgets-enterAddressFullName', data['fullName'])
                             await smart_fill(page, '#address-ui-widgets-enterAddressPhoneNumber', data['phone'])
                             await smart_fill(page, '#address-ui-widgets-enterAddressLine1', data['line1'])
-                            
-                            # Ciudad
                             city_input = await page.query_selector('#address-ui-widgets-enterAddressCity-input, #address-ui-widgets-enterAddressCity input')
                             if city_input:
                                 await city_input.fill(data['city'])
                             else:
                                 await smart_fill(page, 'input[aria-label*="Ciudad"]', data['city'])
-                            
-                            # Estado (dropdown)
                             try:
                                 state_dropdown = await page.wait_for_selector('#address-ui-widgets-enterAddressStateOrRegion .a-button, .a-dropdown-button', timeout=5000)
                                 await state_dropdown.click()
                                 await page.wait_for_selector('.a-dropdown-options', state='visible', timeout=5000)
-                                # Aquí podrías usar también la técnica de teclear la primera letra
-                                await page.keyboard.type(data['state'][0])  # escribe la primera letra del estado
+                                await page.keyboard.type(data['state'][0])
                                 await page.wait_for_timeout(500)
-                                # Hacer clic en coordenada (puedes ajustar)
-                                await page.mouse.click(click_x, click_y + 100)  # desplazar un poco hacia abajo
+                                await page.mouse.click(click_x, click_y + 100)
                                 logger.debug(f"   ✅ Estado seleccionado: {data['state']}")
                             except Exception as e:
                                 logger.warning(f"   ⚠️ No se pudo seleccionar estado: {e}")
-                            
-                            # Código postal
                             await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', data['postalCode'])
-                        
-                        else:   # México (por defecto)
+                        else:   # México
                             data = address_data['MX']
-                            # Campos para México
                             await smart_fill(page, '#address-ui-widgets-enterAddressLine1', data['street'])
                             await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', data['postal_code'])
-                            
-                            # Validar código postal
                             validate_btn = await page.wait_for_selector('#address-ui-widgets-enterAddressPostalCode-submit', timeout=5000)
                             if validate_btn:
                                 await validate_btn.click()
                                 await page.wait_for_timeout(3000)
-                            
-                        # --- Envío del formulario (común) ---
+
                         submit_btn = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
                         if submit_btn:
                             await submit_btn.click()
                             await page.wait_for_timeout(3000)
                             error_elem = await page.query_selector('.a-alert-error, .a-alert-warning')
                             if error_elem:
-                                # Segundo clic si hay error
                                 submit_btn2 = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
                                 if submit_btn2:
                                     async with page.expect_navigation(timeout=NAVIGATION_TIMEOUT*1000):
@@ -1524,45 +1486,19 @@ async def create_amazon_account(country_code, add_address_flag=True):
                                 logger.debug("   ✅ Dirección agregada sin error")
                         else:
                             logger.warning("   ⚠️ No se encontró botón de envío")
-                        
-                        # Verificar resultado
+
                         if "addresses" in page.url:
                             account_data['address'] = "Dirección agregada exitosamente"
                             logger.debug("   ✅ Dirección agregada")
                         else:
                             account_data['address'] = f"Redirección inesperada: {page.url}"
-                    
                     except Exception as e:
                         logger.warning(f"⚠️ Error agregando dirección: {e}")
                         account_data['address'] = f"Error: {e}"
                     finally:
-                        # Reactivar bloqueo de recursos
                         await page.route('**/*', block_resources)
                 else:
                     account_data['address'] = "No se agregó dirección"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
                 return account_data, None, last_screenshot
             else:
