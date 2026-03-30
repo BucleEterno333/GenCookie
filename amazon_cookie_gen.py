@@ -1160,29 +1160,51 @@ async def create_amazon_account(country_code, add_address_flag=True):
 
             await page.wait_for_timeout(4000)
 
+
+
+
             # ----- PASO 11: Página intermedia "Proceder a crear una cuenta" -----
             logger.debug("🔍 Verificando página intermedia...")
-            proceed_selectors = [
-                'span#intention-submit-button input.a-button-input',
-                'input[value="Proceder a crear una cuenta"]',
-                'button:has-text("Proceder a crear una cuenta")',
-                'input[value*="Create account"]',
-                'button:has-text("Create account")'
-            ]
-            proceed_clicked = False
-            for selector in proceed_selectors:
-                if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=False):
-                    proceed_clicked = True
-                    break
-            if proceed_clicked:
+
+            # Selector principal (el único que debería aparecer)
+            primary_selector = 'span#intention-submit-button input.a-button-input'
+
+            # Intentar hacer clic en el botón (si existe)
+            clicked = await smart_click(page, primary_selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=False)
+
+            if clicked:
+                # Si se hizo clic, esperar que aparezca el formulario de registro
                 try:
                     await page.wait_for_selector('#ap_customer_name', state='visible', timeout=WAIT_TIMEOUT*1000)
-                    logger.debug("   ✅ Formulario de registro cargado")
+                    logger.debug("   ✅ Formulario de registro cargado después del clic")
                 except Exception as e:
-                    raise Exception(f"Timeout esperando campo de nombre: {e}")
+                    raise Exception(f"Timeout esperando campo de nombre después del clic: {e}")
             else:
-                raise Exception("No se pudo acceder al formulario de registro después de Continuar")
+                # No se encontró el botón, verificar si es error de Amazon
+                logger.debug("   ⚠️ No se encontró el botón 'Proceder a crear una cuenta'")
+                # Obtener el texto de la página (o buscar elementos de error)
+                page_content = await page.content()
+                if "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content or "Lo sentimos, no podemos crear tu cuenta" in page_content:
+                    logger.warning("   ❌ Página de error de Amazon detectada (cuenta no permitida). Terminando intento.")
+                    raise Exception("Amazon bloqueó la creación de cuenta (mensaje 'Lo sentimos')")
+                else:
+                    # No hay error visible, esperar unos segundos a que quizás el formulario aparezca automáticamente
+                    logger.debug("   ℹ️ No se detectó error. Esperando 4 segundos a que el formulario cargue automáticamente...")
+                    await page.wait_for_timeout(4000)
+                    # Verificar si el formulario de registro ya está visible
+                    try:
+                        await page.wait_for_selector('#ap_customer_name', state='visible', timeout=2000)
+                        logger.debug("   ✅ Formulario de registro cargado automáticamente")
+                    except Exception:
+                        # Si después de la espera no aparece, lanzar excepción
+                        raise Exception("No se pudo acceder al formulario de registro después de Continuar")
+
+            # Captura de pantalla
             last_screenshot = await take_screenshot(page, "despues_proceder")
+
+
+
+
 
             # ----- PASO 12: Llenar formulario de registro -----
             logger.debug("📝 Llenando formulario completo...")
