@@ -558,7 +558,7 @@ async def get_phone_number(account_country, force_service=None, force_country=No
 
     # Orden de países por precio (barato a caro) para Hero
     # hero_order = ['CM', 'BR', 'MY', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
-    hero_order = ['MY', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
+    hero_order = [['CM'], ['BR'], ['MY'], ['KZ'], ['ID'], ['MA'], ['KG'], ['CO'], ['MX']]
 
     # Orden manual para 5sim (si no se pueden obtener precios)
     FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
