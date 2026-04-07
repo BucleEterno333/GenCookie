@@ -183,6 +183,27 @@ def get_str(string, start, end, occurrence=1):
 
 import requests
 
+
+def check_user_credits(token, required=3):
+    """Verifica que el usuario tenga al menos 'required' créditos."""
+    db_api_url = "https://p01--basedatos--vwr6mdxp7dhn.code.run/api/user/credits"
+    headers = {'Authorization': f'Bearer {token}'}
+    try:
+        response = requests.get(db_api_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            credits = data.get('credits', 0)
+            if credits >= required:
+                return True, credits
+            else:
+                return False, f"Créditos insuficientes. Tienes {credits}, se requieren {required}."
+        else:
+            return False, f"Error al verificar créditos: {response.status_code}"
+    except Exception as e:
+        return False, f"Error de conexión: {str(e)}"
+
+
+
 def deduct_credits(token, amount=3):
     """Llama a la API de base de datos para descontar créditos del usuario autenticado."""
     db_api_url = "https://p01--basedatos--vwr6mdxp7dhn.code.run/api/user/use-credits"
@@ -1653,10 +1674,10 @@ def generate():
         return '', 200
     if API_KEY:
         auth = request.headers.get('Authorization', '')
-        if not auth.startswith('Bearer ') or auth[7:] != API_KEY:
-            return jsonify({'success': False, 'error': 'No autorizado'}), 401
+    if not auth.startswith('Bearer ') or auth[7:] != API_KEY:
+        return jsonify({'success': False, 'error': 'No autorizado'}), 401
 
-    # Extraer token del usuario (no confundir con API_KEY del servicio)
+    # Extraer token del usuario (del header Authorization)
     auth_header = request.headers.get('Authorization', '')
     user_token = None
     if auth_header.startswith('Bearer '):
@@ -1670,22 +1691,30 @@ def generate():
     if not country:
         return jsonify({'success': False, 'error': 'Falta el parámetro country'}), 400
 
+    # ----- VERIFICACIÓN DE CRÉDITOS (antes de consumir recursos) -----
+    if user_token:
+        ok, msg = check_user_credits(user_token, 3)
+        if not ok:
+            return jsonify({'success': False, 'error': msg}), 402
+    else:
+        # Si no hay token (llamada anónima) podrías rechazar o permitir según tu política
+        return jsonify({'success': False, 'error': 'Se requiere autenticación'}), 401
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         result = loop.run_until_complete(generate_cookie_api(country, add_address))
         if result['success'] and user_token:
-            # Descontar créditos
-            success, new_credits = deduct_credits(user_token, 3)
+            # Descontar créditos después de generar exitosamente
+            success, new_credits = deduct_credits(user_token, 3)  # función que ya tienes
             if not success:
-                # Si no se pudieron descontar, no devolver la cookie (o devolver error)
-                return jsonify({'success': False, 'error': 'No se pudieron descontar créditos. Saldo insuficiente o error de autenticación.'}), 402
-            # Agregar información de créditos restantes a la respuesta (opcional)
-            result['remaining_credits'] = new_credits
+                # Si falla el descuento (raro), igual devolvemos la cookie pero registramos error
+                logger.error("No se pudieron descontar créditos después de generar cookie")
+            else:
+                result['remaining_credits'] = new_credits
         return jsonify(result)
     finally:
         loop.close()
-
 @app.route('/diagnostic', methods=['GET'])
 def diagnostic():
     return jsonify({
