@@ -19,6 +19,7 @@ import argparse
 import base64
 import sys
 import io
+import requests
 from urllib.parse import urljoin, urlencode
 from bs4 import BeautifulSoup
 import requests
@@ -179,6 +180,27 @@ def get_str(string, start, end, occurrence=1):
         return None
     except Exception:
         return None
+
+import requests
+
+def deduct_credits(token, amount=3):
+    """Llama a la API de base de datos para descontar créditos del usuario autenticado."""
+    db_api_url = "https://p01--basedatos--vwr6mdxp7dhn.code.run/api/user/use-credits"
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json'
+    }
+    try:
+        response = requests.post(db_api_url, json={'amount': amount}, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('success', False), data.get('newCredits')
+        else:
+            logger.error(f"Error al descontar créditos: {response.status_code} - {response.text}")
+            return False, None
+    except Exception as e:
+        logger.error(f"Excepción al descontar créditos: {e}")
+        return False, None
 
 # -------------------------------------------------------------------
 # CAPTCHA RESOLUTION (coordenadas) - VERSIÓN HTTP DIRECTA
@@ -1633,6 +1655,13 @@ def generate():
         auth = request.headers.get('Authorization', '')
         if not auth.startswith('Bearer ') or auth[7:] != API_KEY:
             return jsonify({'success': False, 'error': 'No autorizado'}), 401
+
+    # Extraer token del usuario (no confundir con API_KEY del servicio)
+    auth_header = request.headers.get('Authorization', '')
+    user_token = None
+    if auth_header.startswith('Bearer '):
+        user_token = auth_header[7:]
+
     data = request.get_json()
     if not data:
         return jsonify({'success': False, 'error': 'Se requiere JSON'}), 400
@@ -1640,10 +1669,19 @@ def generate():
     add_address = data.get('add_address', True)
     if not country:
         return jsonify({'success': False, 'error': 'Falta el parámetro country'}), 400
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         result = loop.run_until_complete(generate_cookie_api(country, add_address))
+        if result['success'] and user_token:
+            # Descontar créditos
+            success, new_credits = deduct_credits(user_token, 3)
+            if not success:
+                # Si no se pudieron descontar, no devolver la cookie (o devolver error)
+                return jsonify({'success': False, 'error': 'No se pudieron descontar créditos. Saldo insuficiente o error de autenticación.'}), 402
+            # Agregar información de créditos restantes a la respuesta (opcional)
+            result['remaining_credits'] = new_credits
         return jsonify(result)
     finally:
         loop.close()
