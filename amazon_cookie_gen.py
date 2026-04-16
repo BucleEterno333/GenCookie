@@ -1585,7 +1585,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
         except Exception as e:
             logger.error(f"❌ Error en intento {global_attempt}: {e}")
-            if global_attempt == MAX_RETRIES:
+            if global_attempt == retries:
                 if page:
                     last_screenshot = await take_screenshot(page, "error_final")
                 return None, str(e), last_screenshot
