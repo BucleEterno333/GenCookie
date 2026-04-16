@@ -584,10 +584,7 @@ SMS_SERVICES = [
 # ===================================================================
 
 def solve_funcaptcha(page_url, site_key):
-    """Resuelve FunCaptcha (Arkose) usando 2captcha API.
-    Retorna el token de solución o None."""
     if not API_KEY_2CAPTCHA:
-        logger.warning("No hay API key de 2captcha configurada")
         return None
     data = {
         'key': API_KEY_2CAPTCHA,
@@ -598,15 +595,12 @@ def solve_funcaptcha(page_url, site_key):
     }
     try:
         resp = requests.post('http://2captcha.com/in.php', data=data, timeout=30)
-        if resp.status_code != 200:
-            logger.warning(f"Error al enviar FunCaptcha a 2captcha: {resp.status_code}")
-            return None
         result = resp.json()
         if result.get('status') != 1:
-            logger.warning(f"2captcha devolvió error: {result}")
+            logger.warning(f"2captcha error: {result}")
             return None
         captcha_id = result['request']
-        logger.debug(f"   FunCaptcha ID: {captcha_id}, esperando solución...")
+        logger.debug(f"   FunCaptcha ID: {captcha_id}, esperando...")
         start_time = time.time()
         while time.time() - start_time < 120:
             time.sleep(5)
@@ -616,19 +610,16 @@ def solve_funcaptcha(page_url, site_key):
             res_data = res.json()
             if res_data.get('status') == 1:
                 token = res_data['request']
-                logger.debug(f"   ✅ Token FunCaptcha obtenido")
+                logger.debug(f"   ✅ Token obtenido")
                 return token
             elif res_data.get('request') == 'CAPCHA_NOT_READY':
                 continue
             else:
-                logger.warning(f"2captcha respuesta inesperada: {res_data}")
                 break
         return None
     except Exception as e:
         logger.warning(f"Error en solve_funcaptcha: {e}")
         return None
-
-
 
 
 
@@ -774,46 +765,135 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         await page.wait_for_timeout(2000)
         return True
 
-      # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
     title = await page.title()
     if "Confirma tu identidad" in title or "Verify your identity" in title:
-        logger.warning("⚠️ Página de verificación de identidad con FunCaptcha detectada")
-
-        # 2.1 Esperar a que el iframe principal tenga un src (se carga automáticamente)
-        iframe = None
-        for _ in range(15):  # hasta 30 segundos
+        logger.debug("   Página 'Confirma tu identidad' detectada, buscando captcha real...")
+        
+        # Esperar un poco a que se cargue el DOM inicial
+        await page.wait_for_timeout(3000)
+        
+        # Función recursiva para buscar el botón en todos los frames
+        async def find_start_button_in_frames(frame_list):
+            for frame in frame_list:
+                # Buscar en el frame actual
+                try:
+                    btn = await frame.query_selector('button:has-text("Iniciar rompecabezas"), button[aria-label="Iniciar rompecabezas"], button:has-text("Start puzzle")')
+                    if btn:
+                        return frame, btn
+                except:
+                    pass
+                # Buscar en los frames hijos (si los hay)
+                child_frames = frame.child_frames
+                if child_frames:
+                    result = await find_start_button_in_frames(child_frames)
+                    if result:
+                        return result
+            return None, None
+        
+        # Buscar el botón en todos los frames (incluyendo el principal y los iframes)
+        all_frames = page.frames
+        target_frame, start_button = await find_start_button_in_frames(all_frames)
+        
+        if start_button:
+            logger.debug("   ✅ Botón 'Iniciar rompecabezas' encontrado en un frame, haciendo clic...")
+            await start_button.click()
+            await page.wait_for_timeout(3000)
+        else:
+            # No se encontró botón, puede que no haya captcha o que ya esté iniciado
+            # Verificar si el iframe principal ya tiene src
             iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
             if iframe:
                 src = await iframe.get_attribute('src')
-                if src and src != '':
-                    logger.debug("   ✅ Iframe de FunCaptcha cargado correctamente")
+                if src and src != '' and src != 'about:blank':
+                    logger.debug("   ✅ Iframe ya cargado, procediendo a resolver captcha")
+                else:
+                    logger.debug("   ℹ️ No se detectó botón ni iframe cargado, asumiendo que no hay captcha")
+                    return False
+            else:
+                logger.debug("   ℹ️ No se detectó captcha real, continuando...")
+                return False
+        
+        # Esperar a que el iframe principal tenga un src no vacío (hasta 20 segundos)
+        iframe = None
+        for _ in range(10):
+            iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
+            if iframe:
+                src = await iframe.get_attribute('src')
+                if src and src != '' and src != 'about:blank':
+                    logger.debug("   ✅ Iframe principal cargado correctamente")
                     break
             await page.wait_for_timeout(2000)
         else:
             screenshot = await take_screenshot(page, "funcaptcha_iframe_not_loaded")
-            raise Exception(f"El iframe no se cargó. Captura: {screenshot[:100]}...")
-
-        # 2.2 Extraer site_key del atributo data-external-id en el script
+            raise Exception(f"El iframe del captcha no se cargó después del clic. Captura: {screenshot[:100]}...")
+        
+        # Extraer site_key del atributo data-external-id en el HTML principal
         page_content = await page.content()
         import re
         match = re.search(r'"data-external-id":\s*"([^"]+)"', page_content)
         site_key = match.group(1) if match else None
         if not site_key:
-            # Fallback: intentar desde el iframe
+            # Fallback: desde el iframe
             site_key = await iframe.get_attribute('data-external-id')
         if not site_key:
             screenshot = await take_screenshot(page, "funcaptcha_no_sitekey")
             raise Exception(f"No se pudo obtener site_key. Captura: {screenshot[:100]}...")
-
+        
         logger.debug(f"   🔑 Site_key extraído: {site_key}")
-
-        # 2.3 Resolver FunCaptcha con 2captcha
+        
+        # Resolver FunCaptcha con 2captcha
         token = solve_funcaptcha(page.url, site_key)
         if not token:
             screenshot = await take_screenshot(page, "funcaptcha_no_token")
             raise Exception(f"No se obtuvo token de 2captcha. Captura: {screenshot[:100]}...")
-
-        # 2.4 Enviar el token y enviar el formulario
+        
+        # Enviar el token y enviar el formulario
         await page.evaluate(f"""
             document.getElementById('cvf_aamation_response_token').value = '{token}';
             document.getElementById('cvf-aamation-challenge-form').submit();
@@ -822,8 +902,10 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         logger.debug("   ✅ FunCaptcha resuelto y formulario enviado correctamente")
         return True
 
-    logger.debug("   ✅ No se detectó captcha en este paso")
+    # No se detectó captcha
+    logger.debug("   ✅ No se detectó captcha")
     return False
+
 
 
 
@@ -1499,6 +1581,10 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                 raise Exception("Se agotaron los intentos de cambio de número")
 
 
+            
+            # ----- PASO 10.5: Resolver captcha si aparece antes del envío -----
+            await handle_captcha_if_present(page, step_name="pre_submit")
+
 
             # ----- PASO 11: Página intermedia "Proceder a crear una cuenta" -----
             logger.debug("🔍 Verificando página intermedia...")
@@ -1540,8 +1626,6 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             last_screenshot = await take_screenshot(page, "despues_proceder")
 
 
-            # ----- PASO 11.5: Resolver captcha si aparece antes del envío -----
-            await handle_captcha_if_present(page, step_name="pre_submit")
 
 
             # ----- PASO 12: Llenar formulario de registro -----
