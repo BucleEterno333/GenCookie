@@ -1310,7 +1310,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
             # ----- PASO 14: Detectar captcha -----
             logger.debug("🔍 Verificando captcha después del envío...")
-            if await wait_for_text(page, "Resuelve esta adivinanza", timeout=3*1000) or await wait_for_text(page, "Elija todo", timeout=1*1000):
+            if await wait_for_text(page, "Resuelve esta adivinanza", timeout=6*1000) or await wait_for_text(page, "Elija todo", timeout=1*1000):
                 logger.warning("⚠️ Captcha de selección de imágenes detectado")
                 await page.wait_for_timeout(5000)
                 last_screenshot = await take_screenshot(page, "captcha_seleccion")
