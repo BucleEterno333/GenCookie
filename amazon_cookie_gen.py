@@ -629,92 +629,45 @@ def solve_funcaptcha(page_url, site_key):
         return None
 
 
+
+
+
+
+
+
+
+
+
+
 async def handle_captcha_if_present(page, step_name="captcha"):
     """
     Detecta y resuelve captchas de Amazon:
-    - FunCaptcha (Arkose) de la página "Confirma tu identidad"
-    - Captcha de coordenadas (imagen/canvas) tradicional
+    1. Captcha de coordenadas (imagen/canvas) - Prioridad máxima
+    2. FunCaptcha (Arkose) - Solo si el anterior no aparece
     Retorna True si se resolvió, False si no había captcha.
     Lanza excepción si el captcha está presente pero falla la resolución.
     """
     logger.debug(f"🔍 Verificando captcha en paso: {step_name}")
     await page.wait_for_timeout(2000)
 
-    # ---------- 1. Detectar página de FunCaptcha (Arkose) ----------
-    title = await page.title()
-    if "Confirma tu identidad" in title or "Verify your identity" in title:
-        logger.warning("⚠️ Página de verificación de identidad con FunCaptcha detectada")
-
-        # 1.1. Hacer clic en "Iniciar rompecabezas" si aparece
-        start_selectors = [
-            'button:has-text("Iniciar rompecabezas")',
-            'button:has-text("Start puzzle")',
-            'button:has-text("Start")',
-            'input[value="Iniciar rompecabezas"]'
-        ]
-        for sel in start_selectors:
-            try:
-                btn = await page.wait_for_selector(sel, timeout=3000)
-                if btn:
-                    logger.debug("   ✅ Botón 'Iniciar rompecabezas' clickeado")
-                    await btn.click()
-                    await page.wait_for_timeout(2000)
-                    break
-            except:
-                continue
-
-        # 1.2. Esperar a que aparezca el iframe (hasta 20 segundos)
-        iframe = None
-        for _ in range(10):
-            iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
-            if iframe:
-                break
-            await page.wait_for_timeout(2000)
-        if not iframe:
-            # Tomar captura y forzar recarga de la página del captcha
-            screenshot = await take_screenshot(page, "funcaptcha_iframe_not_found")
-            # Intentar recargar la página actual y volver a intentar
-            await page.reload(wait_until='domcontentloaded')
-            await page.wait_for_timeout(3000)
-            iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
-            if not iframe:
-                raise Exception(f"No se encontró el iframe del FunCaptcha después de esperar. Captura: {screenshot[:100]}...")
-
-        logger.debug("   ✅ Iframe de FunCaptcha encontrado")
-
-        # 1.3. Obtener site_key (data-external-id)
-        page_content = await page.content()
-        import re
-        match = re.search(r'"data-external-id":\s*"([^"]+)"', page_content)
-        site_key = match.group(1) if match else None
-        if not site_key:
-            site_key = await iframe.get_attribute('data-external-id')
-        if not site_key:
-            screenshot = await take_screenshot(page, "funcaptcha_no_sitekey")
-            raise Exception(f"No se pudo obtener site_key para FunCaptcha. Captura: {screenshot[:100]}...")
-
-        # 1.4. Resolver con 2captcha
-        token = solve_funcaptcha(page.url, site_key)
-        if not token:
-            screenshot = await take_screenshot(page, "funcaptcha_no_token")
-            raise Exception(f"No se obtuvo token de 2captcha para FunCaptcha. Captura: {screenshot[:100]}...")
-
-        # 1.5. Enviar el token y enviar el formulario
-        await page.evaluate(f"""
-            document.getElementById('cvf_aamation_response_token').value = '{token}';
-            document.getElementById('cvf-aamation-challenge-form').submit();
-        """)
-        await page.wait_for_load_state('domcontentloaded', timeout=30000)
-        logger.debug("   ✅ FunCaptcha resuelto y formulario enviado correctamente")
-        return True
-
-    # ---------- 2. Detectar captcha de coordenadas (viejo) ----------
+    # Obtener el contenido HTML de la página
     content = await page.content()
-    if "Resuelve esta adivinanza para proteger tu cuenta" in content or "Elija todo" in content:
+
+    # ---------- 1. DETECTAR CAPTCHA DE COORDENADAS (PRIORITARIO) ----------
+    # Textos típicos del captcha de coordenadas
+    coordinate_indicators = [
+        "Resuelve esta adivinanza para proteger tu cuenta",
+        "Elija todo",
+        "Selecciona todas las imágenes",
+        "Para proteger tu cuenta"
+    ]
+    is_coordinate = any(indicator in content for indicator in coordinate_indicators)
+
+    if is_coordinate:
         logger.warning("⚠️ Captcha de coordenadas detectado")
         await page.wait_for_timeout(2000)
 
-        # Buscar canvas o imagen del captcha (con espera)
+        # Buscar canvas o imagen del captcha
         canvas_element = None
         img_element = None
         try:
@@ -748,8 +701,26 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 f.write(img_data)
             click_element = img_element
         else:
-            screenshot = await take_screenshot(page, "coordinate_captcha_not_found")
-            raise Exception(f"No se encontró canvas ni imagen para captcha de coordenadas. Captura: {screenshot[:100]}...")
+            # Esperar más tiempo por si el captcha es dinámico
+            await page.wait_for_timeout(5000)
+            canvas_element = await page.query_selector('canvas')
+            img_element = await page.query_selector('img[src*="captcha"]')
+            if canvas_element:
+                screenshot_bytes = await canvas_element.screenshot()
+                img_path = 'temp_canvas_captcha.png'
+                with open(img_path, 'wb') as f:
+                    f.write(screenshot_bytes)
+                click_element = canvas_element
+            elif img_element:
+                img_src = await img_element.get_attribute('src')
+                img_data = requests.get(img_src, timeout=10).content
+                img_path = 'temp_image_captcha.jpg'
+                with open(img_path, 'wb') as f:
+                    f.write(img_data)
+                click_element = img_element
+            else:
+                screenshot = await take_screenshot(page, "coordinate_captcha_not_found")
+                raise Exception(f"No se encontró canvas ni imagen para captcha de coordenadas. Captura: {screenshot[:100]}...")
 
         # Resolver coordenadas con API externa
         hint_text = "Haz clic en todas las imágenes que contengan el objeto indicado"
@@ -790,13 +761,73 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         await page.wait_for_timeout(2000)
         return True
 
+    # ---------- 2. DETECTAR FUNCAPTCHA (ARKOSE) ----------
+    title = await page.title()
+    if "Confirma tu identidad" in title or "Verify your identity" in title:
+        logger.warning("⚠️ Página de verificación de identidad con FunCaptcha detectada")
+
+        # Hacer clic en "Iniciar rompecabezas" si aparece
+        start_selectors = [
+            'button:has-text("Iniciar rompecabezas")',
+            'button:has-text("Start puzzle")',
+            'button:has-text("Start")',
+            'input[value="Iniciar rompecabezas"]'
+        ]
+        for sel in start_selectors:
+            try:
+                btn = await page.wait_for_selector(sel, timeout=3000)
+                if btn:
+                    logger.debug("   ✅ Botón 'Iniciar rompecabezas' clickeado")
+                    await btn.click()
+                    await page.wait_for_timeout(2000)
+                    break
+            except:
+                continue
+
+        # Esperar iframe
+        iframe = None
+        for _ in range(10):
+            iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
+            if iframe:
+                break
+            await page.wait_for_timeout(2000)
+        if not iframe:
+            screenshot = await take_screenshot(page, "funcaptcha_iframe_not_found")
+            await page.reload(wait_until='domcontentloaded')
+            await page.wait_for_timeout(3000)
+            iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
+            if not iframe:
+                raise Exception(f"No se encontró el iframe del FunCaptcha. Captura: {screenshot[:100]}...")
+
+        logger.debug("   ✅ Iframe de FunCaptcha encontrado")
+
+        # Obtener site_key
+        page_content = await page.content()
+        import re
+        match = re.search(r'"data-external-id":\s*"([^"]+)"', page_content)
+        site_key = match.group(1) if match else None
+        if not site_key:
+            site_key = await iframe.get_attribute('data-external-id')
+        if not site_key:
+            screenshot = await take_screenshot(page, "funcaptcha_no_sitekey")
+            raise Exception(f"No se pudo obtener site_key. Captura: {screenshot[:100]}...")
+
+        token = solve_funcaptcha(page.url, site_key)
+        if not token:
+            screenshot = await take_screenshot(page, "funcaptcha_no_token")
+            raise Exception(f"No se obtuvo token de 2captcha. Captura: {screenshot[:100]}...")
+
+        await page.evaluate(f"""
+            document.getElementById('cvf_aamation_response_token').value = '{token}';
+            document.getElementById('cvf-aamation-challenge-form').submit();
+        """)
+        await page.wait_for_load_state('domcontentloaded', timeout=30000)
+        logger.debug("   ✅ FunCaptcha resuelto y enviado")
+        return True
+
     # No se detectó captcha
     logger.debug("   ✅ No se detectó captcha en este paso")
     return False
-
-
-
-
 
 
 
