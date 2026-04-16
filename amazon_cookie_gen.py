@@ -623,51 +623,19 @@ def solve_funcaptcha(page_url, site_key):
 
 
 
-
-
-
-
-
-
-
 async def handle_captcha_if_present(page, step_name="captcha"):
     """
     Detecta y resuelve captchas de Amazon:
-    1. Captcha de coordenadas (imagen/canvas) - Prioridad máxima
-    2. FunCaptcha (Arkose) - Solo si el anterior no aparece
-    Retorna True si se resolvió, False si no había captcha.
-    Lanza excepción si el captcha está presente pero falla la resolución.
+    1. Captcha de coordenadas (imagen/canvas) - basado en texto "Resuelve esta adivinanza" o "Elija todo"
+    2. FunCaptcha (Arkose) - buscando botón "Iniciar rompecabezas" en frames anidados
     """
     logger.debug(f"🔍 Verificando captcha en paso: {step_name}")
     await page.wait_for_timeout(2000)
 
-
-    # Depuración: listar todos los frames
-    frames = page.frames
-    logger.debug(f"📄 Total frames encontrados: {len(frames)}")
-    for i, frame in enumerate(frames):
-        logger.debug(f"   Frame {i}: url={frame.url}, name={frame.name}")
-        # Opcional: obtener el título del frame
-        try:
-            title = await frame.evaluate('document.title')
-            logger.debug(f"       title={title}")
-        except:
-            pass
-
-    # Obtener el contenido HTML de la página
+    # ---------- 1. CAPTCHA DE COORDENADAS ----------
     content = await page.content()
-
-    # ---------- 1. DETECTAR CAPTCHA DE COORDENADAS (PRIORITARIO) ----------
-    # Textos típicos del captcha de coordenadas
-    coordinate_indicators = [
-        "Resuelve esta adivinanza para proteger tu cuenta",
-        "Elija todo",
-        "Selecciona todas las imágenes",
-        "Para proteger tu cuenta"
-    ]
-    is_coordinate = any(indicator in content for indicator in coordinate_indicators)
-
-    if is_coordinate:
+    coordinate_indicators = ["Resuelve esta adivinanza para proteger tu cuenta", "Elija todo", "Selecciona todas las imágenes"]
+    if any(indicator in content for indicator in coordinate_indicators):
         logger.warning("⚠️ Captcha de coordenadas detectado")
         await page.wait_for_timeout(2000)
 
@@ -705,7 +673,7 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 f.write(img_data)
             click_element = img_element
         else:
-            # Esperar más tiempo por si el captcha es dinámico
+            # Esperar más tiempo por si es dinámico
             await page.wait_for_timeout(5000)
             canvas_element = await page.query_selector('canvas')
             img_element = await page.query_selector('img[src*="captcha"]')
@@ -765,88 +733,49 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         await page.wait_for_timeout(2000)
         return True
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-   # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
+    # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
     title = await page.title()
     if "Confirma tu identidad" in title or "Verify your identity" in title:
         logger.debug("   Página 'Confirma tu identidad' detectada, buscando captcha real...")
-        
-        # Esperar un poco a que se cargue el DOM inicial
         await page.wait_for_timeout(3000)
-        
-        # Función recursiva para buscar el botón en todos los frames
+
+        # Función recursiva para buscar el botón "Iniciar rompecabezas" en todos los frames
         async def find_start_button_in_frames(frame_list):
             for frame in frame_list:
                 # Buscar en el frame actual
                 try:
-                    btn = await frame.query_selector('button:has-text("Iniciar rompecabezas"), button[aria-label="Iniciar rompecabezas"], button:has-text("Start puzzle")')
-                    if btn:
-                        return frame, btn
+                    # Selectores amplios para el botón
+                    selectors = [
+                        'button:has-text("Iniciar rompecabezas")',
+                        'button[aria-label="Iniciar rompecabezas"]',
+                        'button:has-text("Start puzzle")',
+                        'button[aria-label="Start puzzle"]',
+                        '.button:has-text("Iniciar rompecabezas")'
+                    ]
+                    for sel in selectors:
+                        btn = await frame.query_selector(sel)
+                        if btn:
+                            return frame, btn
                 except:
                     pass
-                # Buscar en los frames hijos (si los hay)
+                # Buscar en frames hijos
                 child_frames = frame.child_frames
                 if child_frames:
                     result = await find_start_button_in_frames(child_frames)
                     if result:
                         return result
             return None, None
-        
-        # Buscar el botón en todos los frames (incluyendo el principal y los iframes)
+
+        # Buscar en todos los frames de la página
         all_frames = page.frames
         target_frame, start_button = await find_start_button_in_frames(all_frames)
-        
+
         if start_button:
             logger.debug("   ✅ Botón 'Iniciar rompecabezas' encontrado en un frame, haciendo clic...")
             await start_button.click()
             await page.wait_for_timeout(3000)
         else:
-            # No se encontró botón, puede que no haya captcha o que ya esté iniciado
-            # Verificar si el iframe principal ya tiene src
+            # No se encontró el botón, verificar si el iframe principal ya tiene src
             iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
             if iframe:
                 src = await iframe.get_attribute('src')
@@ -858,7 +787,7 @@ async def handle_captcha_if_present(page, step_name="captcha"):
             else:
                 logger.debug("   ℹ️ No se detectó captcha real, continuando...")
                 return False
-        
+
         # Esperar a que el iframe principal tenga un src no vacío (hasta 20 segundos)
         iframe = None
         for _ in range(10):
@@ -872,7 +801,7 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         else:
             screenshot = await take_screenshot(page, "funcaptcha_iframe_not_loaded")
             raise Exception(f"El iframe del captcha no se cargó después del clic. Captura: {screenshot[:100]}...")
-        
+
         # Extraer site_key del atributo data-external-id en el HTML principal
         page_content = await page.content()
         import re
@@ -884,15 +813,15 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         if not site_key:
             screenshot = await take_screenshot(page, "funcaptcha_no_sitekey")
             raise Exception(f"No se pudo obtener site_key. Captura: {screenshot[:100]}...")
-        
+
         logger.debug(f"   🔑 Site_key extraído: {site_key}")
-        
+
         # Resolver FunCaptcha con 2captcha
         token = solve_funcaptcha(page.url, site_key)
         if not token:
             screenshot = await take_screenshot(page, "funcaptcha_no_token")
             raise Exception(f"No se obtuvo token de 2captcha. Captura: {screenshot[:100]}...")
-        
+
         # Enviar el token y enviar el formulario
         await page.evaluate(f"""
             document.getElementById('cvf_aamation_response_token').value = '{token}';
@@ -905,17 +834,6 @@ async def handle_captcha_if_present(page, step_name="captcha"):
     # No se detectó captcha
     logger.debug("   ✅ No se detectó captcha")
     return False
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -1675,6 +1593,32 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
             # ----- PASO 14: Resolver captcha después del envío (si aparece) -----
             await handle_captcha_if_present(page, step_name="post_submit")
+
+
+            # ----- PASO 14.5: Manejar número ya registrado -----
+            logger.debug("📱 Verificando si el número ya está registrado...")
+            content = await safe_get_content(page)
+            if "El número de teléfono móvil ya está en uso" in content or "El número de teléfono móvil ya está registrado" in content:
+                logger.warning("⚠️ El número ya está registrado. Buscando botón 'Continuar con este número'...")
+                # Selectores para el botón
+                continue_selectors = [
+                    'button:has-text("Continuar con este número")',
+                    'input[value="Continuar con este número"]',
+                    'a:has-text("Continuar con este número")',
+                    'button:has-text("Continue with this number")'
+                ]
+                clicked = False
+                for sel in continue_selectors:
+                    if await smart_click(page, sel, timeout=5000, wait_for_navigation=True):
+                        clicked = True
+                        logger.debug("   ✅ Botón 'Continuar con este número' clickeado")
+                        break
+                if not clicked:
+                    logger.warning("   ⚠️ No se encontró el botón, se asume que no es necesario")
+                await page.wait_for_load_state('domcontentloaded', timeout=15000)
+                await page.wait_for_timeout(3000)
+                # Tomar screenshot después del clic
+                last_screenshot = await take_screenshot(page, "despues_continuar_numero_registrado")
 
             # ----- PASO 15: Verificación por SMS -----
             logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
