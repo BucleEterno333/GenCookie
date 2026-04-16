@@ -1175,7 +1175,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             base_url = base_urls[country_code]
             await page.route('**/*', block_heavy_resources)   # Bloquea CSS temporalmente
             await page.goto(base_url, wait_until='commit', timeout=NAVIGATION_TIMEOUT*1000)
-            await page.wait_for_selector('a[data-nav-role="signin"]', timeout=WAIT_TIMEOUT*1000*2)
+            await page.wait_for_selector('a[data-nav-role="signin"]', timeout=WAIT_TIMEOUT*1000*5)
             await page.unroute('**/*', block_heavy_resources)
             await page.route('**/*', block_resources)
 
