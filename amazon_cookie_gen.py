@@ -861,11 +861,13 @@ async def wait_for_text(page, text, timeout=WAIT_TIMEOUT*1000):
 # -------------------------------------------------------------------
 # FUNCIÓN PRINCIPAL DE CREACIÓN DE CUENTA (OPTIMIZADA)
 # -------------------------------------------------------------------
-async def create_amazon_account(country_code, add_address_flag=True):
-    logger.debug(f"🏁 Iniciando creación de cuenta para {country_code}")
+async def create_amazon_account(country_code, add_address_flag=True, max_retries=None):
+      # Si no se pasa max_retries, usar el global
+    retries = max_retries if max_retries is not None else MAX_RETRIES
+    logger.debug(f"🏁 Iniciando creación de cuenta para {country_code} (reintentos: {retries})")
 
-    for global_attempt in range(1, MAX_RETRIES + 1):
-        logger.debug(f"🔄 Intento global {global_attempt}/{MAX_RETRIES}")
+    for global_attempt in range(1, retries + 1):
+        logger.debug(f"🔄 Intento global {global_attempt}/{retries}")
         playwright = None
         browser = None
         context = None
@@ -1616,12 +1618,12 @@ async def create_amazon_account(country_code, add_address_flag=True):
 # -------------------------------------------------------------------
 # FUNCIÓN PARA API
 # -------------------------------------------------------------------
-async def generate_cookie_api(country, add_address=True):
-    logger.debug(f"🚀 generate_cookie_api llamada con country={country}, add_address={add_address}")
+async def generate_cookie_api(country, add_address=True, max_retries=None):
+    logger.debug(f"🚀 generate_cookie_api llamada con country={country}, add_address={add_address}, max_retries={max_retries}")
     try:
         if country not in base_urls:
             return {'success': False, 'error': f'País no soportado: {country}', 'country': country, 'screenshot': None}
-        account_data, error_msg, screenshot = await create_amazon_account(country, add_address_flag=add_address)
+        account_data, error_msg, screenshot = await create_amazon_account(country, add_address_flag=add_address, max_retries=max_retries)
         if account_data:
             return {'success': True, 'data': account_data, 'country': country, 'screenshot': screenshot}
         else:
@@ -1690,6 +1692,7 @@ def generate():
         return jsonify({'success': False, 'error': 'Se requiere JSON'}), 400
     country = data.get('country', '').upper()
     add_address = data.get('add_address', True)
+    max_retries = data.get('max_retries', None)   # Nuevo parámetro opcional
     if not country:
         return jsonify({'success': False, 'error': 'Falta el parámetro country'}), 400
 
@@ -1703,9 +1706,9 @@ def generate():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        result = loop.run_until_complete(generate_cookie_api(country, add_address))
+        result = loop.run_until_complete(generate_cookie_api(country, add_address, max_retries))
         if result['success'] and user_token:
-            success, new_credits = deduct_credits(user_token, 3)
+            success, new_credits = deduct_credits(user_token, 4) # Descontar 4 créditos por la generación de cookie (ajustable)
             if not success:
                 logger.error("No se pudieron descontar créditos después de generar cookie")
             else:
