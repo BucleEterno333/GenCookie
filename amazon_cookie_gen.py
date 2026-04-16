@@ -571,10 +571,23 @@ SMS_SERVICES = [
 ]
 
 
+
+
+
+
+
+
+
+
+# ===================================================================
+# FUNCIONES PARA RESOLVER CAPTCHA (FunCaptcha y coordenadas)
+# ===================================================================
+
 def solve_funcaptcha(page_url, site_key):
     """Resuelve FunCaptcha (Arkose) usando 2captcha API.
     Retorna el token de solución o None."""
     if not API_KEY_2CAPTCHA:
+        logger.warning("No hay API key de 2captcha configurada")
         return None
     data = {
         'key': API_KEY_2CAPTCHA,
@@ -585,26 +598,36 @@ def solve_funcaptcha(page_url, site_key):
     }
     try:
         resp = requests.post('http://2captcha.com/in.php', data=data, timeout=30)
-        if resp.status_code == 200:
-            result = resp.json()
-            if result.get('status') == 1:
-                captcha_id = result['request']
-                start_time = time.time()
-                while time.time() - start_time < 120:
-                    time.sleep(5)
-                    res = requests.get(f'http://2captcha.com/res.php?key={API_KEY_2CAPTCHA}&action=get&id={captcha_id}&json=1', timeout=10)
-                    if res.status_code == 200:
-                        res_data = res.json()
-                        if res_data.get('status') == 1:
-                            return res_data['request']  # token
-                        elif res_data.get('request') == 'CAPCHA_NOT_READY':
-                            continue
-                        else:
-                            break
+        if resp.status_code != 200:
+            logger.warning(f"Error al enviar FunCaptcha a 2captcha: {resp.status_code}")
+            return None
+        result = resp.json()
+        if result.get('status') != 1:
+            logger.warning(f"2captcha devolvió error: {result}")
+            return None
+        captcha_id = result['request']
+        logger.debug(f"   FunCaptcha ID: {captcha_id}, esperando solución...")
+        start_time = time.time()
+        while time.time() - start_time < 120:
+            time.sleep(5)
+            res = requests.get(f'http://2captcha.com/res.php?key={API_KEY_2CAPTCHA}&action=get&id={captcha_id}&json=1', timeout=10)
+            if res.status_code != 200:
+                continue
+            res_data = res.json()
+            if res_data.get('status') == 1:
+                token = res_data['request']
+                logger.debug(f"   ✅ Token FunCaptcha obtenido")
+                return token
+            elif res_data.get('request') == 'CAPCHA_NOT_READY':
+                continue
+            else:
+                logger.warning(f"2captcha respuesta inesperada: {res_data}")
+                break
         return None
     except Exception as e:
         logger.warning(f"Error en solve_funcaptcha: {e}")
         return None
+
 
 async def handle_captcha_if_present(page, step_name="captcha"):
     """
@@ -622,53 +645,65 @@ async def handle_captcha_if_present(page, step_name="captcha"):
     if "Confirma tu identidad" in title or "Verify your identity" in title:
         logger.warning("⚠️ Página de verificación de identidad con FunCaptcha detectada")
 
-        # Esperar activamente a que aparezca el iframe (hasta 15 segundos)
-        try:
-            iframe_element = await page.wait_for_selector(
-                '#cvf-aamation-challenge-iframe',
-                state='attached',
-                timeout=15000
-            )
-            logger.debug("   ✅ Iframe de FunCaptcha encontrado")
-        except Exception as e:
-            # Si no aparece, tomar captura y fallar
-            screenshot = await take_screenshot(page, "funcaptcha_iframe_timeout")
-            raise Exception(f"No se encontró el iframe del FunCaptcha después de esperar. Captura: {screenshot[:100]}...")
+        # 1.1. Hacer clic en "Iniciar rompecabezas" si aparece
+        start_selectors = [
+            'button:has-text("Iniciar rompecabezas")',
+            'button:has-text("Start puzzle")',
+            'button:has-text("Start")',
+            'input[value="Iniciar rompecabezas"]'
+        ]
+        for sel in start_selectors:
+            try:
+                btn = await page.wait_for_selector(sel, timeout=3000)
+                if btn:
+                    logger.debug("   ✅ Botón 'Iniciar rompecabezas' clickeado")
+                    await btn.click()
+                    await page.wait_for_timeout(2000)
+                    break
+            except:
+                continue
 
-        # Obtener el site_key (data-external-id) del HTML de la página principal
+        # 1.2. Esperar a que aparezca el iframe (hasta 20 segundos)
+        iframe = None
+        for _ in range(10):
+            iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
+            if iframe:
+                break
+            await page.wait_for_timeout(2000)
+        if not iframe:
+            # Tomar captura y forzar recarga de la página del captcha
+            screenshot = await take_screenshot(page, "funcaptcha_iframe_not_found")
+            # Intentar recargar la página actual y volver a intentar
+            await page.reload(wait_until='domcontentloaded')
+            await page.wait_for_timeout(3000)
+            iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
+            if not iframe:
+                raise Exception(f"No se encontró el iframe del FunCaptcha después de esperar. Captura: {screenshot[:100]}...")
+
+        logger.debug("   ✅ Iframe de FunCaptcha encontrado")
+
+        # 1.3. Obtener site_key (data-external-id)
         page_content = await page.content()
         import re
         match = re.search(r'"data-external-id":\s*"([^"]+)"', page_content)
-        site_key = None
-        if match:
-            site_key = match.group(1)
-            logger.debug(f"   🔑 Site key extraído del script: {site_key}")
-        else:
-            # Intentar obtenerlo del atributo del iframe
-            site_key = await iframe_element.get_attribute('data-external-id')
-            if site_key:
-                logger.debug(f"   🔑 Site key del iframe: {site_key}")
-
+        site_key = match.group(1) if match else None
+        if not site_key:
+            site_key = await iframe.get_attribute('data-external-id')
         if not site_key:
             screenshot = await take_screenshot(page, "funcaptcha_no_sitekey")
             raise Exception(f"No se pudo obtener site_key para FunCaptcha. Captura: {screenshot[:100]}...")
 
-        # Resolver FunCaptcha con 2captcha
-        page_url = page.url
-        token = solve_funcaptcha(page_url, site_key)
+        # 1.4. Resolver con 2captcha
+        token = solve_funcaptcha(page.url, site_key)
         if not token:
             screenshot = await take_screenshot(page, "funcaptcha_no_token")
             raise Exception(f"No se obtuvo token de 2captcha para FunCaptcha. Captura: {screenshot[:100]}...")
 
-        logger.debug("   ✅ Token FunCaptcha recibido, enviando formulario...")
-
-        # Inyectar el token y enviar el formulario
+        # 1.5. Enviar el token y enviar el formulario
         await page.evaluate(f"""
             document.getElementById('cvf_aamation_response_token').value = '{token}';
             document.getElementById('cvf-aamation-challenge-form').submit();
         """)
-
-        # Esperar a que la página se recargue (debería continuar con el registro)
         await page.wait_for_load_state('domcontentloaded', timeout=30000)
         logger.debug("   ✅ FunCaptcha resuelto y formulario enviado correctamente")
         return True
@@ -758,6 +793,35 @@ async def handle_captcha_if_present(page, step_name="captcha"):
     # No se detectó captcha
     logger.debug("   ✅ No se detectó captcha en este paso")
     return False
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ===================================================================
 # FUNCIÓN PRINCIPAL PARA OBTENER NÚMERO (CORREGIDA)
 # ===================================================================
