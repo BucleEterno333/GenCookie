@@ -733,110 +733,118 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         await page.wait_for_timeout(2000)
         return True
 
-    # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
+        # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
     title = await page.title()
     if "Confirma tu identidad" in title or "Verify your identity" in title:
         logger.debug("   Página 'Confirma tu identidad' detectada, buscando captcha real...")
         await page.wait_for_timeout(3000)
 
-        # Función recursiva para buscar el botón "Iniciar rompecabezas" en todos los frames
-        async def find_start_button_in_frames(frame_list):
-            for frame in frame_list:
-                # Buscar en el frame actual
-                try:
-                    # Selectores amplios para el botón
-                    selectors = [
-                        'button:has-text("Iniciar rompecabezas")',
-                        'button[aria-label="Iniciar rompecabezas"]',
-                        'button:has-text("Start puzzle")',
-                        'button[aria-label="Start puzzle"]',
-                        '.button:has-text("Iniciar rompecabezas")'
-                    ]
-                    for sel in selectors:
-                        btn = await frame.query_selector(sel)
-                        if btn:
-                            return frame, btn
-                except:
-                    pass
-                # Buscar en frames hijos
-                child_frames = frame.child_frames
-                if child_frames:
-                    result = await find_start_button_in_frames(child_frames)
-                    if result:
-                        return result
-            return None, None
-
-        # Buscar en todos los frames de la página
-        all_frames = page.frames
-        target_frame, start_button = await find_start_button_in_frames(all_frames)
-
-        if start_button:
-            logger.debug("   ✅ Botón 'Iniciar rompecabezas' encontrado en un frame, haciendo clic...")
-            await start_button.click()
-            await page.wait_for_timeout(3000)
-        else:
-            # No se encontró el botón, verificar si el iframe principal ya tiene src
-            iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
-            if iframe:
-                src = await iframe.get_attribute('src')
-                if src and src != '' and src != 'about:blank':
-                    logger.debug("   ✅ Iframe ya cargado, procediendo a resolver captcha")
-                else:
-                    logger.debug("   ℹ️ No se detectó botón ni iframe cargado, asumiendo que no hay captcha")
-                    return False
-            else:
-                logger.debug("   ℹ️ No se detectó captcha real, continuando...")
-                return False
-
-        # Esperar a que el iframe principal tenga un src no vacío (hasta 20 segundos)
-        iframe = None
-        for _ in range(10):
-            iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
-            if iframe:
-                src = await iframe.get_attribute('src')
-                if src and src != '' and src != 'about:blank':
-                    logger.debug("   ✅ Iframe principal cargado correctamente")
-                    break
-            await page.wait_for_timeout(2000)
-        else:
-            screenshot = await take_screenshot(page, "funcaptcha_iframe_not_loaded")
-            raise Exception(f"El iframe del captcha no se cargó después del clic. Captura: {screenshot[:100]}...")
-
-        # Extraer site_key del atributo data-external-id en el HTML principal
+        # 2.1 Buscar el site_key directamente en el HTML principal (más fiable)
         page_content = await page.content()
         import re
         match = re.search(r'"data-external-id":\s*"([^"]+)"', page_content)
         site_key = match.group(1) if match else None
         if not site_key:
-            # Fallback: desde el iframe
-            site_key = await iframe.get_attribute('data-external-id')
-        if not site_key:
-            screenshot = await take_screenshot(page, "funcaptcha_no_sitekey")
-            raise Exception(f"No se pudo obtener site_key. Captura: {screenshot[:100]}...")
+            # Buscar en cualquier iframe que tenga data-external-id
+            for frame in page.frames:
+                try:
+                    ext_id = await frame.evaluate('() => document.querySelector("[data-external-id]")?.getAttribute("data-external-id")')
+                    if ext_id:
+                        site_key = ext_id
+                        break
+                except:
+                    pass
+        if site_key:
+            logger.debug(f"   🔑 Site_key encontrado: {site_key}")
+            # Intentar resolver directamente sin hacer clic (2captcha puede hacerlo)
+            token = solve_funcaptcha(page.url, site_key)
+            if token:
+                # Enviar token
+                await page.evaluate(f"""
+                    document.getElementById('cvf_aamation_response_token').value = '{token}';
+                    document.getElementById('cvf-aamation-challenge-form').submit();
+                """)
+                await page.wait_for_load_state('domcontentloaded', timeout=30000)
+                logger.debug("   ✅ FunCaptcha resuelto directamente")
+                return True
+            else:
+                logger.warning("   No se pudo resolver con site_key, intentando con clic en botón...")
+        else:
+            logger.debug("   No se encontró site_key, buscando botón para activar captcha...")
 
-        logger.debug(f"   🔑 Site_key extraído: {site_key}")
+        # 2.2 Buscar el botón "Iniciar rompecabezas" en todos los frames (recursivo)
+        async def find_button_in_frames(frame_list):
+            for frame in frame_list:
+                # Selectores ampliados
+                selectors = [
+                    'button:has-text("Iniciar rompecabezas")',
+                    'button[aria-label="Iniciar rompecabezas"]',
+                    'button:has-text("Start puzzle")',
+                    'button[aria-label="Start puzzle"]',
+                    '.button:has-text("Iniciar rompecabezas")',
+                    'button[data-testid="start-puzzle"]',
+                    '#start-puzzle-button',
+                    'button[class*="start"]'
+                ]
+                for sel in selectors:
+                    try:
+                        btn = await frame.query_selector(sel)
+                        if btn:
+                            return frame, btn
+                    except:
+                        continue
+                # Buscar en sub-frames
+                child_frames = frame.child_frames
+                if child_frames:
+                    result = await find_button_in_frames(child_frames)
+                    if result:
+                        return result
+            return None, None
 
-        # Resolver FunCaptcha con 2captcha
-        token = solve_funcaptcha(page.url, site_key)
-        if not token:
-            screenshot = await take_screenshot(page, "funcaptcha_no_token")
-            raise Exception(f"No se obtuvo token de 2captcha. Captura: {screenshot[:100]}...")
+        target_frame, start_button = await find_button_in_frames(page.frames)
+        
+        if start_button:
+            logger.debug("   ✅ Botón 'Iniciar rompecabezas' encontrado, haciendo clic...")
+            await start_button.click()
+            await page.wait_for_timeout(5000)  # Esperar a que cargue el puzzle
+            
+            # Después del clic, esperar a que el iframe principal tenga src
+            iframe = await page.wait_for_selector('#cvf-aamation-challenge-iframe', timeout=10000)
+            src = await iframe.get_attribute('src')
+            if not src or src == 'about:blank':
+                # Esperar hasta 15 segundos a que se llene el src
+                for _ in range(15):
+                    src = await iframe.get_attribute('src')
+                    if src and src != 'about:blank':
+                        break
+                    await page.wait_for_timeout(1000)
+            
+            # Re-extraer site_key después del clic (puede cambiar)
+            page_content = await page.content()
+            match = re.search(r'"data-external-id":\s*"([^"]+)"', page_content)
+            site_key = match.group(1) if match else None
+            if site_key:
+                token = solve_funcaptcha(page.url, site_key)
+                if token:
+                    await page.evaluate(f"""
+                        document.getElementById('cvf_aamation_response_token').value = '{token}';
+                        document.getElementById('cvf-aamation-challenge-form').submit();
+                    """)
+                    await page.wait_for_load_state('domcontentloaded', timeout=30000)
+                    logger.debug("   ✅ FunCaptcha resuelto tras clic")
+                    return True
+                else:
+                    screenshot = await take_screenshot(page, "funcaptcha_no_token_after_click")
+                    raise Exception(f"No se obtuvo token después del clic. Captura: {screenshot[:100]}...")
+            else:
+                screenshot = await take_screenshot(page, "funcaptcha_no_sitekey_after_click")
+                raise Exception(f"No se encontró site_key después del clic. Captura: {screenshot[:100]}...")
+        else:
+            # No hay botón ni site_key, asumir que no hay captcha real
+            logger.debug("   ℹ️ No se detectó botón ni site_key, asumiendo que no hay captcha")
+            return False
 
-        # Enviar el token y enviar el formulario
-        await page.evaluate(f"""
-            document.getElementById('cvf_aamation_response_token').value = '{token}';
-            document.getElementById('cvf-aamation-challenge-form').submit();
-        """)
-        await page.wait_for_load_state('domcontentloaded', timeout=30000)
-        logger.debug("   ✅ FunCaptcha resuelto y formulario enviado correctamente")
-        return True
-
-    # No se detectó captcha
-    logger.debug("   ✅ No se detectó captcha")
     return False
-
-
-
 
 
 
