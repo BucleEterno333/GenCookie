@@ -1,35 +1,60 @@
-FROM mcr.microsoft.com/playwright/python:v1.48.0-focal
+# Etapa 1: Construir Node.js (si usas frontend)
+FROM node:18-bullseye AS node-builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Etapa 2: Imagen final con Python 3.11 + Node
+FROM python:3.11-slim
+
+# Instalar dependencias del sistema necesarias para Playwright y compilaciones
+RUN apt-get update --fix-missing && \
+    apt-get install -y --no-install-recommends \
+        wget \
+        gnupg \
+        ca-certificates \
+        fonts-liberation \
+        libasound2 \
+        libatk-bridge2.0-0 \
+        libatk1.0-0 \
+        libcups2 \
+        libdbus-1-3 \
+        libdrm2 \
+        libgbm1 \
+        libgtk-3-0 \
+        libnspr4 \
+        libnss3 \
+        libx11-xcb1 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxrandr2 \
+        xdg-utils \
+        libxkbcommon0 \
+        libxshmfence1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Instalar Node.js (necesario si el proyecto usa Node para algo)
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    apt-get install -y nodejs && \
+    apt-get clean
+
+# Copiar node_modules del builder (si aplica)
+COPY --from=node-builder /app/node_modules /app/node_modules
 
 WORKDIR /app
 
-# Desactivar prompts interactivos
-ENV DEBIAN_FRONTEND=noninteractive
+# Copiar requirements primero para aprovechar caché
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Actualizar lista de paquetes con reintentos y mirror alternativo (opcional)
-# También se instala build-essential (incluye gcc/g++ y más herramientas)
-RUN for i in 1 2 3; do \
-        apt-get update --fix-missing && break || sleep 5; \
-    done && \
-    apt-get install -y --no-install-recommends \
-        build-essential \
-        && apt-get clean \
-        && rm -rf /var/lib/apt/lists/*
-
-# Copiar archivo de dependencias de Python
-COPY requirements.txt ./
-
-# Instalar dependencias de Python en una sola capa
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Instalar navegadores de Playwright y dependencias del sistema
+# Instalar navegadores de Playwright
 RUN playwright install chromium && \
     playwright install-deps
 
-# Copiar el código fuente
-COPY amazon_cookie_gen.py .
+# Copiar el resto del código
+COPY . .
 
-# Puerto de la API
-EXPOSE 8080
-
-# Comando de inicio
-CMD ["python", "amazon_cookie_gen.py"]
+# Comando de inicio (ajusta según tu proyecto)
+CMD ["python", "main.py"]
