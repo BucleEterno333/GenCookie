@@ -5,6 +5,9 @@ Amazon Cookie Generator - Versión API REST optimizada para mínimo consumo de p
 - Navegación rápida con domcontentloaded
 - Capturas de pantalla reducidas (opcional)
 - Timeouts ajustables
+- MEJORAS: FunCaptcha con reintentos internos (10 intentos, misma IP)
+- Resolución de FunCaptcha con 2captcha + AntiCaptcha (fallback)
+- Detección de actividad inusual
 """
 
 import os
@@ -580,10 +583,11 @@ SMS_SERVICES = [
 
 
 # ===================================================================
-# FUNCIONES PARA RESOLVER CAPTCHA (FunCaptcha y coordenadas)
+# FUNCIONES PARA RESOLVER CAPTCHA (FunCaptcha y coordenadas) - MEJORADAS
 # ===================================================================
 
-def solve_funcaptcha(page_url, site_key):
+def solve_funcaptcha_2captcha(page_url, site_key, surl=None):
+    """Resuelve FunCaptcha usando 2captcha, con surl opcional."""
     if not API_KEY_2CAPTCHA:
         return None
     data = {
@@ -593,6 +597,8 @@ def solve_funcaptcha(page_url, site_key):
         'pageurl': page_url,
         'json': 1
     }
+    if surl:
+        data['surl'] = surl
     try:
         resp = requests.post('http://2captcha.com/in.php', data=data, timeout=30)
         result = resp.json()
@@ -600,7 +606,7 @@ def solve_funcaptcha(page_url, site_key):
             logger.warning(f"2captcha error: {result}")
             return None
         captcha_id = result['request']
-        logger.debug(f"   FunCaptcha ID: {captcha_id}, esperando...")
+        logger.debug(f"   FunCaptcha ID (2captcha): {captcha_id}, esperando...")
         start_time = time.time()
         while time.time() - start_time < 120:
             time.sleep(5)
@@ -610,7 +616,7 @@ def solve_funcaptcha(page_url, site_key):
             res_data = res.json()
             if res_data.get('status') == 1:
                 token = res_data['request']
-                logger.debug(f"   ✅ Token obtenido")
+                logger.debug(f"   ✅ Token obtenido (2captcha)")
                 return token
             elif res_data.get('request') == 'CAPCHA_NOT_READY':
                 continue
@@ -618,8 +624,41 @@ def solve_funcaptcha(page_url, site_key):
                 break
         return None
     except Exception as e:
-        logger.warning(f"Error en solve_funcaptcha: {e}")
+        logger.warning(f"Error en solve_funcaptcha_2captcha: {e}")
         return None
+
+def solve_funcaptcha_anticaptcha(page_url, site_key, surl=None):
+    """Resuelve FunCaptcha usando AntiCaptcha, con surl opcional."""
+    if not API_KEY_ANTICAPTCHA:
+        return None
+    try:
+        from anticaptchaofficial.funcaptchaproxyon import funcaptchaProxyOn
+        solver = funcaptchaProxyOn()
+        solver.set_verbose(0)
+        solver.set_key(API_KEY_ANTICAPTCHA)
+        solver.set_website_url(page_url)
+        solver.set_website_key(site_key)
+        if surl:
+            solver.set_data('surl', surl)
+        token = solver.solve_and_return_solution()
+        if token:
+            logger.debug(f"   ✅ Token obtenido (AntiCaptcha)")
+            return token
+        else:
+            logger.warning(f"AntiCaptcha error: {solver.error_code}")
+            return None
+    except ImportError:
+        logger.warning("AntiCaptcha library not installed. Install with: pip install anticaptchaofficial")
+        return None
+    except Exception as e:
+        logger.warning(f"Error en solve_funcaptcha_anticaptcha: {e}")
+        return None
+
+# Mantenemos la función original solve_funcaptcha para compatibilidad (pero no se usará)
+def solve_funcaptcha(page_url, site_key):
+    return solve_funcaptcha_2captcha(page_url, site_key)
+
+
 
 
 
@@ -670,6 +709,7 @@ async def handle_captcha_if_present(page, step_name="captcha"):
     Detecta y resuelve captchas de Amazon:
     1. Captcha de coordenadas (imagen/canvas) - con espera larga
     2. FunCaptcha (Arkose) - buscando botón en frames anidados y site_key correcto
+       MEJORA: múltiples estrategias de extracción, intentos con 2captcha y AntiCaptcha
     """
     logger.debug(f"🔍 Verificando captcha en paso: {step_name}")
     await page.wait_for_timeout(3000)  # espera inicial para que cargue todo
@@ -758,32 +798,57 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         await page.wait_for_timeout(2000)
         return True
 
-    # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
+    # ---------- 2. FUNCAPTCHA (ARKOSE) - MEJORADO ----------
     title = await page.title()
     if "Confirma tu identidad" in title or "Verify your identity" in title:
         logger.debug("   Página 'Confirma tu identidad' detectada")
         await page.wait_for_timeout(3000)
 
-        # 2.1 Extraer site_key correcto (debe ser un UUID)
+        # 2.1 Extraer site_key con múltiples estrategias (UUID o alfanumérico)
         page_content = await page.content()
-        import re
-        # Buscar el patrón de UUID en data-external-id
+        site_key = None
+        surl = None
+
+        # Estrategia 1: Buscar UUID en data-external-id
         uuid_match = re.search(r'"data-external-id":\s*"([A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12})"', page_content, re.IGNORECASE)
-        site_key = uuid_match.group(1) if uuid_match else None
+        if uuid_match:
+            site_key = uuid_match.group(1)
+            logger.debug(f"   🔑 Site_key (UUID) encontrado en HTML: {site_key}")
+
+        # Estrategia 2: Buscar cadena alfanumérica larga (20+ caracteres)
         if not site_key:
-            # Buscar en los frames
+            alnum_match = re.search(r'"data-external-id":\s*"([A-Za-z0-9]{20,})"', page_content)
+            if alnum_match:
+                site_key = alnum_match.group(1)
+                logger.debug(f"   🔑 Site_key (alfanumérico) encontrado en HTML: {site_key}")
+
+        # Estrategia 3: Buscar en frames (si no se encontró)
+        if not site_key:
             for frame in page.frames:
                 try:
                     ext_id = await frame.evaluate('() => document.querySelector("[data-external-id]")?.getAttribute("data-external-id")')
-                    if ext_id and re.match(r'[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}', ext_id, re.IGNORECASE):
-                        site_key = ext_id
-                        break
+                    if ext_id:
+                        if re.match(r'[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}', ext_id, re.IGNORECASE) or len(ext_id) >= 20:
+                            site_key = ext_id
+                            logger.debug(f"   🔑 Site_key encontrado en frame: {site_key}")
+                            break
                 except:
                     continue
 
+        # Extraer surl (service URL) si existe
+        surl_match = re.search(r'"data-host-config":\s*"([^"]+)"', page_content)
+        if surl_match:
+            surl = surl_match.group(1)
+            logger.debug(f"   🌐 Surl encontrado: {surl}")
+
+        # Si tenemos site_key, intentar resolver directamente con ambos servicios
         if site_key:
-            logger.debug(f"   🔑 Site_key (UUID) encontrado: {site_key}")
-            token = solve_funcaptcha(page.url, site_key)
+            logger.debug(f"   Intentando resolver FunCaptcha con site_key: {site_key}")
+            # Intentar con 2captcha
+            token = solve_funcaptcha_2captcha(page.url, site_key, surl)
+            if not token and API_KEY_ANTICAPTCHA:
+                logger.debug("   Falló 2captcha, intentando con AntiCaptcha...")
+                token = solve_funcaptcha_anticaptcha(page.url, site_key, surl)
             if token:
                 logger.debug("   ✅ Token obtenido, enviando formulario...")
                 await page.evaluate(f"""
@@ -795,7 +860,7 @@ async def handle_captcha_if_present(page, step_name="captcha"):
             else:
                 logger.warning("   Falló resolución directa, buscando botón...")
         else:
-            logger.debug("   No se encontró site_key UUID, buscando botón...")
+            logger.debug("   No se encontró site_key directamente, buscando botón...")
 
         # 2.2 Buscar botón "Iniciar rompecabezas" en todos los frames (recursivo)
         async def find_button_in_frames(frame_list, depth=0):
@@ -838,26 +903,53 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                         break
                     await page.wait_for_timeout(1000)
 
-            # Re-extraer site_key después del clic
+            # Re-extraer site_key después del clic (puede aparecer ahora)
             page_content = await page.content()
+            site_key = None
+            # Buscar UUID
             uuid_match = re.search(r'"data-external-id":\s*"([A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12})"', page_content, re.IGNORECASE)
-            site_key = uuid_match.group(1) if uuid_match else None
-            if site_key:
-                token = solve_funcaptcha(page.url, site_key)
-                if token:
-                    await page.evaluate(f"""
-                        document.getElementById('cvf_aamation_response_token').value = '{token}';
-                        document.getElementById('cvf-aamation-challenge-form').submit();
-                    """)
-                    await page.wait_for_load_state('domcontentloaded', timeout=30000)
-                    logger.debug("   ✅ FunCaptcha resuelto tras clic")
-                    return True
-                else:
-                    screenshot = await take_screenshot(page, "funcaptcha_no_token_after_click")
-                    raise Exception(f"No se obtuvo token después del clic. Captura: {screenshot[:100]}...")
+            if uuid_match:
+                site_key = uuid_match.group(1)
             else:
+                # Buscar alfanumérico largo
+                alnum_match = re.search(r'"data-external-id":\s*"([A-Za-z0-9]{20,})"', page_content)
+                if alnum_match:
+                    site_key = alnum_match.group(1)
+            # Si no, buscar en atributo del iframe
+            if not site_key:
+                site_key = await iframe.get_attribute('data-external-id')
+            # Si no, buscar en src del iframe (parámetro pk)
+            if not site_key and src:
+                match = re.search(r'[?&]pk=([A-Za-z0-9]{20,})', src)
+                if match:
+                    site_key = match.group(1)
+            # Extraer surl del src si no se tenía
+            if not surl and src:
+                surl_match = re.search(r'surl=([^&]+)', src)
+                if surl_match:
+                    surl = surl_match.group(1)
+                    logger.debug(f"   🌐 Surl extraído del src: {surl}")
+
+            if not site_key:
                 screenshot = await take_screenshot(page, "funcaptcha_no_sitekey_after_click")
-                raise Exception(f"No se encontró site_key después del clic. Captura: {screenshot[:100]}...")
+                raise Exception("FUNCAPTCHA_NO_SITEKEY")
+
+            logger.debug(f"   🔑 Site_key obtenido tras clic: {site_key}")
+            # Intentar resolver con ambos servicios
+            token = solve_funcaptcha_2captcha(page.url, site_key, surl)
+            if not token and API_KEY_ANTICAPTCHA:
+                token = solve_funcaptcha_anticaptcha(page.url, site_key, surl)
+            if token:
+                await page.evaluate(f"""
+                    document.getElementById('cvf_aamation_response_token').value = '{token}';
+                    document.getElementById('cvf-aamation-challenge-form').submit();
+                """)
+                await page.wait_for_load_state('domcontentloaded', timeout=30000)
+                logger.debug("   ✅ FunCaptcha resuelto tras clic")
+                return True
+            else:
+                screenshot = await take_screenshot(page, "funcaptcha_no_token_after_click")
+                raise Exception("FUNCAPTCHA_NO_TOKEN")
         else:
             logger.debug("   ℹ️ No se detectó botón ni site_key válido, asumiendo que no hay captcha")
             return False
@@ -1183,7 +1275,7 @@ async def wait_for_text(page, text, timeout=WAIT_TIMEOUT*1000):
         return False
 
 # -------------------------------------------------------------------
-# FUNCIÓN PRINCIPAL DE CREACIÓN DE CUENTA (OPTIMIZADA)
+# FUNCIÓN PRINCIPAL DE CREACIÓN DE CUENTA (OPTIMIZADA CON REINTENTOS INTERNOS)
 # -------------------------------------------------------------------
 async def create_amazon_account(country_code, add_address_flag=True, max_retries=None):
       # Si no se pasa max_retries, usar el global
@@ -1383,476 +1475,512 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             page = await context.new_page()
             logger.debug("   ✅ Contexto y página creados")
 
-            # ----- PASO 7: Navegar a la URL base con bloqueo de recursos -----
-            base_url = base_urls[country_code]
-            await page.route('**/*', block_heavy_resources)   # Bloquea CSS temporalmente
-            await page.goto(base_url, wait_until='commit', timeout=NAVIGATION_TIMEOUT*1000)
-            await page.wait_for_selector('a[data-nav-role="signin"]', timeout=WAIT_TIMEOUT*1000*5)
-            await page.unroute('**/*', block_heavy_resources)
-            await page.route('**/*', block_resources)
+            # ----- BUCLE DE REINTENTO INTERNO (para FunCaptcha, misma IP, hasta 10 intentos) -----
+            max_internal_retries = 10
+            internal_attempt = 0
+            registration_success = False
+            last_error = None
 
-            # ----- PASO 7.5: Manejar posible página de bienvenida "Continuar a Compras" -----
-            logger.debug("🛒 [PASO 7.5] Verificando página de bienvenida o redirección...")
-            continue_shopping_selectors = [
-                'input[value="Continuar a Compras"]',
-                'button:has-text("Continuar a Compras")',
-                'a:has-text("Continuar a Compras")',
-                'input[value="Continue to Shopping"]',
-                'button:has-text("Continue to Shopping")',
-                'input[value="Seguir comprando"]',
-                'button:has-text("Seguir comprando")'
-            ]
-            for selector in continue_shopping_selectors:
+            while internal_attempt < max_internal_retries and not registration_success:
+                internal_attempt += 1
+                logger.debug(f"🔄 Intento interno {internal_attempt}/{max_internal_retries} (misma IP)")
+
+                if internal_attempt > 1:
+                    # Cerrar página actual y abrir una nueva en el mismo contexto
+                    await page.close()
+                    page = await context.new_page()
+                    await page.route('**/*', block_resources)
+
                 try:
-                    btn = await page.wait_for_selector(selector, state='visible', timeout=200)
-                    if btn:
-                        logger.debug(f"   ✅ Botón de continuar encontrado: {selector}")
-                        await btn.click()
-                        await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
-                        logger.debug("   ✅ Continuar a compras clickeado")
-                        await page.wait_for_timeout(2000)
-                        break
-                except:
-                    continue
-            else:
-                logger.debug("   ℹ️ No se detectó página de bienvenida, continuando normal")
+                    # ----- Aquí comienza el flujo de registro normal (desde paso 7 hasta éxito) -----
+                    # ----- PASO 7: Navegar a la URL base con bloqueo de recursos -----
+                    base_url = base_urls[country_code]
+                    await page.route('**/*', block_heavy_resources)   # Bloquea CSS temporalmente
+                    await page.goto(base_url, wait_until='commit', timeout=NAVIGATION_TIMEOUT*1000)
+                    await page.wait_for_selector('a[data-nav-role="signin"]', timeout=WAIT_TIMEOUT*1000*5)
+                    await page.unroute('**/*', block_heavy_resources)
+                    await page.route('**/*', block_resources)
 
-            logger.debug("👤 Buscando enlace de inicio de sesión...")
-            selector = 'a[data-nav-role="signin"]'
-            if not await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
-                raise Exception("No se encontró enlace de inicio de sesión")
-            last_screenshot = await take_screenshot(page, "after_login_click")
-
-            # ----- PASO 9: Ingresar número de teléfono -----
-            logger.debug("📱 Ingresando número de teléfono...")
-            phone_field_selector = 'input#ap_email, input[name="email"], input[type="email"], input[type="tel"]'
-            if not await smart_fill(page, phone_field_selector, phone_info['full'], timeout=ACTION_TIMEOUT*1000):
-                raise Exception("No se encontró campo para ingresar número de teléfono")
-            last_screenshot = await take_screenshot(page, "phone_llenado")
-
-            # ----- PASO 10: Hacer clic en Continuar -----
-            logger.debug("🖱️ Haciendo clic en Continuar...")
-            continue_selectors = ['input.a-button-input', 'button#continue']
-            continue_clicked = False
-            for selector in continue_selectors:
-                if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
-                    continue_clicked = True
-                    break
-            if not continue_clicked:
-                raise Exception("No se encontró botón Continuar")
-            last_screenshot = await take_screenshot(page, "despues_continuar")
-
-            # ----- PASO 10.5: Manejar números ya registrados (bucle de cambio) -----
-            max_phone_attempts = 3
-            phone_attempt = 1
-            phone_success = False
-            current_service = phone_info['service_name']
-            current_country = phone_info['purchase_country']
-
-            while phone_attempt <= max_phone_attempts and not phone_success:
-                # Verificar si la URL contiene "claim?" (número ya registrado)
-                if "claim?" in page.url.lower():
-                    logger.warning(f"⚠️ Número ya registrado (intento {phone_attempt}/{max_phone_attempts}). Intentando cambiar...")
-                    
-                    # 1. Intentar localizar el enlace "Cambiar" con diferentes selectores
-                    change_link = None
-                    change_selectors = [
-                        '#ap_change_login_claim',                           # ID directo
-                        'a:has-text("Cambiar")',                            # Texto en español
-                        'a:has-text("Change")',                             # Texto en inglés
-                        'a[href*="ap/signin"][href*="prepopulatedLoginId"]' # URL con parámetros
+                    # ----- PASO 7.5: Manejar posible página de bienvenida "Continuar a Compras" -----
+                    logger.debug("🛒 [PASO 7.5] Verificando página de bienvenida o redirección...")
+                    continue_shopping_selectors = [
+                        'input[value="Continuar a Compras"]',
+                        'button:has-text("Continuar a Compras")',
+                        'a:has-text("Continuar a Compras")',
+                        'input[value="Continue to Shopping"]',
+                        'button:has-text("Continue to Shopping")',
+                        'input[value="Seguir comprando"]',
+                        'button:has-text("Seguir comprando")'
                     ]
-                    for sel in change_selectors:
+                    for selector in continue_shopping_selectors:
                         try:
-                            change_link = await page.wait_for_selector(sel, timeout=WAIT_TIMEOUT*1000)
-                            if change_link:
-                                logger.debug(f"   ✅ Enlace 'Cambiar' encontrado con selector: {sel}")
+                            btn = await page.wait_for_selector(selector, state='visible', timeout=200)
+                            if btn:
+                                logger.debug(f"   ✅ Botón de continuar encontrado: {selector}")
+                                await btn.click()
+                                await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
+                                logger.debug("   ✅ Continuar a compras clickeado")
+                                await page.wait_for_timeout(2000)
                                 break
-                        except Exception as e:
-                            logger.debug(f"   ⚠️ Selector {sel} falló: {e}")
+                        except:
                             continue
-                    
-                    # 2. Si no se encontró con los selectores, buscar la URL del enlace en el HTML
-                    if not change_link:
-                        logger.debug("   🔍 No se encontró enlace con selectores, extrayendo URL del HTML...")
-                        page_content = await page.content()
-                        # Buscar el href del enlace con id="ap_change_login_claim"
-                        import re
-                        match = re.search(r'<a\s+id="ap_change_login_claim"[^>]*href="([^"]+)"', page_content)
-                        if match:
-                            change_url = match.group(1).replace('&amp;', '&')
-                            logger.debug(f"   🌐 URL extraída: {change_url}")
-                            # Navegar directamente a esa URL
-                            await page.goto(change_url, wait_until='domcontentloaded')
-                            # Esperar a que aparezca el campo de teléfono
-                            await page.wait_for_selector(phone_field_selector, state='visible', timeout=WAIT_TIMEOUT*1000)
-                            # Indicar que hemos cambiado (no usamos change_link pero el flujo continúa)
-                            change_link = True  # Bandera para indicar que se realizó el cambio
+                    else:
+                        logger.debug("   ℹ️ No se detectó página de bienvenida, continuando normal")
+
+                    logger.debug("👤 Buscando enlace de inicio de sesión...")
+                    selector = 'a[data-nav-role="signin"]'
+                    if not await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
+                        raise Exception("No se encontró enlace de inicio de sesión")
+                    last_screenshot = await take_screenshot(page, "after_login_click")
+
+                    # ----- PASO 9: Ingresar número de teléfono -----
+                    logger.debug("📱 Ingresando número de teléfono...")
+                    phone_field_selector = 'input#ap_email, input[name="email"], input[type="email"], input[type="tel"]'
+                    if not await smart_fill(page, phone_field_selector, phone_info['full'], timeout=ACTION_TIMEOUT*1000):
+                        raise Exception("No se encontró campo para ingresar número de teléfono")
+                    last_screenshot = await take_screenshot(page, "phone_llenado")
+
+                    # ----- PASO 10: Hacer clic en Continuar -----
+                    logger.debug("🖱️ Haciendo clic en Continuar...")
+                    continue_selectors = ['input.a-button-input', 'button#continue']
+                    continue_clicked = False
+                    for selector in continue_selectors:
+                        if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
+                            continue_clicked = True
+                            break
+                    if not continue_clicked:
+                        raise Exception("No se encontró botón Continuar")
+                    last_screenshot = await take_screenshot(page, "despues_continuar")
+
+                    # ----- PASO 10.5: Manejar números ya registrados (bucle de cambio) -----
+                    max_phone_attempts = 3
+                    phone_attempt = 1
+                    phone_success = False
+                    current_service = phone_info['service_name']
+                    current_country = phone_info['purchase_country']
+
+                    while phone_attempt <= max_phone_attempts and not phone_success:
+                        # Verificar si la URL contiene "claim?" (número ya registrado)
+                        if "claim?" in page.url.lower():
+                            logger.warning(f"⚠️ Número ya registrado (intento {phone_attempt}/{max_phone_attempts}). Intentando cambiar...")
+                            
+                            # 1. Intentar localizar el enlace "Cambiar" con diferentes selectores
+                            change_link = None
+                            change_selectors = [
+                                '#ap_change_login_claim',                           # ID directo
+                                'a:has-text("Cambiar")',                            # Texto en español
+                                'a:has-text("Change")',                             # Texto en inglés
+                                'a[href*="ap/signin"][href*="prepopulatedLoginId"]' # URL con parámetros
+                            ]
+                            for sel in change_selectors:
+                                try:
+                                    change_link = await page.wait_for_selector(sel, timeout=WAIT_TIMEOUT*1000)
+                                    if change_link:
+                                        logger.debug(f"   ✅ Enlace 'Cambiar' encontrado con selector: {sel}")
+                                        break
+                                except Exception as e:
+                                    logger.debug(f"   ⚠️ Selector {sel} falló: {e}")
+                                    continue
+                            
+                            # 2. Si no se encontró con los selectores, buscar la URL del enlace en el HTML
+                            if not change_link:
+                                logger.debug("   🔍 No se encontró enlace con selectores, extrayendo URL del HTML...")
+                                page_content = await page.content()
+                                # Buscar el href del enlace con id="ap_change_login_claim"
+                                import re
+                                match = re.search(r'<a\s+id="ap_change_login_claim"[^>]*href="([^"]+)"', page_content)
+                                if match:
+                                    change_url = match.group(1).replace('&amp;', '&')
+                                    logger.debug(f"   🌐 URL extraída: {change_url}")
+                                    # Navegar directamente a esa URL
+                                    await page.goto(change_url, wait_until='domcontentloaded')
+                                    # Esperar a que aparezca el campo de teléfono
+                                    await page.wait_for_selector(phone_field_selector, state='visible', timeout=WAIT_TIMEOUT*1000)
+                                    # Indicar que hemos cambiado (no usamos change_link pero el flujo continúa)
+                                    change_link = True  # Bandera para indicar que se realizó el cambio
+                                else:
+                                    logger.warning("   ❌ No se pudo extraer la URL del enlace 'Cambiar'")
+                                    raise Exception("No se encontró enlace para cambiar número")
+                            
+                            # 3. Si tenemos un enlace (ya sea por selector o por navegación directa)
+                            if change_link:
+                                # Si el enlace se obtuvo por selector, hacer clic normalmente
+                                if hasattr(change_link, 'click'):
+                                    await change_link.click()
+                                    await page.wait_for_load_state('domcontentloaded')
+                                    # Esperar que aparezca de nuevo el campo de teléfono
+                                    await page.wait_for_selector(phone_field_selector, state='visible', timeout=WAIT_TIMEOUT*1000)
+                                # Si ya navegamos directamente, ya estamos en la página correcta
+                                
+                                # Cancelar la activación anterior
+                                if phone_info and service_id:
+                                    if service_name == 'hero':
+                                        await cancel_hero_sms(service_id)
+                                    elif service_name == '5sim':
+                                        await cancel_fivesim(service_id)
+                                
+                                # Obtener un nuevo número (mismo servicio/país)
+                                phone_info = await get_phone_number(country_code, force_service=current_service, force_country=current_country)
+                                if not phone_info:
+                                    logger.warning("   ❌ No se pudo obtener otro número, pasando al siguiente intento global.")
+                                    raise Exception("No hay números disponibles para este país/servicio")
+                                phone_number = phone_info['local']
+                                service_id = phone_info['service_id']
+                                service_name = phone_info['service_name']
+                                purchase_country_used = phone_info['purchase_country']
+                                account_data['phone'] = phone_number
+                                account_data['purchase_country'] = purchase_country_used
+                                
+                                # Rellenar el nuevo número
+                                await smart_fill(page, phone_field_selector, phone_info['full'])
+                                # Hacer clic en continuar nuevamente
+                                continue_clicked = False
+                                for selector in continue_selectors:
+                                    if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
+                                        continue_clicked = True
+                                        break
+                                if not continue_clicked:
+                                    raise Exception("No se encontró botón Continuar después de cambiar número")
+                                
+                                phone_attempt += 1
+                                continue
+                            else:
+                                raise Exception("No se pudo cambiar de número")
                         else:
-                            logger.warning("   ❌ No se pudo extraer la URL del enlace 'Cambiar'")
-                            raise Exception("No se encontró enlace para cambiar número")
+                            phone_success = True
+
+                    if not phone_success:
+                        raise Exception("Se agotaron los intentos de cambio de número")
+
+
                     
-                    # 3. Si tenemos un enlace (ya sea por selector o por navegación directa)
-                    if change_link:
-                        # Si el enlace se obtuvo por selector, hacer clic normalmente
-                        if hasattr(change_link, 'click'):
-                            await change_link.click()
-                            await page.wait_for_load_state('domcontentloaded')
-                            # Esperar que aparezca de nuevo el campo de teléfono
-                            await page.wait_for_selector(phone_field_selector, state='visible', timeout=WAIT_TIMEOUT*1000)
-                        # Si ya navegamos directamente, ya estamos en la página correcta
-                        
-                        # Cancelar la activación anterior
-                        if phone_info and service_id:
-                            if service_name == 'hero':
-                                await cancel_hero_sms(service_id)
-                            elif service_name == '5sim':
-                                await cancel_fivesim(service_id)
-                        
-                        # Obtener un nuevo número (mismo servicio/país)
-                        phone_info = await get_phone_number(country_code, force_service=current_service, force_country=current_country)
-                        if not phone_info:
-                            logger.warning("   ❌ No se pudo obtener otro número, pasando al siguiente intento global.")
-                            raise Exception("No hay números disponibles para este país/servicio")
-                        phone_number = phone_info['local']
-                        service_id = phone_info['service_id']
-                        service_name = phone_info['service_name']
-                        purchase_country_used = phone_info['purchase_country']
-                        account_data['phone'] = phone_number
-                        account_data['purchase_country'] = purchase_country_used
-                        
-                        # Rellenar el nuevo número
-                        await smart_fill(page, phone_field_selector, phone_info['full'])
-                        # Hacer clic en continuar nuevamente
-                        continue_clicked = False
-                        for selector in continue_selectors:
-                            if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
-                                continue_clicked = True
+                    # ----- PASO 10.5: Resolver captcha si aparece antes del envío -----
+                    await handle_captcha_if_present(page, step_name="pre_submit")
+
+
+                    # ----- PASO 11: Página intermedia "Proceder a crear una cuenta" -----
+                    logger.debug("🔍 Verificando página intermedia...")
+
+                    # Selector principal (el único que debería aparecer)
+                    primary_selector = 'span#intention-submit-button input.a-button-input'
+
+                    # Intentar hacer clic en el botón (si existe)
+                    clicked = await smart_click(page, primary_selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=False)
+
+                    if clicked:
+                        # Si se hizo clic, esperar que aparezca el formulario de registro
+                        try:
+                            await page.wait_for_selector('#ap_customer_name', state='visible', timeout=WAIT_TIMEOUT*1000)
+                            logger.debug("   ✅ Formulario de registro cargado después del clic")
+                        except Exception as e:
+                            raise Exception(f"Timeout esperando campo de nombre después del clic: {e}")
+                    else:
+                        # No se encontró el botón, verificar si es error de Amazon
+                        logger.debug("   ⚠️ No se encontró el botón 'Proceder a crear una cuenta'")
+                        # Obtener el texto de la página (o buscar elementos de error)
+                        page_content = await page.content()
+                        if "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content or "Lo sentimos, no podemos crear tu cuenta" in page_content:
+                            logger.warning("   ❌ Página de error de Amazon detectada (cuenta no permitida). Terminando intento.")
+                            raise Exception("Amazon bloqueó la creación de cuenta (mensaje 'Lo sentimos')")
+                        else:
+                            # No hay error visible, esperar unos segundos a que quizás el formulario aparezca automáticamente
+                            logger.debug("   ℹ️ No se detectó error. Esperando 4 segundos a que el formulario cargue automáticamente...")
+                            await page.wait_for_timeout(4000)
+                            # Verificar si el formulario de registro ya está visible
+                            try:
+                                await page.wait_for_selector('#ap_customer_name', state='visible', timeout=2000)
+                                logger.debug("   ✅ Formulario de registro cargado automáticamente")
+                            except Exception:
+                                # Si después de la espera no aparece, lanzar excepción
+                                raise Exception("No se pudo acceder al formulario de registro después de Continuar")
+
+                    # Captura de pantalla
+                    last_screenshot = await take_screenshot(page, "despues_proceder")
+
+                    # ----- PASO 12: Llenar formulario de registro -----
+                    logger.debug("📝 Llenando formulario completo...")
+                    last_screenshot = await take_screenshot(page, "formulario_antes_llenar")
+
+                    # Nombre
+                    name_selectors = ['input#ap_customer_name', 'input[name="customerName"]']
+                    name_filled = False
+                    for sel in name_selectors:
+                        if await smart_fill(page, sel, fullname):
+                            name_filled = True
+                            break
+                    if not name_filled:
+                        logger.warning("⚠️ No se pudo llenar campo de nombre, puede estar precargado")
+
+                    # Contraseña
+                    pwd_selectors = ['input#ap_password', 'input[name="password"]']
+                    pwd_filled = False
+                    for sel in pwd_selectors:
+                        if await smart_fill(page, sel, password):
+                            pwd_filled = True
+                            break
+                    if not pwd_filled:
+                        raise Exception("No se pudo llenar campo de contraseña")
+
+                    # Confirmación
+                    confirm_selectors = ['input#ap_password_check', 'input[name="passwordCheck"]']
+                    for sel in confirm_selectors:
+                        await smart_fill(page, sel, password)
+
+                    # ----- PASO 13: Botón de registro final -----
+                    logger.debug("🎯 Buscando botón de registro final...")
+                    final_btn_selectors = [
+                        'input#continue', 'input.a-button-input', 'button[type="submit"]',
+                        'input[value*="Crear cuenta"]', 'button:has-text("Crear cuenta")',
+                        'input[value*="Create account"]', 'button:has-text("Create account")'
+                    ]
+                    clicked_final = False
+                    for selector in final_btn_selectors:
+                        if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
+                            clicked_final = True
+                            break
+                    if not clicked_final:
+                        logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
+                    last_screenshot = await take_screenshot(page, "despues_registro")
+
+                    # ----- Detectar error de "actividad inusual" justo después del envío -----
+                    await page.wait_for_timeout(3000)
+                    content = await page.content()
+                    if "Detectamos actividad inusual" in content or "no podemos crear una cuenta" in content:
+                        error_msg = "Detectamos actividad inusual y no podemos crear una cuenta."
+                        logger.error(f"❌ {error_msg}")
+                        raise Exception(error_msg)
+
+                    # ----- PASO 14: Resolver captcha después del envío (si aparece) -----
+                    await handle_captcha_if_present(page, step_name="post_submit")
+
+
+                    # ----- PASO 14.5: Manejar número ya registrado -----
+                    logger.debug("📱 Verificando si el número ya está registrado...")
+                    content = await safe_get_content(page)
+                    if "El número de teléfono móvil ya está en uso" in content or "El número de teléfono móvil ya está registrado" in content:
+                        logger.warning("⚠️ El número ya está registrado. Buscando botón 'Continuar con este número'...")
+                        # Selectores para el botón
+                        continue_selectors = [
+                            'button:has-text("Continuar con este número")',
+                            'input[value="Continuar con este número"]',
+                            'a:has-text("Continuar con este número")',
+                            'button:has-text("Continue with this number")'
+                        ]
+                        clicked = False
+                        for sel in continue_selectors:
+                            if await smart_click(page, sel, timeout=5000, wait_for_navigation=True):
+                                clicked = True
+                                logger.debug("   ✅ Botón 'Continuar con este número' clickeado")
                                 break
-                        if not continue_clicked:
-                            raise Exception("No se encontró botón Continuar después de cambiar número")
-                        
-                        phone_attempt += 1
+                        if not clicked:
+                            logger.warning("   ⚠️ No se encontró el botón, se asume que no es necesario")
+                        await page.wait_for_load_state('domcontentloaded', timeout=15000)
+                        await page.wait_for_timeout(3000)
+                        # Tomar screenshot después del clic
+                        last_screenshot = await take_screenshot(page, "despues_continuar_numero_registrado")
+
+                    # ----- PASO 15: Verificación por SMS -----
+                    logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
+                    await page.wait_for_timeout(5000)
+                    content = await safe_get_content(page)
+
+                    if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
+                        logger.warning("⚠️ Página de verificación con WhatsApp detectada, seleccionando SMS...")
+                        sms_option = await page.query_selector('#secondary_channel_button input.a-button-input')
+                        if not sms_option:
+                            sms_option = await page.query_selector('#secondary_channel_button')
+                        if not sms_option:
+                            sms_option = await page.query_selector('xpath=//*[contains(text(), "Enviar código por SMS")]')
+                        if sms_option:
+                            await page.wait_for_timeout(500)
+                            await sms_option.click()
+                            logger.debug("   ✅ Clic en 'Enviar código por SMS'")
+                            await page.wait_for_load_state('load', timeout=15000)
+                        else:
+                            logger.warning("   ⚠️ No se encontró la opción de SMS, puede que ya esté en la página de código")
+
+                    # Esperar el campo de código
+                    try:
+                        code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                        logger.debug("   📱 Página de ingreso de código SMS detectada")
+                    except Exception as e:
+                        error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
+                        if error_msg:
+                            error_text = await error_msg.text_content()
+                            if "Hemos enviado tu OTP" in error_text:
+                                logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
+                                await page.wait_for_timeout(3000)
+                                code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                            else:
+                                logger.error(f"❌ Error en verificación SMS: {error_text}")
+                                raise Exception(f"Error en verificación SMS: {error_text}")
+                        else:
+                            raise
+
+                    # Obtener el código SMS con timeout de 30 segundos y cancelación si no llega
+                    sms_code = None
+                    if service_name == 'hero':
+                        sms_code = await get_hero_sms_code(service_id, timeout=30)
+                        if not sms_code:
+                            await cancel_hero_sms(service_id)
+                            raise Exception("Timeout esperando código SMS de Hero")
+                    elif service_name == '5sim':
+                        sms_code = await get_fivesim_code(service_id, timeout=30)
+                        if not sms_code:
+                            await cancel_fivesim(service_id)
+                            raise Exception("Timeout esperando código SMS de 5sim")
+                    else:
+                        sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=1, timeout_per_retry=20)
+                        if not sms_code:
+                            raise Exception(f"Timeout esperando código SMS de {service_name}")
+
+                    if sms_code:
+                        code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=ACTION_TIMEOUT*1000)
+                        await code_input.fill(sms_code)
+                        logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
+                        verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
+                        if verify_btn:
+                            await verify_btn.click()
+                            await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
+                        else:
+                            logger.warning("   ⚠️ No se encontró botón de verificar")
+                    else:
+                        raise Exception("No se pudo obtener código de verificación SMS")
+
+                    # ----- PASO 16: Verificar éxito -----
+                    if 'your-account' in page.url.lower() or 'account' in page.url.lower() or 'welcome' in page.url.lower():
+                        logger.debug("   ✅ Registro exitoso!")
+                        cookies = await context.cookies()
+                        cookie_dict = {c['name']: c['value'] for c in cookies}
+                        cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
+                        account_data['cookie_dict'] = cookie_dict
+                        account_data['cookie_string'] = cookie_string
+                        logger.debug(f"   🍪 Cookies obtenidas: {len(cookie_dict)} cookies")
+
+                        # ----- PASO 17: Agregar dirección (opcional) -----
+                        if add_address_flag:
+                            logger.debug("📍 Agregando dirección...")
+                            try:
+                                await page.unroute('**/*', block_resources)
+                                await smart_goto(page, add_address_urls[country_code], wait_until='domcontentloaded', timeout=20000)
+                                await page.wait_for_selector('#address-ui-widgets-enterAddressLine1, #address-ui-widgets-enterAddressFullName', timeout=15000)
+                                last_screenshot = await take_screenshot(page, "add_address_form")
+
+                                address_data = {
+                                    'US': {
+                                        'fullName': 'John Doe',
+                                        'phone': f'1{random.randint(1000000000, 9999999999)}',
+                                        'line1': '123 Main Street',
+                                        'city': 'New York',
+                                        'state': 'NY',
+                                        'postalCode': '10001'
+                                    },
+                                    'MX': {
+                                        'street': 'Calzada Ignacio Zaragoza 1584',
+                                        'postal_code': '09100',
+                                        'city': 'Ciudad de México',
+                                        'state': 'CDMX',
+                                        'phone': f"55{random.randint(10000000, 99999999)}"
+                                    }
+                                }
+
+                                target_country = 'MX'
+                                if target_country != country_code:
+                                    logger.debug(f"🌎 Cambiando país a {target_country} (desde {country_code})")
+                                    dropdown_btn = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=5000)
+                                    await dropdown_btn.click()
+                                    await page.wait_for_timeout(1000)
+                                    first_letter = 'E' if target_country == 'US' else 'M'
+                                    await page.keyboard.type(first_letter)
+                                    await page.wait_for_timeout(1000)
+                                    click_x = 500
+                                    click_y = 300
+                                    await page.mouse.click(click_x, click_y)
+                                    await page.wait_for_timeout(2000)
+                                    logger.debug(f"   ✅ País cambiado a {target_country} mediante coordenadas")
+                                else:
+                                    logger.debug(f"   🇲🇽 Usando país actual {country_code} para dirección")
+
+                                if target_country == 'US':
+                                    data = address_data['US']
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressFullName', data['fullName'])
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressPhoneNumber', data['phone'])
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressLine1', data['line1'])
+                                    city_input = await page.query_selector('#address-ui-widgets-enterAddressCity-input, #address-ui-widgets-enterAddressCity input')
+                                    if city_input:
+                                        await city_input.fill(data['city'])
+                                    else:
+                                        await smart_fill(page, 'input[aria-label*="Ciudad"]', data['city'])
+                                    try:
+                                        state_dropdown = await page.wait_for_selector('#address-ui-widgets-enterAddressStateOrRegion .a-button, .a-dropdown-button', timeout=5000)
+                                        await state_dropdown.click()
+                                        await page.wait_for_selector('.a-dropdown-options', state='visible', timeout=5000)
+                                        await page.keyboard.type(data['state'][0])
+                                        await page.wait_for_timeout(500)
+                                        await page.mouse.click(click_x, click_y + 100)
+                                        logger.debug(f"   ✅ Estado seleccionado: {data['state']}")
+                                    except Exception as e:
+                                        logger.warning(f"   ⚠️ No se pudo seleccionar estado: {e}")
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', data['postalCode'])
+                                else:   # México
+                                    data = address_data['MX']
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressLine1', data['street'])
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', data['postal_code'])
+                                    validate_btn = await page.wait_for_selector('#address-ui-widgets-enterAddressPostalCode-submit', timeout=5000)
+                                    if validate_btn:
+                                        await validate_btn.click()
+                                        await page.wait_for_timeout(3000)
+
+                                submit_btn = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
+                                if submit_btn:
+                                    await submit_btn.click()
+                                    await page.wait_for_timeout(3000)
+                                    error_elem = await page.query_selector('.a-alert-error, .a-alert-warning')
+                                    if error_elem:
+                                        submit_btn2 = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
+                                        if submit_btn2:
+                                            async with page.expect_navigation(timeout=NAVIGATION_TIMEOUT*1000):
+                                                await submit_btn2.click()
+                                            logger.debug("   ✅ Segundo clic realizado, navegación detectada")
+                                        else:
+                                            logger.warning("   ⚠️ Botón desapareció después del primer clic")
+                                    else:
+                                        logger.debug("   ✅ Dirección agregada sin error")
+                                else:
+                                    logger.warning("   ⚠️ No se encontró botón de envío")
+
+                                if "addresses" in page.url:
+                                    account_data['address'] = "Dirección agregada exitosamente"
+                                    logger.debug("   ✅ Dirección agregada")
+                                else:
+                                    account_data['address'] = f"Redirección inesperada: {page.url}"
+                            except Exception as e:
+                                logger.warning(f"⚠️ Error agregando dirección: {e}")
+                                account_data['address'] = f"Error: {e}"
+                            finally:
+                                await page.route('**/*', block_resources)
+                        else:
+                            account_data['address'] = "No se agregó dirección"
+
+                        registration_success = True
+                        return account_data, None, last_screenshot
+                    else:
+                        raise Exception(f"Registro fallido, URL: {page.url}")
+
+                except Exception as e:
+                    last_error = e
+                    if "FUNCAPTCHA_NO_SITEKEY" in str(e) or "FUNCAPTCHA_NO_TOKEN" in str(e):
+                        logger.warning(f"Fallo de FunCaptcha (intento interno {internal_attempt}), reiniciando en nueva pestaña...")
                         continue
                     else:
-                        raise Exception("No se pudo cambiar de número")
-                else:
-                    phone_success = True
+                        # Otro error, salir del bucle interno y propagar
+                        raise
 
-            if not phone_success:
-                raise Exception("Se agotaron los intentos de cambio de número")
-
-
-            
-            # ----- PASO 10.5: Resolver captcha si aparece antes del envío -----
-            await handle_captcha_if_present(page, step_name="pre_submit")
-
-
-            # ----- PASO 11: Página intermedia "Proceder a crear una cuenta" -----
-            logger.debug("🔍 Verificando página intermedia...")
-
-            # Selector principal (el único que debería aparecer)
-            primary_selector = 'span#intention-submit-button input.a-button-input'
-
-            # Intentar hacer clic en el botón (si existe)
-            clicked = await smart_click(page, primary_selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=False)
-
-            if clicked:
-                # Si se hizo clic, esperar que aparezca el formulario de registro
-                try:
-                    await page.wait_for_selector('#ap_customer_name', state='visible', timeout=WAIT_TIMEOUT*1000)
-                    logger.debug("   ✅ Formulario de registro cargado después del clic")
-                except Exception as e:
-                    raise Exception(f"Timeout esperando campo de nombre después del clic: {e}")
-            else:
-                # No se encontró el botón, verificar si es error de Amazon
-                logger.debug("   ⚠️ No se encontró el botón 'Proceder a crear una cuenta'")
-                # Obtener el texto de la página (o buscar elementos de error)
-                page_content = await page.content()
-                if "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content or "Lo sentimos, no podemos crear tu cuenta" in page_content:
-                    logger.warning("   ❌ Página de error de Amazon detectada (cuenta no permitida). Terminando intento.")
-                    raise Exception("Amazon bloqueó la creación de cuenta (mensaje 'Lo sentimos')")
-                else:
-                    # No hay error visible, esperar unos segundos a que quizás el formulario aparezca automáticamente
-                    logger.debug("   ℹ️ No se detectó error. Esperando 4 segundos a que el formulario cargue automáticamente...")
-                    await page.wait_for_timeout(4000)
-                    # Verificar si el formulario de registro ya está visible
-                    try:
-                        await page.wait_for_selector('#ap_customer_name', state='visible', timeout=2000)
-                        logger.debug("   ✅ Formulario de registro cargado automáticamente")
-                    except Exception:
-                        # Si después de la espera no aparece, lanzar excepción
-                        raise Exception("No se pudo acceder al formulario de registro después de Continuar")
-
-            # Captura de pantalla
-            last_screenshot = await take_screenshot(page, "despues_proceder")
-
-
-
-
-            # ----- PASO 12: Llenar formulario de registro -----
-            logger.debug("📝 Llenando formulario completo...")
-            last_screenshot = await take_screenshot(page, "formulario_antes_llenar")
-
-            # Nombre
-            name_selectors = ['input#ap_customer_name', 'input[name="customerName"]']
-            name_filled = False
-            for sel in name_selectors:
-                if await smart_fill(page, sel, fullname):
-                    name_filled = True
-                    break
-            if not name_filled:
-                logger.warning("⚠️ No se pudo llenar campo de nombre, puede estar precargado")
-
-            # Contraseña
-            pwd_selectors = ['input#ap_password', 'input[name="password"]']
-            pwd_filled = False
-            for sel in pwd_selectors:
-                if await smart_fill(page, sel, password):
-                    pwd_filled = True
-                    break
-            if not pwd_filled:
-                raise Exception("No se pudo llenar campo de contraseña")
-
-            # Confirmación
-            confirm_selectors = ['input#ap_password_check', 'input[name="passwordCheck"]']
-            for sel in confirm_selectors:
-                await smart_fill(page, sel, password)
-
-            # ----- PASO 13: Botón de registro final -----
-            logger.debug("🎯 Buscando botón de registro final...")
-            final_btn_selectors = [
-                'input#continue', 'input.a-button-input', 'button[type="submit"]',
-                'input[value*="Crear cuenta"]', 'button:has-text("Crear cuenta")',
-                'input[value*="Create account"]', 'button:has-text("Create account")'
-            ]
-            clicked_final = False
-            for selector in final_btn_selectors:
-                if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
-                    clicked_final = True
-                    break
-            if not clicked_final:
-                logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
-            last_screenshot = await take_screenshot(page, "despues_registro")
-
-            # ----- PASO 14: Resolver captcha después del envío (si aparece) -----
-            await handle_captcha_if_present(page, step_name="post_submit")
-
-
-            # ----- PASO 14.5: Manejar número ya registrado -----
-            logger.debug("📱 Verificando si el número ya está registrado...")
-            content = await safe_get_content(page)
-            if "El número de teléfono móvil ya está en uso" in content or "El número de teléfono móvil ya está registrado" in content:
-                logger.warning("⚠️ El número ya está registrado. Buscando botón 'Continuar con este número'...")
-                # Selectores para el botón
-                continue_selectors = [
-                    'button:has-text("Continuar con este número")',
-                    'input[value="Continuar con este número"]',
-                    'a:has-text("Continuar con este número")',
-                    'button:has-text("Continue with this number")'
-                ]
-                clicked = False
-                for sel in continue_selectors:
-                    if await smart_click(page, sel, timeout=5000, wait_for_navigation=True):
-                        clicked = True
-                        logger.debug("   ✅ Botón 'Continuar con este número' clickeado")
-                        break
-                if not clicked:
-                    logger.warning("   ⚠️ No se encontró el botón, se asume que no es necesario")
-                await page.wait_for_load_state('domcontentloaded', timeout=15000)
-                await page.wait_for_timeout(3000)
-                # Tomar screenshot después del clic
-                last_screenshot = await take_screenshot(page, "despues_continuar_numero_registrado")
-
-            # ----- PASO 15: Verificación por SMS -----
-            logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
-            await page.wait_for_timeout(5000)
-            content = await safe_get_content(page)
-
-            if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
-                logger.warning("⚠️ Página de verificación con WhatsApp detectada, seleccionando SMS...")
-                sms_option = await page.query_selector('#secondary_channel_button input.a-button-input')
-                if not sms_option:
-                    sms_option = await page.query_selector('#secondary_channel_button')
-                if not sms_option:
-                    sms_option = await page.query_selector('xpath=//*[contains(text(), "Enviar código por SMS")]')
-                if sms_option:
-                    await page.wait_for_timeout(500)
-                    await sms_option.click()
-                    logger.debug("   ✅ Clic en 'Enviar código por SMS'")
-                    await page.wait_for_load_state('load', timeout=15000)
-                else:
-                    logger.warning("   ⚠️ No se encontró la opción de SMS, puede que ya esté en la página de código")
-
-            # Esperar el campo de código
-            try:
-                code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
-                logger.debug("   📱 Página de ingreso de código SMS detectada")
-            except Exception as e:
-                error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
-                if error_msg:
-                    error_text = await error_msg.text_content()
-                    if "Hemos enviado tu OTP" in error_text:
-                        logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
-                        await page.wait_for_timeout(3000)
-                        code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
-                    else:
-                        logger.error(f"❌ Error en verificación SMS: {error_text}")
-                        raise Exception(f"Error en verificación SMS: {error_text}")
-                else:
-                    raise
-
-            # Obtener el código SMS con timeout de 30 segundos y cancelación si no llega
-            sms_code = None
-            if service_name == 'hero':
-                sms_code = await get_hero_sms_code(service_id, timeout=30)
-                if not sms_code:
-                    await cancel_hero_sms(service_id)
-                    raise Exception("Timeout esperando código SMS de Hero")
-            elif service_name == '5sim':
-                sms_code = await get_fivesim_code(service_id, timeout=30)
-                if not sms_code:
-                    await cancel_fivesim(service_id)
-                    raise Exception("Timeout esperando código SMS de 5sim")
-            else:
-                sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=1, timeout_per_retry=20)
-                if not sms_code:
-                    raise Exception(f"Timeout esperando código SMS de {service_name}")
-
-            if sms_code:
-                code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=ACTION_TIMEOUT*1000)
-                await code_input.fill(sms_code)
-                logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
-                verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
-                if verify_btn:
-                    await verify_btn.click()
-                    await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
-                else:
-                    logger.warning("   ⚠️ No se encontró botón de verificar")
-            else:
-                raise Exception("No se pudo obtener código de verificación SMS")
-
-            # ----- PASO 16: Verificar éxito -----
-            if 'your-account' in page.url.lower() or 'account' in page.url.lower() or 'welcome' in page.url.lower():
-                logger.debug("   ✅ Registro exitoso!")
-                cookies = await context.cookies()
-                cookie_dict = {c['name']: c['value'] for c in cookies}
-                cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
-                account_data['cookie_dict'] = cookie_dict
-                account_data['cookie_string'] = cookie_string
-                logger.debug(f"   🍪 Cookies obtenidas: {len(cookie_dict)} cookies")
-
-                # ----- PASO 17: Agregar dirección (opcional) -----
-                if add_address_flag:
-                    logger.debug("📍 Agregando dirección...")
-                    try:
-                        await page.unroute('**/*', block_resources)
-                        await smart_goto(page, add_address_urls[country_code], wait_until='domcontentloaded', timeout=20000)
-                        await page.wait_for_selector('#address-ui-widgets-enterAddressLine1, #address-ui-widgets-enterAddressFullName', timeout=15000)
-                        last_screenshot = await take_screenshot(page, "add_address_form")
-
-                        address_data = {
-                            'US': {
-                                'fullName': 'John Doe',
-                                'phone': f'1{random.randint(1000000000, 9999999999)}',
-                                'line1': '123 Main Street',
-                                'city': 'New York',
-                                'state': 'NY',
-                                'postalCode': '10001'
-                            },
-                            'MX': {
-                                'street': 'Calzada Ignacio Zaragoza 1584',
-                                'postal_code': '09100',
-                                'city': 'Ciudad de México',
-                                'state': 'CDMX',
-                                'phone': f"55{random.randint(10000000, 99999999)}"
-                            }
-                        }
-
-                        target_country = 'MX'
-                        if target_country != country_code:
-                            logger.debug(f"🌎 Cambiando país a {target_country} (desde {country_code})")
-                            dropdown_btn = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=5000)
-                            await dropdown_btn.click()
-                            await page.wait_for_timeout(1000)
-                            first_letter = 'E' if target_country == 'US' else 'M'
-                            await page.keyboard.type(first_letter)
-                            await page.wait_for_timeout(1000)
-                            click_x = 500
-                            click_y = 300
-                            await page.mouse.click(click_x, click_y)
-                            await page.wait_for_timeout(2000)
-                            logger.debug(f"   ✅ País cambiado a {target_country} mediante coordenadas")
-                        else:
-                            logger.debug(f"   🇲🇽 Usando país actual {country_code} para dirección")
-
-                        if target_country == 'US':
-                            data = address_data['US']
-                            await smart_fill(page, '#address-ui-widgets-enterAddressFullName', data['fullName'])
-                            await smart_fill(page, '#address-ui-widgets-enterAddressPhoneNumber', data['phone'])
-                            await smart_fill(page, '#address-ui-widgets-enterAddressLine1', data['line1'])
-                            city_input = await page.query_selector('#address-ui-widgets-enterAddressCity-input, #address-ui-widgets-enterAddressCity input')
-                            if city_input:
-                                await city_input.fill(data['city'])
-                            else:
-                                await smart_fill(page, 'input[aria-label*="Ciudad"]', data['city'])
-                            try:
-                                state_dropdown = await page.wait_for_selector('#address-ui-widgets-enterAddressStateOrRegion .a-button, .a-dropdown-button', timeout=5000)
-                                await state_dropdown.click()
-                                await page.wait_for_selector('.a-dropdown-options', state='visible', timeout=5000)
-                                await page.keyboard.type(data['state'][0])
-                                await page.wait_for_timeout(500)
-                                await page.mouse.click(click_x, click_y + 100)
-                                logger.debug(f"   ✅ Estado seleccionado: {data['state']}")
-                            except Exception as e:
-                                logger.warning(f"   ⚠️ No se pudo seleccionar estado: {e}")
-                            await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', data['postalCode'])
-                        else:   # México
-                            data = address_data['MX']
-                            await smart_fill(page, '#address-ui-widgets-enterAddressLine1', data['street'])
-                            await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', data['postal_code'])
-                            validate_btn = await page.wait_for_selector('#address-ui-widgets-enterAddressPostalCode-submit', timeout=5000)
-                            if validate_btn:
-                                await validate_btn.click()
-                                await page.wait_for_timeout(3000)
-
-                        submit_btn = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
-                        if submit_btn:
-                            await submit_btn.click()
-                            await page.wait_for_timeout(3000)
-                            error_elem = await page.query_selector('.a-alert-error, .a-alert-warning')
-                            if error_elem:
-                                submit_btn2 = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
-                                if submit_btn2:
-                                    async with page.expect_navigation(timeout=NAVIGATION_TIMEOUT*1000):
-                                        await submit_btn2.click()
-                                    logger.debug("   ✅ Segundo clic realizado, navegación detectada")
-                                else:
-                                    logger.warning("   ⚠️ Botón desapareció después del primer clic")
-                            else:
-                                logger.debug("   ✅ Dirección agregada sin error")
-                        else:
-                            logger.warning("   ⚠️ No se encontró botón de envío")
-
-                        if "addresses" in page.url:
-                            account_data['address'] = "Dirección agregada exitosamente"
-                            logger.debug("   ✅ Dirección agregada")
-                        else:
-                            account_data['address'] = f"Redirección inesperada: {page.url}"
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error agregando dirección: {e}")
-                        account_data['address'] = f"Error: {e}"
-                    finally:
-                        await page.route('**/*', block_resources)
-                else:
-                    account_data['address'] = "No se agregó dirección"
-
-                return account_data, None, last_screenshot
-            else:
-                raise Exception(f"Registro fallido, URL: {page.url}")
+            if not registration_success:
+                raise last_error
 
         except Exception as e:
-            logger.error(f"❌ Error en intento {global_attempt}: {e}")
+            logger.error(f"❌ Error en intento global {global_attempt}: {e}")
             if global_attempt == retries:
                 if page:
                     last_screenshot = await take_screenshot(page, "error_final")
