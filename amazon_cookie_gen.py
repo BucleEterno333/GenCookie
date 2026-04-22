@@ -157,7 +157,7 @@ def is_service_enabled():
     """Consulta el estado del interruptor en CheckerCT."""
     try:
         headers = {'x-api-key': SERVICE_API_KEY}
-        response = requests.get(f"{API_BASE_URL}/api/admin/service-status-for-generator", headers=headers, timeout=5)
+        response = requests.get(f"{API_BASE_URL}/admin/service-status-for-generator", headers=headers, timeout=5)
         if response.status_code == 200:
             data = response.json()
             return data.get('enabled', True)
@@ -205,7 +205,7 @@ import requests
 
 def check_user_credits(token, required=3):
     """Verifica que el usuario tenga al menos 'required' créditos y devuelve su rol."""
-    db_api_url = f"{API_BASE_URL}/api/user/credits"
+    db_api_url = f"{API_BASE_URL}/user/credits"
     headers = {'Authorization': f'Bearer {token}'}
     try:
         response = requests.get(db_api_url, headers=headers, timeout=10)
@@ -224,7 +224,7 @@ def check_user_credits(token, required=3):
 
 def deduct_credits(token, amount=3):
     """Llama a la API de base de datos para descontar créditos del usuario autenticado."""
-    db_api_url = "https://p01--basedatos--vwr6mdxp7dhn.code.run/api/user/use-credits"
+    db_api_url = f"{API_BASE_URL}/user/use-credits"
     headers = {
         'Authorization': f'Bearer {token}',
         'Content-Type': 'application/json'
@@ -2144,7 +2144,7 @@ def generate():
 
     # Verificar créditos si hay token de usuario
     if user_token:
-        ok, msg = check_user_credits(user_token, 4)
+        ok, msg, role = check_user_credits(user_token, 4)
         if not ok:
             return jsonify({'success': False, 'error': msg}), 402
     # Si no hay token, podría ser una llamada desde el bot (que ya descuenta aparte) o desde otro servicio
@@ -2155,10 +2155,8 @@ def generate():
     # Verificar interruptor global (solo si no es admin)
     if role != 'admin':
         enabled = is_service_enabled()
-
-        
-    if not enabled:
-        return jsonify({'success': False, 'error': 'Servicio deshabilitado temporalmente. Contacta al administrador.'}), 503
+        if not enabled:
+            return jsonify({'success': False, 'error': 'Servicio deshabilitado temporalmente. Contacta al administrador.'}), 503
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
