@@ -673,6 +673,17 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         logger.debug("   Página 'Confirma tu identidad' detectada")
         await page.wait_for_timeout(3000)
 
+
+        # Verificar si realmente hay un FunCaptcha (iframe de Arkose o script ACIC)
+        page_content = await page.content()
+        has_arkose = bool(re.search(r'acic\.setupACIC', page_content)) or \
+                     bool(await page.query_selector('#cvf-aamation-challenge-iframe'))
+        
+        if not has_arkose:
+            # No es un FunCaptcha, es probablemente la página de verificación de número (WhatsApp)
+            logger.debug("   No se detectó FunCaptcha real. Asumiendo que es página de verificación SMS/WhatsApp.")
+            return False
+
         # --- Extracción inicial (puede fallar) ---
         site_key, surl = await extract_site_key_robust(page)
         if site_key:
