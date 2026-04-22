@@ -1526,7 +1526,6 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             logger.debug("   ✅ Contexto y página creados")
 
             # ----- BUCLE DE REINTENTO INTERNO (para FunCaptcha, misma IP, hasta 10 intentos) -----
-            max_internal_retries = 10
             internal_attempt = 0
             registration_success = False
             last_error = None
@@ -2068,7 +2067,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
     try:
         if country not in base_urls:
             return {'success': False, 'error': f'País no soportado: {country}', 'country': country, 'screenshot': None}
-        account_data, error_msg, screenshot = await create_amazon_account(country, add_address_flag=add_address, max_retries=max_retries)
+        account_data, error_msg, screenshot = await create_amazon_account(country, add_address_flag=add_address, max_retries=max_retries, max_internal_retries=max_internal_retries)
         if account_data:
             return {'success': True, 'data': account_data, 'country': country, 'screenshot': screenshot}
         else:
@@ -2160,7 +2159,7 @@ def generate():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        result = loop.run_until_complete(generate_cookie_api(country, add_address, max_retries))
+        result = loop.run_until_complete(generate_cookie_api(country, add_address, max_retries, max_internal_retries))
         if result['success'] and user_token:
             success, new_credits = deduct_credits(user_token, 4) # Descontar 4 créditos por la generación de cookie (ajustable)
             if not success:
