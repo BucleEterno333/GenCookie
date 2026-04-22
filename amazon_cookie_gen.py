@@ -636,7 +636,7 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         logger.warning("⚠️ Captcha de coordenadas detectado")
         
         # Bucle para resolver múltiples captchas de coordenadas (si dice "Necesarios: 2", etc.)
-        max_coordinate_rounds = 5  # límite de seguridad
+        max_coordinate_rounds = 8  # límite de seguridad
         for round_num in range(1, max_coordinate_rounds + 1):
             logger.debug(f"   Intento de coordenadas #{round_num}")
             await solve_coordinate_captcha(page, f"{step_name}_coord_{round_num}")
@@ -652,15 +652,14 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 logger.warning("   Se alcanzó el máximo de rondas para captcha de coordenadas")
         return True
 
-    # ---------- 2. FUNCAPTCHA (ARKOSE) - MEJORADO ----------
+        # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
     title = await page.title()
     if "Confirma tu identidad" in title or "Verify your identity" in title:
         logger.debug("   Página 'Confirma tu identidad' detectada")
         await page.wait_for_timeout(3000)
 
-        # --- Extracción robusta de site_key y surl ---
+        # --- Extracción inicial (puede fallar) ---
         site_key, surl = await extract_site_key_robust(page)
-
         if site_key:
             logger.debug(f"   Intentando resolver FunCaptcha con site_key: {site_key}")
             token = solve_funcaptcha_2captcha(page.url, site_key, surl)
@@ -674,30 +673,43 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 await page.wait_for_load_state('domcontentloaded', timeout=30000)
                 return True
             else:
-                logger.warning("   Falló resolución directa, pasando a búsqueda de botón...")
+                logger.warning("   Falló resolución directa, buscando botón...")
         else:
             logger.debug("   No se encontró site_key, buscando botón 'Iniciar rompecabezas'...")
 
-        # --- Buscar botón "Iniciar rompecabezas" con espera mejorada ---
-        button_selectors = [
-            'button:has-text("Iniciar rompecabezas")',
-            'button[aria-label="Iniciar rompecabezas"]',
-            'button:has-text("Start puzzle")',
-            'button[aria-label="Start puzzle"]',
-            '.button:has-text("Iniciar rompecabezas")'
-        ]
+        # --- Función interna para buscar botón en todos los frames ---
+        async def find_button_in_frames(frame_list):
+            for frame in frame_list:
+                for sel in [
+                    'button:has-text("Iniciar rompecabezas")',
+                    'button[aria-label="Iniciar rompecabezas"]',
+                    'button:has-text("Start puzzle")',
+                    'button[aria-label="Start puzzle"]',
+                    '.button:has-text("Iniciar rompecabezas")'
+                ]:
+                    try:
+                        btn = await frame.query_selector(sel)
+                        if btn:
+                            return frame, btn
+                    except:
+                        continue
+                if frame.child_frames:
+                    res = await find_button_in_frames(frame.child_frames)
+                    if res:
+                        return res
+            return None, None
+
+        # --- Buscar botón con espera activa (hasta 20 segundos) ---
         start_button = None
-        for sel in button_selectors:
-            try:
-                start_button = await page.wait_for_selector(sel, timeout=10000)
-                if start_button:
-                    logger.debug(f"   Botón 'Iniciar rompecabezas' encontrado con selector: {sel}")
-                    break
-            except:
-                continue
+        target_frame = None
+        for _ in range(20):
+            target_frame, start_button = await find_button_in_frames(page.frames)
+            if start_button:
+                break
+            await page.wait_for_timeout(1000)
 
         if start_button:
-            logger.debug("   Haciendo clic en el botón...")
+            logger.debug("   ✅ Botón 'Iniciar rompecabezas' encontrado, haciendo clic...")
             await start_button.click()
             await page.wait_for_timeout(5000)
 
@@ -711,7 +723,7 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                         break
                     await page.wait_for_timeout(1000)
 
-            # Re-extraer site_key después del clic
+            # Re‑extraer site_key después del clic
             site_key, surl = await extract_site_key_robust(page)
             if not site_key:
                 # Intentar extraer del iframe directamente
@@ -725,7 +737,7 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 screenshot = await take_screenshot(page, "funcaptcha_no_sitekey_after_click")
                 raise Exception("FUNCAPTCHA_NO_SITEKEY")
 
-            logger.debug(f"   Site_key obtenido tras clic: {site_key}")
+            logger.debug(f"   🔑 Site_key obtenido tras clic: {site_key}")
             token = solve_funcaptcha_2captcha(page.url, site_key, surl)
             if not token and API_KEY_ANTICAPTCHA:
                 token = solve_funcaptcha_anticaptcha(page.url, site_key, surl)
@@ -741,25 +753,9 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 screenshot = await take_screenshot(page, "funcaptcha_no_token_after_click")
                 raise Exception("FUNCAPTCHA_NO_TOKEN")
         else:
-            # Si no hay botón y tampoco site_key, puede que el captcha ya esté activo sin botón
-            # Forzamos una espera adicional y volvemos a extraer site_key
-            logger.debug("   No se encontró botón. Esperando 5 segundos y reintentando extracción...")
-            await page.wait_for_timeout(5000)
-            site_key, surl = await extract_site_key_robust(page)
-            if site_key:
-                logger.debug(f"   Site_key encontrado tras espera: {site_key}")
-                token = solve_funcaptcha_2captcha(page.url, site_key, surl)
-                if not token and API_KEY_ANTICAPTCHA:
-                    token = solve_funcaptcha_anticaptcha(page.url, site_key, surl)
-                if token:
-                    await page.evaluate(f"""
-                        document.getElementById('cvf_aamation_response_token').value = '{token}';
-                        document.getElementById('cvf-aamation-challenge-form').submit();
-                    """)
-                    await page.wait_for_load_state('domcontentloaded', timeout=30000)
-                    return True
-            logger.warning("   No se detectó botón ni site_key después de espera. Lanzando excepción para reintentar.")
-            screenshot = await take_screenshot(page, "funcaptcha_not_detected")
+            # No se encontró botón en 20 segundos
+            logger.warning("   ❌ No se encontró botón 'Iniciar rompecabezas' después de 20 segundos. Lanzando excepción.")
+            screenshot = await take_screenshot(page, "funcaptcha_button_not_found")
             raise Exception("FUNCAPTCHA_NOT_DETECTED")
 
     return False
@@ -1316,7 +1312,7 @@ async def wait_for_text(page, text, timeout=WAIT_TIMEOUT*1000):
 # -------------------------------------------------------------------
 # FUNCIÓN PRINCIPAL DE CREACIÓN DE CUENTA (OPTIMIZADA CON REINTENTOS INTERNOS)
 # -------------------------------------------------------------------
-async def create_amazon_account(country_code, add_address_flag=True, max_retries=None):
+async def create_amazon_account(country_code, add_address_flag=True, max_retries=None, max_internal_retries=10):
       # Si no se pasa max_retries, usar el global
     retries = max_retries if max_retries is not None else MAX_RETRIES
     logger.debug(f"🏁 Iniciando creación de cuenta para {country_code} (reintentos: {retries})")
@@ -2052,7 +2048,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 # -------------------------------------------------------------------
 # FUNCIÓN PARA API
 # -------------------------------------------------------------------
-async def generate_cookie_api(country, add_address=True, max_retries=None):
+async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10):
     logger.debug(f"🚀 generate_cookie_api llamada con country={country}, add_address={add_address}, max_retries={max_retries}")
     try:
         if country not in base_urls:
@@ -2127,6 +2123,7 @@ def generate():
     country = data.get('country', '').upper()
     add_address = data.get('add_address', True)
     max_retries = data.get('max_retries', None)   # Nuevo parámetro opcional
+    max_internal_retries = data.get('max_internal_retries', 10)   # nuevo parámetro
     if not country:
         return jsonify({'success': False, 'error': 'Falta el parámetro country'}), 400
 
