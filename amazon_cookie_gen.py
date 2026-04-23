@@ -683,20 +683,15 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 screenshot = await take_screenshot(page, "coordinate_captcha_max_rounds")
                 raise Exception("COORDINATE_CAPTCHA_MAX_ROUNDS")
         
-        # Después de resolver, verificar si apareció el formulario de registro
-        try:
-            await page.wait_for_selector('#ap_customer_name', timeout=8000)
-            logger.debug("   ✅ Formulario de registro cargado después del captcha")
-        except:
-            # Si no aparece, puede ser que haya redirigido a otra página
-            current_url = page.url
-            if "signin" in current_url.lower() or "login" in current_url.lower():
-                logger.warning("   Redirigido a login después de resolver captcha. Amazon bloqueó la cuenta.")
-                raise Exception("AMAZON_BLOCKED_ACCOUNT")
-            else:
-                logger.warning("   No se cargó el formulario de registro después del captcha")
-                raise Exception("FORM_NOT_LOADED_AFTER_CAPTCHA")
+        # Después de resolver el captcha, la página normalmente avanza a verificación SMS.
+        # No es necesario esperar el formulario de registro (ya se llenó antes).
+        # Solo verificamos si hubo redirección a login (por bloqueo).
+        current_url = page.url
+        if "signin" in current_url.lower() or "login" in current_url.lower():
+            logger.warning("   Redirigido a login después de resolver captcha. Amazon bloqueó la cuenta.")
+            raise Exception("AMAZON_BLOCKED_ACCOUNT")
         
+        logger.debug("   Captcha de coordenadas resuelto, continuando con el flujo...")
         return True
 
         # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
