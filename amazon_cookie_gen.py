@@ -1732,11 +1732,20 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         except Exception as e:
                             raise Exception(f"Timeout esperando campo de nombre después del clic: {e}")
                     else:
-                        # No se encontró el botón, verificar si es error de Amazon
+                        # No se encontró el botón, verificar si es error de Amazon o redirección a login
                         logger.debug("   ⚠️ No se encontró el botón 'Proceder a crear una cuenta'")
-                        # Obtener el texto de la página (o buscar elementos de error)
+                        # Obtener la URL actual y el contenido
+                        current_url = page.url
                         page_content = await page.content()
-                        if "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content or "Lo sentimos, no podemos crear tu cuenta" in page_content:
+                        
+                        # Detectar si estamos en la página de login (campo de email)
+                        is_login_page = await page.query_selector('#ap_email') is not None
+                        
+                        if is_login_page:
+                            logger.warning("   🔄 Redirigido a la página de inicio de sesión. Reiniciando proceso interno.")
+                            # Limpiar cookies? No, mejor lanzar excepción para que el bucle interno reinicie
+                            raise Exception("REDIRECTED_TO_LOGIN")
+                        elif "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content:
                             logger.warning("   ❌ Página de error de Amazon detectada (cuenta no permitida). Lanzando excepción para reintento interno.")
                             raise Exception("AMAZON_BLOCKED_ACCOUNT")
                         else:
@@ -1753,6 +1762,10 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
                     # Captura de pantalla
                     last_screenshot = await take_screenshot(page, "despues_proceder")
+
+
+
+
                     # ----- PASO 12: Llenar formulario de registro (con reintentos) -----
                     logger.debug("📝 Llenando formulario completo...")
                     last_screenshot = await take_screenshot(page, "formulario_antes_llenar")
@@ -1812,7 +1825,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     
                     last_screenshot = await take_screenshot(page, "despues_registro")
 
-                    
+
                     # ----- PASO 14: Resolver captcha después del envío (si aparece) -----
                     await handle_captcha_if_present(page, step_name="post_submit")
 
@@ -2033,8 +2046,8 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     last_error = e
                     error_str = str(e)
                     # Capturamos cualquier excepción relacionada con FunCaptcha para reintentar internamente
-                    if "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_BLOCKED_ACCOUNT" in error_str:
-                        logger.warning(f"Fallo de FunCaptcha (intento interno {internal_attempt}), reiniciando en nueva pestaña...")
+                    if "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_BLOCKED_ACCOUNT" in error_str or "REDIRECTED_TO_LOGIN" in error_str:
+                        logger.warning(f"Fallo recuperable (intento interno {internal_attempt}), reiniciando en nueva pestaña...")
                         continue
                     else:
                         # Otro error, salir del bucle interno y propagar
