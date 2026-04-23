@@ -812,6 +812,64 @@ async def handle_captcha_if_present(page, step_name="captcha"):
 
 
 
+
+
+
+
+
+
+async def wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=120, resend_interval=40):
+    """
+    Espera el código SMS hasta timeout_total segundos.
+    Cada resend_interval segundos intenta hacer clic en el enlace de reenviar (si existe).
+    Retorna el código o None.
+    """
+    start = time.time()
+    last_resend = 0
+    while time.time() - start < timeout_total:
+        # Intentar obtener el código del servicio
+        code = None
+        for s in SMS_SERVICES:
+            if s['name'] == service_name and s['enabled']:
+                # Verificar cada 3 segundos (no saturar)
+                code = await s['get_code'](service_id, timeout=3)
+                if code:
+                    return code
+                break
+        # Si ha pasado el intervalo de reenvío, intentar hacer clic
+        if time.time() - last_resend >= resend_interval:
+            try:
+                resend_link = await page.query_selector('a#cvf-resend-link')
+                if resend_link and await resend_link.is_visible():
+                    await resend_link.click()
+                    logger.debug(f"🔄 Reenviado código a los {int(time.time()-start)}s")
+                    last_resend = time.time()
+            except Exception as e:
+                logger.debug(f"Error al reenviar: {e}")
+        await asyncio.sleep(3)
+    return None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # -------------------------------------------------------------------
 # SMS SERVICES
 # -------------------------------------------------------------------
@@ -1889,7 +1947,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         # Tomar screenshot después del clic
                         last_screenshot = await take_screenshot(page, "despues_continuar_numero_registrado")
 
-                    # ----- PASO 15: Verificación por SMS -----
+                    # ----- PASO 15: Verificación por SMS (con espera de 2 minutos y reenvío cada 40s) -----
                     logger.debug("📱 [PASO 15] Verificando página de verificación de número...")
                     await page.wait_for_timeout(5000)
                     content = await safe_get_content(page)
@@ -1909,7 +1967,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         else:
                             logger.warning("   ⚠️ No se encontró la opción de SMS, puede que ya esté en la página de código")
 
-                    # Esperar el campo de código
+                    # Esperar el campo de código (hasta 30 segundos)
                     try:
                         code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
                         logger.debug("   📱 Página de ingreso de código SMS detectada")
@@ -1927,24 +1985,11 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         else:
                             raise
 
-                    # Obtener el código SMS con timeout de 30 segundos y cancelación si no llega
-                    sms_code = None
-                    if service_name == 'hero':
-                        sms_code = await get_hero_sms_code(service_id, timeout=30)
-                        if not sms_code:
-                            await cancel_hero_sms(service_id)
-                            raise Exception("Timeout esperando código SMS de Hero")
-                    elif service_name == '5sim':
-                        sms_code = await get_fivesim_code(service_id, timeout=30)
-                        if not sms_code:
-                            await cancel_fivesim(service_id)
-                            raise Exception("Timeout esperando código SMS de 5sim")
-                    else:
-                        sms_code = await wait_for_sms_code(service_name, service_id, page, max_retries=1, timeout_per_retry=20)
-                        if not sms_code:
-                            raise Exception(f"Timeout esperando código SMS de {service_name}")
-
+                    # ----- Esperar el código SMS con 2 minutos y reenvío cada 40s -----
+                    sms_code = await wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=120, resend_interval=40)
+                    
                     if sms_code:
+                        # Volver a buscar el campo por si cambió
                         code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=ACTION_TIMEOUT*1000)
                         await code_input.fill(sms_code)
                         logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
@@ -1955,7 +2000,33 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         else:
                             logger.warning("   ⚠️ No se encontró botón de verificar")
                     else:
-                        raise Exception("No se pudo obtener código de verificación SMS")
+                        # No se recibió código en 2 minutos. Cancelar número con manejo de error.
+                        logger.warning(f"⏰ No se recibió código SMS en 2 minutos. Cancelando número...")
+                        cancel_success = False
+                        for cancel_attempt in range(3):  # hasta 3 intentos de cancelación
+                            if service_name == 'hero':
+                                cancel_ok = await cancel_hero_sms(service_id)
+                                if cancel_ok:
+                                    logger.debug(f"   ✅ Número Hero cancelado después de {cancel_attempt+1} intentos")
+                                    cancel_success = True
+                                    break
+                                else:
+                                    # Si falla por "EARLY_CANCEL_DENIED", esperar 5 segundos y reintentar
+                                    await asyncio.sleep(5)
+                            elif service_name == '5sim':
+                                cancel_ok = await cancel_fivesim(service_id)
+                                if cancel_ok:
+                                    logger.debug(f"   ✅ Número 5sim cancelado después de {cancel_attempt+1} intentos")
+                                    cancel_success = True
+                                    break
+                                else:
+                                    await asyncio.sleep(2)
+                            else:
+                                cancel_success = True
+                                break
+                        if not cancel_success:
+                            logger.warning(f"   ⚠️ No se pudo cancelar el número, se continuará con el siguiente...")
+                        raise Exception("Timeout esperando código SMS (2 minutos)")
 
                     # ----- PASO 16: Verificar éxito -----
                     if 'your-account' in page.url.lower() or 'account' in page.url.lower() or 'welcome' in page.url.lower():
