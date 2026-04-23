@@ -1753,12 +1753,11 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
                     # Captura de pantalla
                     last_screenshot = await take_screenshot(page, "despues_proceder")
-
-                    # ----- PASO 12: Llenar formulario de registro -----
+                    # ----- PASO 12: Llenar formulario de registro (con reintentos) -----
                     logger.debug("📝 Llenando formulario completo...")
                     last_screenshot = await take_screenshot(page, "formulario_antes_llenar")
 
-                    # Nombre
+                    # Nombre (se mantiene igual)
                     name_selectors = ['input#ap_customer_name', 'input[name="customerName"]']
                     name_filled = False
                     for sel in name_selectors:
@@ -1768,45 +1767,52 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     if not name_filled:
                         logger.warning("⚠️ No se pudo llenar campo de nombre, puede estar precargado")
 
-                    # Contraseña
-                    pwd_selectors = ['input#ap_password', 'input[name="password"]']
-                    pwd_filled = False
-                    for sel in pwd_selectors:
-                        if await smart_fill(page, sel, password):
-                            pwd_filled = True
+                    # Bucle de reintento para el envío del formulario
+                    max_submit_attempts = 3
+                    submit_success = False
+                    for submit_attempt in range(1, max_submit_attempts + 1):
+                        if submit_attempt > 1:
+                            logger.debug(f"   Reintentando envío del formulario (intento {submit_attempt}/{max_submit_attempts})")
+                            # Re-llenar contraseña y confirmación (por si se borraron)
+                            await smart_fill(page, 'input#ap_password', password)
+                            await smart_fill(page, 'input#ap_password_check', password)
+                            await smart_fill(page, 'input[name="passwordCheck"]', password)
+                        
+                        # ----- PASO 13: Botón de registro final -----
+                        logger.debug("🎯 Buscando botón de registro final...")
+                        final_btn_selectors = [
+                            'input#continue', 'input.a-button-input', 'button[type="submit"]',
+                            'input[value*="Crear cuenta"]', 'button:has-text("Crear cuenta")',
+                            'input[value*="Create account"]', 'button:has-text("Create account")'
+                        ]
+                        clicked_final = False
+                        for selector in final_btn_selectors:
+                            if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
+                                clicked_final = True
+                                break
+                        if not clicked_final:
+                            logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
+                        
+                        # Esperar a que la página responda (3 segundos)
+                        await page.wait_for_timeout(3000)
+                        
+                        # Verificar si hay mensaje de error de número inválido
+                        content = await page.content()
+                        if "Introduzca un número de móvil válido" in content:
+                            logger.warning(f"   Número inválido detectado (intento {submit_attempt}), reintentando envío...")
+                            # No salir del bucle, simplemente continuar al siguiente intento
+                            continue
+                        else:
+                            # No hay error, salir del bucle de reintento
+                            submit_success = True
                             break
-                    if not pwd_filled:
-                        raise Exception("No se pudo llenar campo de contraseña")
-
-                    # Confirmación
-                    confirm_selectors = ['input#ap_password_check', 'input[name="passwordCheck"]']
-                    for sel in confirm_selectors:
-                        await smart_fill(page, sel, password)
-
-                    # ----- PASO 13: Botón de registro final -----
-                    logger.debug("🎯 Buscando botón de registro final...")
-                    final_btn_selectors = [
-                        'input#continue', 'input.a-button-input', 'button[type="submit"]',
-                        'input[value*="Crear cuenta"]', 'button:has-text("Crear cuenta")',
-                        'input[value*="Create account"]', 'button:has-text("Create account")'
-                    ]
-                    clicked_final = False
-                    for selector in final_btn_selectors:
-                        if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
-                            clicked_final = True
-                            break
-                    if not clicked_final:
-                        logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
+                    
+                    if not submit_success:
+                        raise Exception("No se pudo enviar el formulario de registro después de varios intentos")
+                    
                     last_screenshot = await take_screenshot(page, "despues_registro")
 
-                    # ----- Detectar error de "actividad inusual" justo después del envío -----
-                    await page.wait_for_timeout(3000)
-                    content = await page.content()
-                    if "Detectamos actividad inusual" in content or "no podemos crear una cuenta" in content:
-                        error_msg = "Detectamos actividad inusual y no podemos crear una cuenta."
-                        logger.error(f"❌ {error_msg}")
-                        raise Exception(error_msg)
-
+                    
                     # ----- PASO 14: Resolver captcha después del envío (si aparece) -----
                     await handle_captcha_if_present(page, step_name="post_submit")
 
