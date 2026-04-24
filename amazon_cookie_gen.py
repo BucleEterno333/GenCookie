@@ -637,7 +637,7 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
         raise Exception("No hay servicios de captcha configurados")
 
     # Timeout de 57 segundos (para no exceder el límite de Amazon)
-    done, pending = await asyncio.wait(tasks, timeout=57, return_when=asyncio.FIRST_COMPLETED)
+    done, pending = await asyncio.wait(tasks, timeout=50, return_when=asyncio.FIRST_COMPLETED)
     coordinates = None
     for task in done:
         try:
@@ -652,9 +652,10 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
         task.cancel()
 
     if not coordinates:
-        screenshot = await take_screenshot(page, f"{step_name}_coord_{round_num}_no_solution")
-        raise Exception(f"No se pudo resolver captcha de coordenadas en ronda {round_num}. Captura: {screenshot[:100]}...")
-
+        screenshot = await take_screenshot(page, f"{step_name}_coord_{round_num}_timeout")
+        # Lanzamos una excepción específica para que el bucle superior pueda reintentar
+        raise Exception(f"CAPTCHA_TIMEOUT round {round_num}. Captura: {screenshot[:100]}...")
+    
     logger.debug(f"   Coordenadas obtenidas (ronda {round_num}): {coordinates}")
 
     # Realizar clics
@@ -694,16 +695,48 @@ async def handle_captcha_if_present(page, step_name="captcha"):
     if any(indicator in content for indicator in coordinate_indicators):
         logger.warning("⚠️ Captcha de coordenadas detectado")
         
-        # Bucle para resolver múltiples captchas (hasta 5 rondas)
-        max_coordinate_rounds = 5
-        for round_num in range(1, max_coordinate_rounds + 1):
+        max_coordinate_rounds = 15
+        round_num = 1
+        while round_num <= max_coordinate_rounds:
             logger.debug(f"   Intento de coordenadas #{round_num}")
-            try:
-                await solve_coordinate_captcha(page, f"{step_name}_coord", round_num)
-            except Exception as captcha_err:
-                logger.error(f"   Error en ronda {round_num}: {captcha_err}")
-                await take_screenshot(page, f"{step_name}_coord_error_round_{round_num}")
-                raise
+            solved = False
+            # Intentar resolver la misma ronda hasta 3 veces si hay timeout
+            for retry in range(3):   # máximo 3 reintentos por ronda
+                try:
+                    await solve_coordinate_captcha(page, f"{step_name}_coord", round_num)
+                    solved = True
+                    break   # salir del bucle de reintentos si se resolvió
+                except Exception as captcha_err:
+                    error_str = str(captcha_err)
+                    if "CAPTCHA_TIMEOUT" in error_str:
+                        logger.warning(f"   Timeout en ronda {round_num}, reintento {retry+1}/3. Esperando nuevo canvas...")
+                        # Esperar 6 segundos a que el canvas cambie (Amazon tarda ~3-4, ponemos 6 por seguridad)
+                        await page.wait_for_timeout(6000)
+                        continue   # reintentar la misma ronda
+                    else:
+                        # Otro error fatal (no se encontró canvas, bounding box, etc.)
+                        logger.error(f"   Error fatal en ronda {round_num}: {captcha_err}")
+                        await take_screenshot(page, f"{step_name}_coord_error_round_{round_num}")
+                        raise   # salir del bucle y del flujo
+            if not solved:
+                # Si después de 3 reintentos no se resolvió, pasar a la siguiente ronda
+                logger.warning(f"   No se pudo resolver ronda {round_num} después de reintentos, pasando a siguiente ronda")
+                round_num += 1
+                continue
+            
+            # Si se resolvió correctamente
+            await page.wait_for_timeout(2000)
+            new_content = await page.content()
+            if not any(indicator in new_content for indicator in coordinate_indicators):
+                logger.debug(f"   ✅ Captura de coordenadas completada después de {round_num} ronda(s)")
+                await page.wait_for_timeout(2000)
+                break   # salir del bucle principal
+            # Si aún hay captcha, avanzar a la siguiente ronda
+            round_num += 1
+            if round_num > max_coordinate_rounds:
+                logger.warning("   Se alcanzó el máximo de rondas para captcha de coordenadas")
+                screenshot = await take_screenshot(page, "coordinate_captcha_max_rounds")
+                raise Exception("COORDINATE_CAPTCHA_MAX_ROUNDS")
             
             # Esperar a que la página se actualice (2 segundos)
             await page.wait_for_timeout(2000)
@@ -2054,7 +2087,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         # Tomar screenshot después del clic
                         last_screenshot = await take_screenshot(page, "despues_continuar_numero_registrado")
 
-                                        # ----- PASO 15: Verificación por SMS (con reintentos de número) -----
+                    # ----- PASO 15: Verificación por SMS (con reintentos de número) -----
                     logger.debug("📱 [PASO 15] Verificación SMS con reintentos de número...")
                     await page.wait_for_timeout(5000)
                     
