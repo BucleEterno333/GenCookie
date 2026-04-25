@@ -1980,22 +1980,42 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     if not name_filled:
                         logger.warning("⚠️ No se pudo llenar campo de nombre, puede estar precargado")
 
-                    # Asegurar que los campos de contraseña existen y son visibles
+                    # ----- PASO 12: Llenar formulario (nombre ya está) -----
+                    # ... (código anterior de nombre) ...
+
+                    # Asegurar que los campos de contraseña existen
                     await page.wait_for_selector('input#ap_password', state='visible', timeout=5000)
                     await page.wait_for_selector('input#ap_password_check', state='visible', timeout=5000)
 
                     # Bucle de reintento para el envío del formulario
-                    max_submit_attempts = 10
+                    max_submit_attempts = 3
                     submit_success = False
                     for submit_attempt in range(1, max_submit_attempts + 1):
+                        # Si es reintento (intento > 1), volver a llenar contraseña y número (si es necesario)
                         if submit_attempt > 1:
                             logger.debug(f"   Reintentando envío del formulario (intento {submit_attempt}/{max_submit_attempts})")
-                            # Re-llenar contraseña y confirmación (por si se borraron)
-                            await smart_fill(page, 'input#ap_password', password)
-                            await smart_fill(page, 'input#ap_password_check', password)
-                            await smart_fill(page, 'input[name="passwordCheck"]', password)
+                            
+                            # 1. Verificar si el campo de número está corrupto (o vacío) y rellenarlo
+                            try:
+                                phone_field = await page.wait_for_selector(phone_field_selector, timeout=3000)
+                                current_phone = await phone_field.input_value()
+                                if not current_phone or current_phone != phone_info['full']:
+                                    logger.debug(f"   Número incorrecto o vacío, rellenando con {phone_info['full']}")
+                                    await phone_field.fill('')
+                                    await phone_field.fill(phone_info['full'])
+                            except Exception as e:
+                                logger.warning(f"   No se pudo rellenar número: {e}")
+                            
+                            # 2. Re-llenar contraseña y confirmación (borrando primero)
+                            for pwd_sel in ['input#ap_password', 'input#ap_password_check', 'input[name="passwordCheck"]']:
+                                try:
+                                    field = await page.wait_for_selector(pwd_sel, timeout=3000)
+                                    await field.fill('')
+                                    await field.fill(password)
+                                except:
+                                    pass
                         else:
-                            # Primer intento: llenar normalmente
+                            # Primer intento: llenar normalmente (contraseña ya se llenó antes, pero aseguramos)
                             await smart_fill(page, 'input#ap_password', password)
                             await smart_fill(page, 'input#ap_password_check', password)
                             await smart_fill(page, 'input[name="passwordCheck"]', password)
@@ -2006,7 +2026,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             logger.warning(f"   Contraseña no llenada correctamente (valor: {filled_password}), reintentando...")
                             continue
                         
-                        # ----- PASO 13: Botón de registro final -----
+                        # Buscar y hacer clic en botón final (con timeout reducido a 10 segundos)
                         logger.debug("🎯 Buscando botón de registro final...")
                         final_btn_selectors = [
                             'input#continue', 'input.a-button-input', 'button[type="submit"]',
@@ -2015,52 +2035,45 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         ]
                         clicked_final = False
                         for selector in final_btn_selectors:
-                            if await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
+                            if await smart_click(page, selector, timeout=10000, wait_for_navigation=True):
                                 clicked_final = True
                                 break
                         if not clicked_final:
                             logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
                         
-                        # Esperar a que la página responda (3 segundos)
+                        # Esperar respuesta
                         await page.wait_for_timeout(3000)
                         
-                        
-
-
-
-
-
-                        # ----- PASO 14: Resolver captcha después del envío (si aparece) -----
+                        # ----- PASO 14: Resolver captcha post-submit -----
                         await handle_captcha_if_present(page, step_name="post_submit")
-
-
-
-
-                        # Verificar errores después del envío
+                        
+                        # ----- Verificar errores después del envío -----
                         content = await page.content()
-                        # 1. Error grave: actividad inusual (Amazon bloquea)
+                        
+                        # 1. Error grave: actividad inusual
                         if "Detectamos actividad inusual" in content or "no podemos crear una cuenta" in content:
                             logger.warning("   🚫 Detectada actividad inusual. Amazon bloqueó la cuenta.")
                             raise Exception("AMAZON_BLOCKED_ACCOUNT")
                         
-                        # 2. Errores recuperables (número inválido o contraseña vacía)
-                        if "Introduzca un número de móvil válido" in content or "Mínimo 6 caracteres requeridos" in content or "Minimo 6 caracteres requeridos" in content:
-                            logger.warning(f"   Error de validación detectado (intento {submit_attempt}), reintentando envío...")
-                            # En el siguiente intento del bucle se rellenarán de nuevo las contraseñas
+                        # 2. Error de número inválido (incluye el mensaje que viste)
+                        if "incorrecto o no válido" in content or "Introduzca un número de móvil válido" in content:
+                            logger.warning(f"   Número inválido detectado (intento {submit_attempt}), reintentando envío...")
+                            # En el siguiente intento se rellenará número y contraseña
                             continue
                         
-                        # 3. Si no hay errores visibles, asumimos éxito y salimos del bucle de reintentos
+                        # 3. Error de contraseña vacía
+                        if "Mínimo 6 caracteres requeridos" in content or "Minimo 6 caracteres requeridos" in content:
+                            logger.warning(f"   Contraseña vacía (intento {submit_attempt}), reintentando envío...")
+                            continue
+                        
+                        # No hay errores, éxito
                         submit_success = True
                         break
-
                     
                     if not submit_success:
                         raise Exception("No se pudo enviar el formulario de registro después de varios intentos")
                     
                     last_screenshot = await take_screenshot(page, "despues_registro")
-
-
-
 
 
 
