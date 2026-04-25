@@ -2008,11 +2008,39 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
 
 
-                    # ----- PASO 12: Llenar formulario de registro (con reintentos) -----
-                    logger.debug("📝 Llenando formulario completo...")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                    # =================================================================
+                    # PASO 12: LLENAR FORMULARIO Y ENVIAR (CON REINTENTOS DE ENVÍO)
+                    # =================================================================
+                    logger.debug("📝 Llenando formulario completo (nombre y contraseñas)...")
                     last_screenshot = await take_screenshot(page, "formulario_antes_llenar")
 
-                    # Nombre (se mantiene igual)
+                    # ---- 12.1: Llenar nombre (una sola vez) ----
                     name_selectors = ['input#ap_customer_name', 'input[name="customerName"]']
                     name_filled = False
                     for sel in name_selectors:
@@ -2022,143 +2050,121 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     if not name_filled:
                         logger.warning("⚠️ No se pudo llenar campo de nombre, puede estar precargado")
 
-                    # ----- PASO 12: Llenar formulario (nombre ya está) -----
-                    # ... (código anterior de nombre) ...
-
-                    # Asegurar que los campos de contraseña existen
+                    # Asegurar existencia de campos de contraseña
                     await page.wait_for_selector('input#ap_password', state='visible', timeout=5000)
                     await page.wait_for_selector('input#ap_password_check', state='visible', timeout=5000)
 
-                    # Bucle de reintento para el envío del formulario
+                    # ---- 12.2: Bucle de reintentos de ENVÍO (hasta 3 intentos) ----
                     max_submit_attempts = 3
                     submit_success = False
                     for submit_attempt in range(1, max_submit_attempts + 1):
-                        # Si es reintento (intento > 1), volver a llenar contraseña y número (si es necesario)
+                        logger.debug(f"📤 Intento de envío #{submit_attempt}")
+
+                        # Rellenar contraseñas (cada intento las vuelve a llenar por si acaso)
                         if submit_attempt > 1:
-                            logger.debug(f"   Reintentando envío del formulario (intento {submit_attempt}/{max_submit_attempts})")
-                            
-                            # 1. Verificar si el campo de número está corrupto (o vacío) y rellenarlo
-                            try:
-                                phone_field = await page.wait_for_selector(phone_field_selector, timeout=3000)
-                                current_phone = await phone_field.input_value()
-                                if not current_phone or current_phone != phone_info['full']:
-                                    logger.debug(f"   Número incorrecto o vacío, rellenando con {phone_info['full']}")
-                                    await phone_field.fill('')
-                                    await phone_field.fill(phone_info['full'])
-                            except Exception as e:
-                                logger.warning(f"   No se pudo rellenar número: {e}")
-                            
-                            # 2. Re-llenar contraseña y confirmación (borrando primero)
-                            for pwd_sel in ['input#ap_password', 'input#ap_password_check', 'input[name="passwordCheck"]']:
-                                try:
-                                    field = await page.wait_for_selector(pwd_sel, timeout=3000)
-                                    await field.fill('')
-                                    await field.fill(password)
-                                except:
-                                    pass
-                        else:
-                            # Primer intento: llenar normalmente (contraseña ya se llenó antes, pero aseguramos)
-                            await smart_fill(page, 'input#ap_password', password)
-                            await smart_fill(page, 'input#ap_password_check', password)
-                            await smart_fill(page, 'input[name="passwordCheck"]', password)
-                        
+                            logger.debug("   Reintentando, rellenando contraseñas de nuevo...")
+                        await smart_fill(page, 'input#ap_password', password)
+                        await smart_fill(page, 'input#ap_password_check', password)
+                        await smart_fill(page, 'input[name="passwordCheck"]', password)
+
                         # Verificar que la contraseña se llenó correctamente
-                        filled_password = await page.input_value('input#ap_password')
-                        if not filled_password or len(filled_password) < 6:
-                            logger.warning(f"   Contraseña no llenada correctamente (valor: {filled_password}), reintentando...")
+                        filled_pwd = await page.input_value('input#ap_password')
+                        if not filled_pwd or len(filled_pwd) < 6:
+                            logger.warning(f"   Contraseña no llenada correctamente (valor: {filled_pwd})")
                             continue
-                        
-                        # Buscar y hacer clic en botón final (con timeout reducido a 10 segundos)
+
+                        # Hacer clic en botón final de registro
                         logger.debug("🎯 Buscando botón de registro final...")
                         final_btn_selectors = [
                             'input#continue', 'input.a-button-input', 'button[type="submit"]',
                             'input[value*="Crear cuenta"]', 'button:has-text("Crear cuenta")',
                             'input[value*="Create account"]', 'button:has-text("Create account")'
                         ]
-                        clicked_final = False
-                        for selector in final_btn_selectors:
-                            if await smart_click(page, selector, timeout=10000, wait_for_navigation=True):
-                                clicked_final = True
-                                break
-                        if not clicked_final:
-                            logger.warning("⚠️ No se encontró botón de registro final, puede que ya se haya enviado")
-                        
-                        # Esperar respuesta
-                        await page.wait_for_timeout(3000)
-                        
-                        # ----- PASO 14: Resolver captcha post-submit -----
-                        await handle_captcha_if_present(page, step_name="post_submit")
-                        
-                        # ----- Verificar errores después del envío -----
-                        content = await page.content()
-                        
-                        # 1. Error grave: actividad inusual
-                        if "Detectamos actividad inusual" in content or "no podemos crear una cuenta" in content:
-                            logger.warning("   🚫 Detectada actividad inusual. Amazon bloqueó la cuenta.")
-                            raise Exception("AMAZON_BLOCKED_ACCOUNT")
-                        
-                        # 2. Error de número inválido (incluye el mensaje que viste)
-                        if "incorrecto o no válido" in content or "Introduzca un número de móvil válido" in content:
-                            logger.warning(f"   Número inválido detectado (intento {submit_attempt}), reintentando envío...")
-                            # En el siguiente intento se rellenará número y contraseña
-                            continue
-                        
-                        # 3. Error de contraseña vacía
-                        if "Mínimo 6 caracteres requeridos" in content or "Minimo 6 caracteres requeridos" in content:
-                            logger.warning(f"   Contraseña vacía (intento {submit_attempt}), reintentando envío...")
-                            continue
-                        
-                        # No hay errores, éxito
-                        submit_success = True
-                        break
-                    
-                    if not submit_success:
-                        raise Exception("No se pudo enviar el formulario de registro después de varios intentos")
-                    
-                    last_screenshot = await take_screenshot(page, "despues_registro")
-
-
-
-
-
-
-
-
-                    # ----- PASO 14.5: Manejar número ya registrado -----
-                    logger.debug("📱 Verificando si el número ya está registrado...")
-                    content = await safe_get_content(page)
-                    if "El número de teléfono móvil ya está en uso" in content or "El número de teléfono móvil ya está registrado" in content:
-                        logger.warning("⚠️ El número ya está registrado. Buscando botón 'Continuar con este número'...")
-                        # Selectores para el botón
-                        continue_selectors = [
-                            'button:has-text("Continuar con este número")',
-                            'input[value="Continuar con este número"]',
-                            'a:has-text("Continuar con este número")',
-                            'button:has-text("Continue with this number")'
-                        ]
                         clicked = False
-                        for sel in continue_selectors:
-                            if await smart_click(page, sel, timeout=5000, wait_for_navigation=True):
+                        for sel in final_btn_selectors:
+                            if await smart_click(page, sel, timeout=10000, wait_for_navigation=True):
                                 clicked = True
-                                logger.debug("   ✅ Botón 'Continuar con este número' clickeado")
                                 break
                         if not clicked:
-                            logger.warning("   ⚠️ No se encontró el botón, se asume que no es necesario")
-                        await page.wait_for_load_state('domcontentloaded', timeout=15000)
-                        await page.wait_for_timeout(3000)
-                        # Tomar screenshot después del clic
-                        last_screenshot = await take_screenshot(page, "despues_continuar_numero_registrado")
+                            logger.warning("   No se encontró botón final, puede que ya se haya enviado")
 
-                    # ----- PASO 15: Verificación por SMS (con reintentos de número) -----
-                    logger.debug("📱 [PASO 15] Verificación SMS con reintentos de número...")
+                        await page.wait_for_timeout(3000)   # esperar respuesta
+
+                        # ---- PASO 13: Resolver captcha si aparece después del envío ----
+                        await handle_captcha_if_present(page, step_name="post_submit")
+
+                        # ---- PASO 14: ANALIZAR ERRORES DESPUÉS DEL ENVÍO ----
+                        content = await page.content()
+                        error_detected = False
+
+                        # 14.1 Error de actividad inusual (bloqueo)
+                        if "Detectamos actividad inusual" in content or "no podemos crear una cuenta" in content:
+                            logger.warning("   🚫 ACTIVIDAD INUSUAL -> reinicio interno")
+                            raise Exception("AMAZON_BLOCKED_ACCOUNT")
+
+                        # 14.2 Número inválido o incorrecto
+                        if "incorrecto o no válido" in content or "Introduzca un número de móvil válido" in content:
+                            logger.warning(f"   ❌ NÚMERO INVÁLIDO (intento {submit_attempt}) -> rellenando número y reintentando")
+                            # Re-llenar el campo de número
+                            phone_field = await page.wait_for_selector(phone_field_selector, timeout=3000)
+                            if phone_field:
+                                await phone_field.fill('')
+                                await phone_field.fill(phone_info['full'])
+                            # En el siguiente intento se reintentará
+                            continue
+
+                        # 14.3 Contraseña vacía o demasiado corta
+                        if "Mínimo 6 caracteres requeridos" in content or "Minimo 6 caracteres requeridos" in content:
+                            logger.warning(f"   ❌ CONTRASEÑA VACÍA (intento {submit_attempt}) -> reintentando")
+                            continue
+
+                        # 14.4 Número ya registrado (aparece después del envío)
+                        if "El número de teléfono móvil ya está en uso" in content or "El número de teléfono móvil ya está registrado" in content:
+                            logger.warning("   ⚠️ NÚMERO YA REGISTRADO -> buscando botón 'Continuar con este número'")
+                            # Selectores para el botón de continuar
+                            continue_btn_selectors = [
+                                'button:has-text("Continuar con este número")',
+                                'input[value="Continuar con este número"]',
+                                'a:has-text("Continuar con este número")',
+                                'button:has-text("Continue with this number")'
+                            ]
+                            clicked = False
+                            for sel in continue_btn_selectors:
+                                if await smart_click(page, sel, timeout=5000, wait_for_navigation=True):
+                                    clicked = True
+                                    break
+                            if not clicked:
+                                logger.warning("   No se encontró botón, se asume que ya está en la página de verificación")
+                            await page.wait_for_load_state('domcontentloaded', timeout=15000)
+                            await page.wait_for_timeout(3000)
+                            # Después de este clic, la página avanzará normalmente; no reintentamos este envío
+                            # sino que dejamos que el flujo continúe a la verificación SMS
+                            submit_success = True   # salimos del bucle de envío como exitoso (aunque aún falta SMS)
+                            break
+
+                        # Si no hubo ningún error, el envío fue exitoso
+                        if not error_detected:
+                            submit_success = True
+                            break
+
+                    if not submit_success:
+                        raise Exception("No se pudo enviar el formulario de registro después de varios intentos")
+
+                    last_screenshot = await take_screenshot(page, "despues_registro")
+
+                    # =================================================================
+                    # PASO 15: VERIFICACIÓN POR SMS (CON REINTENTOS DE NÚMERO)
+                    # =================================================================
+                    logger.debug("📱 Verificación SMS con reintentos de número...")
                     await page.wait_for_timeout(5000)
-                    
-                    # Función local para cambiar número y reiniciar (SIN argumentos, usa variables del ámbito)
-                    async def cambiar_numero_y_reiniciar_local():
+
+                    # --- Función local para cambiar de número y reiniciar el flujo de registro ---
+                    # --- Función local para cambiar de número y reiniciar el flujo de registro ---
+                    async def cambiar_numero_y_reiniciar():
                         nonlocal phone_info, service_id, service_name, purchase_country, account_data
-                        logger.debug("🔄 Intentando cambiar número desde la página de verificación SMS...")
-                        
-                        # Buscar el enlace "Cambiar"
+                        logger.debug("🔄 Cambiando número desde la página de verificación SMS...")
+
+                        # 1. Buscar y hacer clic en el enlace "Cambiar"
                         change_selectors = [
                             'a:has-text("Cambiar")',
                             'a[href*="/ap/register?"]',
@@ -2170,144 +2176,145 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             try:
                                 change_link = await page.wait_for_selector(sel, timeout=5000)
                                 if change_link:
-                                    logger.debug(f"   ✅ Enlace 'Cambiar' encontrado con selector: {sel}")
+                                    logger.debug(f"   ✅ Enlace 'Cambiar' encontrado: {sel}")
                                     break
                             except:
                                 continue
-                        
                         if not change_link:
-                            logger.warning("   ❌ No se encontró enlace 'Cambiar'")
                             raise Exception("NO_CHANGE_LINK_FOUND")
-                        
-                        # Hacer clic y esperar la página de login/registro
+
                         await change_link.click()
                         await page.wait_for_load_state('domcontentloaded', timeout=15000)
                         await page.wait_for_timeout(2000)
-                        
-                        # Verificar que estamos en la página correcta
-                        phone_field_selector = 'input#ap_email, input[name="email"], input[type="email"], input[type="tel"]'
-                        await page.wait_for_selector(phone_field_selector, state='visible', timeout=10000)
-                        
-                        # Obtener un nuevo número (mismo servicio, mismo país)
+
+                        # 2. Obtener un nuevo número (mismo servicio, mismo país)
                         current_service = phone_info['service_name']
                         current_country = phone_info['purchase_country']
-                        new_phone_info = await get_phone_number(country_code, force_service=current_service, force_country=current_country)
-                        if not new_phone_info:
+                        new_phone = await get_phone_number(country_code, force_service=current_service, force_country=current_country)
+                        if not new_phone:
                             raise Exception("No se pudo obtener otro número")
-                        
-                        # Actualizar variables
-                        phone_info = new_phone_info
+
+                        # Actualizar variables globales del ámbito
+                        phone_info = new_phone
                         account_data['phone'] = phone_info['local']
                         service_id = phone_info['service_id']
                         service_name = phone_info['service_name']
                         purchase_country = phone_info['purchase_country']
-                        
-                        # Ingresar el nuevo número
-                        await smart_fill(page, phone_field_selector, phone_info['full'])
-                        
-                        # Hacer clic en Continuar
-                        continue_selectors = ['input.a-button-input', 'button#continue']
+
+                        # 3. Ingresar el nuevo número en el campo correspondiente
+                        phone_field_selector = 'input#ap_email, input[name="email"], input[type="email"], input[type="tel"]'
+                        phone_field = await page.wait_for_selector(phone_field_selector, timeout=10000)
+                        await phone_field.fill('')                     # Limpiar primero
+                        await phone_field.fill(phone_info['full'])     # Escribir el número completo (con código país)
+
+                        # 4. Hacer clic en "Continuar"
                         continue_clicked = False
-                        for sel in continue_selectors:
+                        for sel in ['input.a-button-input', 'button#continue']:
                             if await smart_click(page, sel, wait_for_navigation=True):
                                 continue_clicked = True
                                 break
                         if not continue_clicked:
                             raise Exception("No se encontró botón Continuar después de cambiar número")
-                        
-                        # Esperar a que cargue la página intermedia
+
+                        # 5. Esperar la página intermedia "Proceder a crear una cuenta"
                         await page.wait_for_timeout(3000)
                         primary_selector = 'span#intention-submit-button input.a-button-input'
                         if not await smart_click(page, primary_selector, wait_for_navigation=False):
                             await page.wait_for_timeout(4000)
-                        await page.wait_for_selector('#ap_customer_name', timeout=WAIT_TIMEOUT*1000)
-                        
-                        # Re-llenar el formulario
-                        await smart_fill(page, '#ap_customer_name', fullname)
-                        await smart_fill(page, '#ap_password', password)
-                        await smart_fill(page, '#ap_password_check', password)
-                        
-                        # Hacer clic en botón final de registro
+
+                        # 6. Esperar a que cargue el formulario de registro
+                        await page.wait_for_selector('#ap_customer_name', state='visible', timeout=WAIT_TIMEOUT*1000)
+
+                        # 7. Rellenar NOMBRE (solo una vez, importante que sea el selector correcto)
+                        name_field = await page.wait_for_selector('#ap_customer_name', timeout=5000)
+                        await name_field.fill('')           # Limpiar por si acaso
+                        await name_field.fill(fullname)     # Usar el nombre generado originalmente
+
+                        # 8. Rellenar CONTRASEÑA y CONFIRMACIÓN (usando selectores específicos)
+                        pwd_field = await page.wait_for_selector('#ap_password', timeout=5000)
+                        await pwd_field.fill('')
+                        await pwd_field.fill(password)
+
+                        pwd_check_field = await page.wait_for_selector('#ap_password_check', timeout=5000)
+                        await pwd_check_field.fill('')
+                        await pwd_check_field.fill(password)
+
+                        # También por si hay otro campo de confirmación (algunas versiones de Amazon)
+                        try:
+                            alt_pwd_check = await page.query_selector('input[name="passwordCheck"]')
+                            if alt_pwd_check:
+                                await alt_pwd_check.fill('')
+                                await alt_pwd_check.fill(password)
+                        except:
+                            pass
+
+                        # 9. Hacer clic en el botón final de registro
                         final_btn_selectors = [
                             'input#continue', 'input.a-button-input', 'button[type="submit"]',
-                            'input[value*="Crear cuenta"]', 'button:has-text("Crear cuenta")'
+                            'input[value*="Crear cuenta"]', 'button:has-text("Crear cuenta")',
+                            'input[value*="Create account"]', 'button:has-text("Create account")'
                         ]
                         for sel in final_btn_selectors:
                             if await smart_click(page, sel, wait_for_navigation=True):
                                 break
-                        
-                        # Esperar a que cargue la página de verificación SMS (o captcha)
+
+                        # 10. Esperar a que se cargue la página de verificación SMS (o captcha)
                         await page.wait_for_timeout(5000)
 
+                        # Nota: No se maneja captcha aquí porque el bucle principal de SMS
+                        # ya llamará a handle_captcha_if_present al inicio de cada intento.
+
+
 
                         
-                        # ----- PASO 14: Resolver captcha después del envío (si aparece) -----
-                        await handle_captcha_if_present(page, step_name="post_submit")
-
-
-
-                    
-                    # Bucle de reintentos de número (hasta 3 números diferentes)
-                    max_number_attempts = 6
+                    # --- Bucle de reintentos de número (hasta 3 números) ---
+                    max_number_attempts = 3
                     sms_success = False
-                    current_service = phone_info['service_name']
-                    current_country = phone_info['purchase_country']
-                    
                     for num_att in range(1, max_number_attempts + 1):
-                        logger.debug(f"Intento de número {num_att}/{max_number_attempts}")
-                        
-                        # Manejar WhatsApp si aparece
+                        logger.debug(f"📞 Intento de número {num_att}/{max_number_attempts}")
+
+                        # 15.1 Manejar posible página de WhatsApp
                         content = await safe_get_content(page)
                         if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
-                            logger.warning("⚠️ Página de verificación con WhatsApp detectada, seleccionando SMS...")
+                            logger.warning("📱 WhatsApp detectado, seleccionando SMS...")
                             sms_option = await page.query_selector('#secondary_channel_button input.a-button-input')
                             if not sms_option:
                                 sms_option = await page.query_selector('#secondary_channel_button')
                             if not sms_option:
                                 sms_option = await page.query_selector('xpath=//*[contains(text(), "Enviar código por SMS")]')
                             if sms_option:
-                                await page.wait_for_timeout(500)
                                 await sms_option.click()
-                                logger.debug("   ✅ Clic en 'Enviar código por SMS'")
+                                logger.debug("   Clic en 'Enviar código por SMS'")
                                 await page.wait_for_load_state('load', timeout=15000)
-                            else:
-                                logger.warning("   ⚠️ No se encontró la opción de SMS, puede que ya esté en la página de código")
-                        
-                        # Esperar el campo de código
+
+                        # 15.2 Esperar campo de código
                         try:
                             code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
-                            logger.debug("   📱 Página de ingreso de código SMS detectada")
                         except Exception as e:
                             error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
                             if error_msg:
                                 error_text = await error_msg.text_content()
                                 if "Hemos enviado tu OTP" in error_text:
-                                    logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
                                     await page.wait_for_timeout(3000)
-                                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                                    code_input = await page.wait_for_selector('#cvf-input-code', timeout=30000)
                                 elif "No se puede enviar un mensaje SMS" in error_text or "Verifica a través de WhatsApp" in error_text:
-                                    # Error temporal de SMS, debemos reintentar internamente
-                                    logger.warning(f"⚠️ SMS no disponible: {error_text}. Reintentando internamente (nueva pestaña)...")
+                                    logger.warning(f"⚠️ SMS no disponible: {error_text} -> reinicio interno")
                                     raise Exception("SMS_UNAVAILABLE_RETRY")
                                 else:
-                                    logger.error(f"❌ Error en verificación SMS: {error_text}")
-                                    raise Exception(f"Error en verificación SMS: {error_text}")
+                                    logger.error(f"Error en SMS: {error_text}")
+                                    raise
                             else:
                                 raise
-                        
-                        # Esperar el código SMS (2 minutos, reenvío cada 40s)
+
+                        # 15.3 Esperar código SMS (2 minutos, reenvío cada 40s)
                         sms_code = await wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=120, resend_interval=40)
-                        
                         if sms_code:
-                            # Volver a buscar el campo y llenar
-                            code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=ACTION_TIMEOUT*1000)
                             await code_input.fill(sms_code)
-                            logger.debug(f"   ✅ Código SMS ingresado: {sms_code}")
+                            logger.debug(f"✅ Código ingresado: {sms_code}")
                             verify_btn = await page.query_selector('input[type="submit"], button:has-text("Verificar"), button:has-text("Verify")')
                             if verify_btn:
                                 await verify_btn.click()
-                                await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
-                                # Verificar si ya estamos en la cuenta
+                                await page.wait_for_load_state('domcontentloaded', timeout=30000)
                                 if 'your-account' in page.url.lower() or 'account' in page.url.lower():
                                     sms_success = True
                                     break
@@ -2316,29 +2323,77 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             else:
                                 logger.warning("No se encontró botón de verificar")
                         else:
-                            # No se recibió código en 2 minutos
-                            logger.warning(f"⏰ No se recibió código SMS en 2 minutos (intento {num_att})")
-                            
-                            # Intentar cancelar el número (no crítico)
+                            logger.warning(f"⏰ No se recibió código en 2 minutos (intento {num_att})")
+                            # Cancelar número (opcional)
                             try:
                                 if service_name == 'hero':
                                     await cancel_hero_sms(service_id)
                                 elif service_name == '5sim':
                                     await cancel_fivesim(service_id)
-                            except Exception as cancel_err:
-                                logger.debug(f"Error cancelando número: {cancel_err}")
-                            
-                            # Si es el último intento, lanzar excepción
+                            except:
+                                pass
+
+                            # Si es el último intento, fallar
                             if num_att == max_number_attempts:
                                 raise Exception("No se pudo verificar SMS después de varios números")
-                            
-                            # Cambiar de número y reiniciar el proceso
-                            await cambiar_numero_y_reiniciar_local()
-                            # Después de cambiar, continuar con el siguiente intento del bucle
+
+                            # Cambiar de número y reiniciar el proceso de registro
+                            await cambiar_numero_y_reiniciar()
+                            # Al salir de esta función, el bucle continuará con el siguiente número
+                            # (ya se habrá reenviado el formulario y estará nuevamente en la página de SMS)
                             continue
-                    
+
                     if not sms_success:
-                        raise Exception("No se pudo verificar SMS después de varios números")
+                        raise Exception("Verificación SMS fallida después de todos los intentos")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
                     # ----- PASO 16: Verificar éxito -----
                     if 'your-account' in page.url.lower() or 'account' in page.url.lower() or 'welcome' in page.url.lower():
