@@ -769,21 +769,33 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 screenshot = await take_screenshot(page, "coordinate_captcha_max_rounds")
                 raise Exception("COORDINATE_CAPTCHA_MAX_ROUNDS")
         
-        # Después de resolver el captcha, la página normalmente avanza a verificación SMS.
-        # No es necesario esperar el formulario de registro (ya se llenó antes).
-        # Solo verificamos si realmente estamos en la página de login (y no en la de verificación SMS)
-        current_url = page.url
-        # Verificar si estamos en la página de login (tiene campo #ap_email)
-        is_login_page = await page.query_selector('#ap_email') is not None
-        # Verificar si estamos en la página de verificación SMS (tiene campo #cvf-input-code)
-        is_sms_page = await page.query_selector('#cvf-input-code') is not None
-        
-        if is_login_page and not is_sms_page:
+        # Después de resolver el captcha, determinar el estado de la página
+        await page.wait_for_timeout(2000)
+
+        has_sms_field = await page.query_selector('#cvf-input-code') is not None
+        has_reg_form = await page.query_selector('#ap_customer_name') is not None
+        has_login_field = await page.query_selector('#ap_email') is not None and not has_reg_form
+
+        if has_sms_field:
+            logger.debug("   Captcha resuelto, página de verificación SMS detectada. Continuando...")
+            return True
+
+        if has_reg_form:
+            logger.debug("   Captcha resuelto, pero aún en el formulario de registro (posible error de validación).")
+            # No lanzamos excepción, simplemente retornamos True para que el flujo principal evalúe el error
+            return True
+
+        if has_login_field:
             logger.warning("   Redirigido a la página de inicio de sesión (no a verificación SMS). Amazon bloqueó la cuenta.")
             raise Exception("AMAZON_BLOCKED_ACCOUNT")
-        else:
-            logger.debug("   Captcha de coordenadas resuelto, continuando con el flujo...")
+
+        # Si no detectamos ninguna, esperar un poco y asumir que avanzó
+        logger.debug("   Captcha resuelto, no se detectó formulario ni SMS. Esperando 3 segundos...")
+        await page.wait_for_timeout(3000)
+        if await page.query_selector('#cvf-input-code') is not None:
             return True
+        else:
+            raise Exception("UNKNOWN_STATE_AFTER_CAPTCHA")
 
         # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
     title = await page.title()
@@ -1978,7 +1990,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             # Limpiar cookies? No, mejor lanzar excepción para que el bucle interno reinicie
                             raise Exception("REDIRECTED_TO_LOGIN")
                         elif "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content:
-                            logger.warning("   ❌ Página de error de Amazon detectada (cuenta no permitida). Lanzando excepción para reintento interno.")
+                            logger.warning("   ❌ Página de error de Amazon detectada (Lo sentimos, algo falló de nuestra parte). Lanzando excepción para reintento interno.")
                             raise Exception("AMAZON_BLOCKED_ACCOUNT")
                         else:
                             # No hay error visible, esperar unos segundos a que quizás el formulario aparezca automáticamente
