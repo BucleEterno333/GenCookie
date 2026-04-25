@@ -2036,16 +2036,23 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
 
 
-                        # Verificar si hay mensaje de error de número inválido o contraseña vacía
+                        # Verificar errores después del envío
                         content = await page.content()
+                        # 1. Error grave: actividad inusual (Amazon bloquea)
+                        if "Detectamos actividad inusual" in content or "no podemos crear una cuenta" in content:
+                            logger.warning("   🚫 Detectada actividad inusual. Amazon bloqueó la cuenta.")
+                            raise Exception("AMAZON_BLOCKED_ACCOUNT")
+                        
+                        # 2. Errores recuperables (número inválido o contraseña vacía)
                         if "Introduzca un número de móvil válido" in content or "Mínimo 6 caracteres requeridos" in content or "Minimo 6 caracteres requeridos" in content:
                             logger.warning(f"   Error de validación detectado (intento {submit_attempt}), reintentando envío...")
-                            # Continuar al siguiente intento
+                            # En el siguiente intento del bucle se rellenarán de nuevo las contraseñas
                             continue
-                        else:
-                            # No hay error, salir del bucle de reintento
-                            submit_success = True
-                            break
+                        
+                        # 3. Si no hay errores visibles, asumimos éxito y salimos del bucle de reintentos
+                        submit_success = True
+                        break
+
                     
                     if not submit_success:
                         raise Exception("No se pudo enviar el formulario de registro después de varios intentos")
