@@ -55,7 +55,7 @@ API_BASE_URL = os.getenv('API_BASE_URL', '')
 
 # ----- Timeouts configurables (en segundos) -----
 WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10'))          # Espera general para elementos
-NAVIGATION_TIMEOUT = int(os.getenv('NAVIGATION_TIMEOUT', '30'))  # Espera de navegación
+NAVIGATION_TIMEOUT = int(os.getenv('NAVIGATION_TIMEOUT', '60'))  # Espera de navegación
 ACTION_TIMEOUT = int(os.getenv('ACTION_TIMEOUT', '5'))          # Espera para acciones específicas (clics, llenado)
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '5'))               # Reintentos globales
 
@@ -1600,6 +1600,10 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             launch_options = {
                 'headless': True,
                 'args': [
+                    '--disable-web-security',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--disable-site-isolation-trials',
+                    '--disable-features=BlockInsecurePrivateNetworkRequests',
                     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
                     '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
                     '--disable-gpu',
@@ -1727,12 +1731,31 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     await page.route('**/*', block_resources)
 
                 try:
-                    # ----- Aquí comienza el flujo de registro normal (desde paso 7 hasta éxito) -----
-                    # ----- PASO 7: Navegar a la URL base con bloqueo de recursos -----
+
+
+                    
+                    # ----- PASO 7: Navegar a la URL base con reintentos -----
                     base_url = base_urls[country_code]
-                    await page.route('**/*', block_heavy_resources)   # Bloquea CSS temporalmente
-                    await page.goto(base_url, wait_until='commit', timeout=NAVIGATION_TIMEOUT*1000)
-                    await page.wait_for_selector('a[data-nav-role="signin"]', timeout=WAIT_TIMEOUT*1000*5)
+                    max_nav_retries = 3
+                    nav_success = False
+                    for nav_attempt in range(1, max_nav_retries + 1):
+                        try:
+                            await page.route('**/*', block_heavy_resources)
+                            await page.goto(base_url, wait_until='domcontentloaded', timeout=60000)
+                            await page.wait_for_selector('a[data-nav-role="signin"]', timeout=20000)
+                            nav_success = True
+                            break
+                        except Exception as nav_err:
+                            logger.warning(f"Navegación intento {nav_attempt} falló: {nav_err}")
+                            if nav_attempt == max_nav_retries:
+                                raise
+                            await asyncio.sleep(5)
+                            # Recargar la página (si ya existe) o crear una nueva
+                            await page.close()
+                            page = await context.new_page()
+                            await page.route('**/*', block_heavy_resources)
+                    if not nav_success:
+                        raise Exception("No se pudo cargar la página después de reintentos")
                     await page.unroute('**/*', block_heavy_resources)
                     await page.route('**/*', block_resources)
 
@@ -2206,7 +2229,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
                     
                     # Bucle de reintentos de número (hasta 3 números diferentes)
-                    max_number_attempts = 3
+                    max_number_attempts = 6
                     sms_success = False
                     current_service = phone_info['service_name']
                     current_country = phone_info['purchase_country']
