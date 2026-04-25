@@ -2243,6 +2243,10 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                     logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
                                     await page.wait_for_timeout(3000)
                                     code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                                elif "No se puede enviar un mensaje SMS" in error_text or "Verifica a través de WhatsApp" in error_text:
+                                    # Error temporal de SMS, debemos reintentar internamente
+                                    logger.warning(f"⚠️ SMS no disponible: {error_text}. Reintentando internamente (nueva pestaña)...")
+                                    raise Exception("SMS_UNAVAILABLE_RETRY")
                                 else:
                                     logger.error(f"❌ Error en verificación SMS: {error_text}")
                                     raise Exception(f"Error en verificación SMS: {error_text}")
@@ -2418,7 +2422,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     last_error = e
                     error_str = str(e)
                     # Capturamos cualquier excepción relacionada con FunCaptcha para reintentar internamente
-                    if "SMS_TIME_OUT" in error_str or "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_BLOCKED_ACCOUNT" in error_str or "REDIRECTED_TO_LOGIN" in error_str:
+                    if "SMS_UNAVAILABLE_RETRY" in error_str or "SMS_TIME_OUT" in error_str or "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_BLOCKED_ACCOUNT" in error_str or "REDIRECTED_TO_LOGIN" in error_str:
                         logger.warning(f"Fallo recuperable (intento interno {internal_attempt}), reiniciando en nueva pestaña...")
                         continue
                     else:
