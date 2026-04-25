@@ -562,28 +562,44 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
     logger.debug(f"   Resolviendo captcha de coordenadas en paso: {step_name} (ronda {round_num})")
     await page.wait_for_timeout(1000)
 
-    # Buscar canvas o imagen con reintentos
+    # --- Esperar activamente a que aparezca canvas o imagen ---
     click_element = None
-    for attempt in range(3):
-        canvas_element = await page.query_selector('canvas')
-        img_element = await page.query_selector('img[src*="captcha"]')
+    # Esperar hasta 20 segundos a que aparezca cualquier elemento de captcha
+    try:
+        # Intentar esperar canvas
+        canvas_element = await page.wait_for_selector('canvas', timeout=20000)
         if canvas_element:
             click_element = canvas_element
-            logger.debug(f"   Canvas encontrado en intento {attempt+1}")
-            break
-        elif img_element:
-            click_element = img_element
-            logger.debug(f"   Imagen encontrada en intento {attempt+1}")
-            break
-        await page.wait_for_timeout(1000)
-
+            logger.debug(f"   Canvas encontrado después de esperar")
+    except:
+        pass
+    
+    if not click_element:
+        try:
+            # Si no, esperar imagen
+            img_element = await page.wait_for_selector('img[src*="captcha"]', timeout=10000)
+            if img_element:
+                click_element = img_element
+                logger.debug(f"   Imagen encontrada después de esperar")
+        except:
+            pass
+    
+    if not click_element:
+        # Último intento: esperar cualquier canvas o imagen en toda la página (sin filtro)
+        try:
+            any_canvas = await page.wait_for_selector('canvas', timeout=5000)
+            if any_canvas:
+                click_element = any_canvas
+                logger.debug(f"   Canvas genérico encontrado")
+        except:
+            pass
+    
     if not click_element:
         screenshot = await take_screenshot(page, f"{step_name}_coord_{round_num}_element_not_found")
-        raise Exception(f"No se encontró canvas ni imagen en ronda {round_num}. Captura: {screenshot[:100]}...")
-
+        raise Exception(f"No se encontró canvas ni imagen después de esperar 20 segundos en ronda {round_num}. Captura: {screenshot[:100]}...")
     # Esperar bounding box válido
     box = None
-    for attempt in range(5):
+    for attempt in range(10):
         try:
             box = await click_element.bounding_box()
             if box and box['width'] > 0 and box['height'] > 0:
@@ -1738,14 +1754,16 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     base_url = base_urls[country_code]
                     max_nav_retries = 3
                     nav_success = False
+                    last_error = None
                     for nav_attempt in range(1, max_nav_retries + 1):
                         try:
                             await page.route('**/*', block_heavy_resources)
                             await page.goto(base_url, wait_until='domcontentloaded', timeout=60000)
-                            await page.wait_for_selector('a[data-nav-role="signin"]', timeout=20000)
+                            await page.wait_for_selector('a[data-nav-role="signin"]', timeout=15000)
                             nav_success = True
                             break
                         except Exception as nav_err:
+                            last_error = nav_err
                             logger.warning(f"Navegación intento {nav_attempt} falló: {nav_err}")
                             if nav_attempt == max_nav_retries:
                                 raise
@@ -1755,7 +1773,8 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             page = await context.new_page()
                             await page.route('**/*', block_heavy_resources)
                     if not nav_success:
-                        raise Exception("No se pudo cargar la página después de reintentos")
+                        raise Exception(f"No se pudo cargar la página después de {max_nav_retries} intentos: {last_error}")
+                    
                     await page.unroute('**/*', block_heavy_resources)
                     await page.route('**/*', block_resources)
 
