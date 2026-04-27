@@ -2281,8 +2281,62 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         # 10. Esperar a que se cargue la página de verificación SMS (o captcha)
                         await page.wait_for_timeout(5000)
 
-                        # Nota: No se maneja captcha aquí porque el bucle principal de SMS
-                        # ya llamará a handle_captcha_if_present al inicio de cada intento.
+                        # ---- PASO 13: Resolver captcha si aparece después del envío ----
+                        await handle_captcha_if_present(page, step_name="post_submit")
+
+                        # ---- PASO 14: ANALIZAR ERRORES DESPUÉS DEL ENVÍO ----
+                        content = await page.content()
+                        error_detected = False
+
+                        # 14.1 Error de actividad inusual (bloqueo)
+                        if "Detectamos actividad inusual" in content:
+                            logger.warning("   🚫 ERROR: DETECTAMOS ACTIVIDAD INUSUAL -> reinicio interno")
+                            raise Exception("AMAZON_BLOCKED_ACCOUNT")
+
+                        # 14.2 Número inválido o incorrecto
+                        if "incorrecto o no válido" in content or "Introduzca un número de móvil válido" in content:
+                            logger.warning(f"   ❌ NÚMERO INVÁLIDO (intento {submit_attempt}) -> rellenando número y reintentando")
+                            # Re-llenar el campo de número
+                            phone_field = await page.wait_for_selector(phone_field_selector, timeout=3000)
+                            if phone_field:
+                                await phone_field.fill('')
+                                await phone_field.fill(phone_info['full'])
+                            # En el siguiente intento se reintentará
+                            continue
+
+                        # 14.3 Contraseña vacía o demasiado corta
+                        if "Mínimo 6 caracteres requeridos" in content or "Minimo 6 caracteres requeridos" in content:
+                            logger.warning(f"   ❌ CONTRASEÑA VACÍA (intento {submit_attempt}) -> reintentando")
+                            continue
+
+                        # 14.4 Número ya registrado (aparece después del envío)
+                        if "El número de teléfono móvil ya está en uso" in content or "El número de teléfono móvil ya está registrado" in content:
+                            logger.warning("   ⚠️ NÚMERO YA REGISTRADO -> buscando botón 'Continuar con este número'")
+                            # Selectores para el botón de continuar
+                            continue_btn_selectors = [
+                                'button:has-text("Continuar con este número")',
+                                'input[value="Continuar con este número"]',
+                                'a:has-text("Continuar con este número")',
+                                'button:has-text("Continue with this number")'
+                            ]
+                            clicked = False
+                            for sel in continue_btn_selectors:
+                                if await smart_click(page, sel, timeout=5000, wait_for_navigation=True):
+                                    clicked = True
+                                    break
+                            if not clicked:
+                                logger.warning("   No se encontró botón, se asume que ya está en la página de verificación")
+                            await page.wait_for_load_state('domcontentloaded', timeout=15000)
+                            await page.wait_for_timeout(3000)
+                            # Después de este clic, la página avanzará normalmente; no reintentamos este envío
+                            # sino que dejamos que el flujo continúe a la verificación SMS
+                            submit_success = True   # salimos del bucle de envío como exitoso (aunque aún falta SMS)
+                            break
+
+                        # Si no hubo ningún error, el envío fue exitoso
+                        if not error_detected:
+                            submit_success = True
+                            break
 
 
 
@@ -2371,6 +2425,12 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
                             # Cambiar de número y reiniciar el proceso de registro
                             await cambiar_numero_y_reiniciar()
+
+        
+
+
+
+
                             # Al salir de esta función, el bucle continuará con el siguiente número
                             # (ya se habrá reenviado el formulario y estará nuevamente en la página de SMS)
                             continue
@@ -2551,7 +2611,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     last_error = e
                     error_str = str(e)
                     # Capturamos cualquier excepción relacionada con FunCaptcha para reintentar internamente
-                    if "SMS_TIME_OUT" in error_str or "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_REDIRECTED_TO_LOGIN" in error_str or "AMAZON_SINENLACE_TRASCAMBIAR" in error_str or "AMAZON_ERROR_LOSENTIMOS" in error_str or UNKNOWN_STATE_AFTER_CAPTCHA in error_str:
+                    if "SMS_TIME_OUT" in error_str or "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_REDIRECTED_TO_LOGIN" in error_str or "AMAZON_SINENLACE_TRASCAMBIAR" in error_str or "AMAZON_ERROR_LOSENTIMOS" in error_str or "UNKNOWN_STATE_AFTER_CAPTCHA" in error_str:
                         logger.warning(f"Fallo recuperable (intento interno {internal_attempt}), reiniciando en nueva pestaña...")
                         continue
                     else:
