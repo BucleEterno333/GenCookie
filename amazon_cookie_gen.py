@@ -2167,7 +2167,6 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     await page.wait_for_timeout(5000)
 
                     # --- Función local para cambiar de número y reiniciar el flujo de registro ---
-                    # --- Función local para cambiar de número y reiniciar el flujo de registro ---
                     async def cambiar_numero_y_reiniciar():
                         nonlocal phone_info, service_id, service_name, purchase_country, account_data
                         logger.debug("🔄 Cambiando número desde la página de verificación SMS...")
@@ -2245,41 +2244,63 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         # 6. Esperar a que cargue el formulario de registro
                         await page.wait_for_selector('#ap_customer_name', state='visible', timeout=WAIT_TIMEOUT*1000)
 
-                        # 7. Rellenar NOMBRE (solo una vez, importante que sea el selector correcto)
-                        name_field = await page.wait_for_selector('#ap_customer_name', timeout=5000)
-                        await name_field.fill('')           # Limpiar por si acaso
-                        await name_field.fill(fullname)     # Usar el nombre generado originalmente
 
-                        # 8. Rellenar CONTRASEÑA y CONFIRMACIÓN (usando selectores específicos)
-                        pwd_field = await page.wait_for_selector('#ap_password', timeout=5000)
-                        await pwd_field.fill('')
-                        await pwd_field.fill(password)
 
-                        pwd_check_field = await page.wait_for_selector('#ap_password_check', timeout=5000)
-                        await pwd_check_field.fill('')
-                        await pwd_check_field.fill(password)
+                    # =================================================================
+                    # PASO 12: LLENAR FORMULARIO Y ENVIAR (CON REINTENTOS DE ENVÍO)
+                    # =================================================================
+                    logger.debug("📝 Llenando formulario completo (nombre y contraseñas)...")
+                    last_screenshot = await take_screenshot(page, "formulario_antes_llenar")
 
-                        # También por si hay otro campo de confirmación (algunas versiones de Amazon)
-                        try:
-                            alt_pwd_check = await page.query_selector('input[name="passwordCheck"]')
-                            if alt_pwd_check:
-                                await alt_pwd_check.fill('')
-                                await alt_pwd_check.fill(password)
-                        except:
-                            pass
+                    # ---- 12.1: Llenar nombre (una sola vez) ----
+                    name_selectors = ['input#ap_customer_name', 'input[name="customerName"]']
+                    name_filled = False
+                    for sel in name_selectors:
+                        if await smart_fill(page, sel, fullname):
+                            name_filled = True
+                            break
+                    if not name_filled:
+                        logger.warning("⚠️ No se pudo llenar campo de nombre, puede estar precargado")
 
-                        # 9. Hacer clic en el botón final de registro
+                    # Asegurar existencia de campos de contraseña
+                    await page.wait_for_selector('input#ap_password', state='visible', timeout=5000)
+                    await page.wait_for_selector('input#ap_password_check', state='visible', timeout=5000)
+
+                    # ---- 12.2: Bucle de reintentos de ENVÍO (hasta 3 intentos) ----
+                    max_submit_attempts = 3
+                    submit_success = False
+                    for submit_attempt in range(1, max_submit_attempts + 1):
+                        logger.debug(f"📤 Intento de envío #{submit_attempt}")
+
+                        # Rellenar contraseñas (cada intento las vuelve a llenar por si acaso)
+                        if submit_attempt > 1:
+                            logger.debug("   Reintentando, rellenando contraseñas de nuevo...")
+                        await smart_fill(page, 'input#ap_password', password)
+                        await smart_fill(page, 'input#ap_password_check', password)
+                        await smart_fill(page, 'input[name="passwordCheck"]', password)
+
+                        # Verificar que la contraseña se llenó correctamente
+                        filled_pwd = await page.input_value('input#ap_password')
+                        if not filled_pwd or len(filled_pwd) < 6:
+                            logger.warning(f"   Contraseña no llenada correctamente (valor: {filled_pwd})")
+                            continue
+
+                        # Hacer clic en botón final de registro
+                        logger.debug("🎯 Buscando botón de registro final...")
                         final_btn_selectors = [
                             'input#continue', 'input.a-button-input', 'button[type="submit"]',
                             'input[value*="Crear cuenta"]', 'button:has-text("Crear cuenta")',
                             'input[value*="Create account"]', 'button:has-text("Create account")'
                         ]
+                        clicked = False
                         for sel in final_btn_selectors:
-                            if await smart_click(page, sel, wait_for_navigation=True):
+                            if await smart_click(page, sel, timeout=10000, wait_for_navigation=True):
+                                clicked = True
                                 break
+                        if not clicked:
+                            logger.warning("   No se encontró botón final, puede que ya se haya enviado")
 
-                        # 10. Esperar a que se cargue la página de verificación SMS (o captcha)
-                        await page.wait_for_timeout(5000)
+                        await page.wait_for_timeout(3000)   # esperar respuesta
 
                         # ---- PASO 13: Resolver captcha si aparece después del envío ----
                         await handle_captcha_if_present(page, step_name="post_submit")
@@ -2338,8 +2359,10 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             submit_success = True
                             break
 
+                    if not submit_success:
+                        raise Exception("No se pudo enviar el formulario de registro después de varios intentos")
 
-
+                    last_screenshot = await take_screenshot(page, "despues_registro_sin_sms")
 
                     # --- Bucle de reintentos de número (hasta 3 números) ---
                     max_number_attempts = 3
