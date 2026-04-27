@@ -1983,7 +1983,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         if is_login_page:
                             logger.warning("   🔄 Redirigido a la página de inicio de sesión antes de mandar forms. Reiniciando proceso interno.")
                             # Limpiar cookies? No, mejor lanzar excepción para que el bucle interno reinicie
-                            raise Exception("REDIRECTED_TO_LOGIN")
+                            raise Exception("AMAZON_REDIRECTED_TO_LOGIN")
                         elif "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content:
                             logger.warning("   ❌ Página de error de Amazon detectada (Lo sentimos, algo falló de nuestra parte). Lanzando excepción para reintento  .")
                             raise Exception("AMAZON_ERROR_LOSENTIMOS")
@@ -2237,7 +2237,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                 logger.debug("   Clic en 'Enviar código por SMS'")
                                 await page.wait_for_load_state('load', timeout=15000)
 
-                        # 15.2 Esperar campo de código
+                            # 15.2 Esperar campo de código
                         try:
                             code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
                         except Exception as e:
@@ -2245,16 +2245,41 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             if error_msg:
                                 error_text = await error_msg.text_content()
                                 if "Hemos enviado tu OTP" in error_text:
+                                    logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
                                     await page.wait_for_timeout(3000)
-                                    code_input = await page.wait_for_selector('#cvf-input-code', timeout=30000)
+                                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
                                 elif "No se puede enviar un mensaje SMS" in error_text or "Verifica a través de WhatsApp" in error_text:
-                                    logger.warning(f"⚠️ SMS no disponible: {error_text} -> reinicio interno")
-                                    raise Exception("SMS_UNAVAILABLE_RETRY")
+                                    # ----- 1. Hacer clic en "Verificar usando WhatsApp" -----
+                                    logger.warning(f"⚠️ SMS no disponible: {error_text}. Haciendo clic en 'Verificar usando WhatsApp'...")
+                                    whatsapp_btn = await page.query_selector('#secondary_channel_button input.a-button-input')
+                                    if not whatsapp_btn:
+                                        whatsapp_btn = await page.query_selector('#secondary_channel_button')
+                                    if whatsapp_btn:
+                                        await whatsapp_btn.click()
+                                        logger.debug("   ✅ Clic en 'Verificar usando WhatsApp'")
+                                        await page.wait_for_load_state('load', timeout=15000)
+                                        await page.wait_for_timeout(3000)
+                                    else:
+                                        logger.warning("   ⚠️ No se encontró botón de WhatsApp, continuando...")
+
+                                    # ----- 2. Cancelar el número actual (opcional) -----
+                                    try:
+                                        if service_name == 'hero':
+                                            await cancel_hero_sms(service_id)
+                                        elif service_name == '5sim':
+                                            await cancel_fivesim(service_id)
+                                    except Exception as e:
+                                        logger.error(f"❌ Error al cancelar SMS: {e}")
+
+                                    # ----- 3. Cambiar de número (sin reiniciar pestaña) -----
+                                    await cambiar_numero_y_reiniciar()
+                                    # Continuar con el siguiente intento del bucle (siguiente número)
+                                    continue
                                 else:
-                                    logger.error(f"Error en SMS: {error_text}")
-                                    raise
+                                    logger.error(f"❌ Error en verificación SMS: {error_text}")
+                                    raise Exception(f"Error en verificación SMS: {error_text}")
                             else:
-                                raise
+                                raise Exception(f"Campo de código no apareció y no se detectó mensaje de error: {e}")
 
                         # 15.3 Esperar código SMS (2 minutos, reenvío cada 40s)
                         sms_code = await wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=120, resend_interval=40)
@@ -2481,7 +2506,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     last_error = e
                     error_str = str(e)
                     # Capturamos cualquier excepción relacionada con FunCaptcha para reintentar internamente
-                    if "SMS_TIME_OUT" in error_str or "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_REDIRECTED_TO_LOGIN" in error_str or "AMAZON_SINENLACE_TRASCAMBIAR" in error_str or "AMAZON_ERROR_LOSENTIMOS" in error_str:
+                    if "SMS_TIME_OUT" in error_str or "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_REDIRECTED_TO_LOGIN" in error_str or "AMAZON_SINENLACE_TRASCAMBIAR" in error_str or "AMAZON_ERROR_LOSENTIMOS" in error_str or "UNKNOWN_STATE_AFTER_CAPTCHA" in error_str or "SMS_UNAVAILABLE_RETRY" in error_str or "AMAZON_BLOCKED_ACCOUNT" in error_str :
                         logger.warning(f"Fallo recuperable (intento interno {internal_attempt}), reiniciando en nueva pestaña...")
                         continue
                     else:
