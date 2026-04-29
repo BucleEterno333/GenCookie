@@ -594,125 +594,104 @@ async def handle_captcha_if_present(page, step_name="captcha"):
     """
     logger.debug(f"🔍 Verificando captcha en paso: {step_name}")
     await page.wait_for_timeout(3000)
-    # ---------- 1. CAPTCHA DE COORDENADAS (con manejo de múltiples rondas Y espera de nuevo canvas) ----------
+    # ---------- 1. CAPTCHA DE COORDENADAS CON SEGUIMIENTO DE PROGRESO INTERNO ----------
     content = await page.content()
     coordinate_indicators = ["Resuelve esta adivinanza para proteger tu cuenta", "Elija todo", "Selecciona todas las imágenes"]
     if any(indicator in content for indicator in coordinate_indicators):
         logger.warning("⚠️ Captcha de coordenadas detectado")
         
-        max_coordinate_rounds = 15
-        round_num = 1
-        while round_num <= max_coordinate_rounds:
-            logger.debug(f"   Intento de coordenadas #{round_num}")
-            solved = False
-            
-            # Intentar resolver la misma ronda hasta 3 veces (refreshes)
-            for retry in range(3):
-                try:
-                    await solve_coordinate_captcha(page, f"{step_name}_coord", round_num)
-                    solved = True
-                    break
-                except Exception as captcha_err:
-                    error_str = str(captcha_err)
-                    if "CAPTCHA_TIMEOUT" in error_str:
-                        logger.warning(f"   Timeout en ronda {round_num}, reintento {retry+1}/3. Esperando nuevo canvas...")
-                        await page.wait_for_timeout(6000)
-                        continue
-                    else:
-                        logger.error(f"   Error fatal en ronda {round_num}: {captcha_err}")
-                        await take_screenshot(page, f"{step_name}_coord_error_round_{round_num}")
-                        raise
-            
-            if not solved:
-                logger.warning(f"   No se pudo resolver ronda {round_num} después de reintentos, pasando a siguiente ronda")
-                round_num += 1
-                continue
-            
-            # --- ESPERA INTELIGENTE PARA DETECTAR LA SIGUIENTE RONDA O EL ÉXITO FINAL ---
-            logger.debug(f"   Ronda {round_num} resuelta. Esperando actualización de la página...")
-            await page.wait_for_timeout(3000)  # Espera base de 3 segundos
-            
-            # Esperar hasta 20 segundos a que ocurra una de estas condiciones:
-            # - Aparece un nuevo canvas (siguiente ronda)
-            # - Aparece el campo de SMS (captcha completado)
-            # - Aparece el formulario de registro (error de validación)
-            # - Aparece el botón "Proceder a crear una cuenta"
-            # - Se redirige a login (bloqueo)
-            
-            start_wait = time.time()
-            timeout_wait = 20
-            next_round_detected = False
-            final_success = False
-            
-            while time.time() - start_wait < timeout_wait:
-                # 1. Buscar nuevo canvas (indicador de siguiente ronda)
-                new_canvas = await page.query_selector('canvas')
-                if new_canvas:
-                    # Verificar que el canvas sea visible y tenga tamaño > 0
-                    box = await new_canvas.bounding_box()
-                    if box and box['width'] > 50 and box['height'] > 50:
-                        logger.debug("   Nuevo canvas detectado, continuando con siguiente ronda...")
-                        next_round_detected = True
-                        break
-                
-                # 2. Buscar campo de SMS (código)
-                sms_field = await page.query_selector('#cvf-input-code, #cvf-input-otp, input[name="otpCode"]')
-                if sms_field:
-                    logger.debug("   ✅ Página de verificación SMS detectada después de coordenadas.")
-                    final_success = True
-                    break
-                
-                # 3. Buscar formulario de registro (error de validación)
-                if await page.query_selector('#ap_customer_name'):
-                    logger.debug("   Formulario de registro detectado (posible error).")
-                    final_success = True
-                    break
-                
-                # 4. Buscar botón "Proceder a crear una cuenta"
-                proceed = await page.query_selector('span#intention-submit-button input.a-button-input')
-                if proceed:
-                    logger.debug("   Botón 'Proceder' detectado, haciendo clic...")
-                    await proceed.click()
-                    await page.wait_for_timeout(3000)
-                    continue  # seguir esperando después del clic
-                
-                # 5. Redirección a login
-                if await page.query_selector('#ap_email'):
-                    logger.warning("   🚫 Redirigido a página de login después de coordenadas.")
-                    raise Exception("AMAZON_REDIRECTED_TO_LOGIN")
-                
-                await page.wait_for_timeout(1000)
-            
-            if final_success:
-                logger.debug(f"   ✅ Captcha completado después de {round_num} ronda(s).")
-                await page.wait_for_timeout(2000)
-                break
-            
-            if next_round_detected:
-                round_num += 1
-                if round_num > max_coordinate_rounds:
-                    logger.warning("   Se alcanzó el máximo de rondas para captcha de coordenadas")
-                    screenshot = await take_screenshot(page, "coordinate_captcha_max_rounds")
-                    raise Exception("COORDINATE_CAPTCHA_MAX_ROUNDS")
-                # Continuar con la siguiente ronda (el bucle while lo hará automáticamente)
-                continue
-            else:
-                # No se detectó nuevo canvas ni SMS ni formulario: error
-                screenshot = await take_screenshot(page, "coordinate_captcha_stuck")
-                raise Exception(f"COORDINATE_CAPTCHA_STUCK - No avanzó después de ronda {round_num}")
+        # Obtener el progreso inicial (cuántas rondas necesita Amazon)
+        resolved, needed = await get_captcha_progress(page)
+        if resolved is None or needed is None:
+            # Si no podemos leer el progreso, asumimos 3 rondas.
+            resolved = 0
+            needed = 3
+            logger.debug("   No se pudo leer progreso, asumiendo 3 rondas necesarias.")
+        else:
+            logger.debug(f"   Progreso inicial: {resolved}/{needed}")
         
-        # Después del bucle de coordenadas, continuar con la verificación de estado
-        # (el código que ya tienes para manejar SMS, registro, etc.)
+        # Bucle principal: continuamos hasta que resolved == needed
+        max_total_attempts = 30  # Para evitar bucles infinitos (30 intentos totales)
+        total_attempts = 0
+        consecutive_fails = 0
+        last_resolved = resolved
+        
+        while resolved < needed and total_attempts < max_total_attempts:
+            total_attempts += 1
+            logger.debug(f"   --- Intento global #{total_attempts} | Progreso actual: {resolved}/{needed} ---")
+            
+            # Intentamos resolver la siguiente ronda (la que Amazon espera)
+            try:
+                # Guardar el ID del canvas actual antes de resolver
+                canvas_before = await page.query_selector('canvas')
+                canvas_id_before = await canvas_before.get_attribute('data-challenge-id') if canvas_before else None
+                
+                # Llamar a solve_coordinate_captcha (intentará hasta 3 refreshes internos)
+                await solve_coordinate_captcha(page, "coord_progress", round_num=resolved+1)
+                
+                # Esperar a que el canvas cambie o aparezca éxito (máximo 20 segundos)
+                change_result = await wait_for_canvas_change(page, previous_canvas_id=canvas_id_before, timeout=20)
+                
+                if change_result == 'sms' or change_result == 'register':
+                    logger.debug("   ✅ Captcha completado con éxito (pantalla SMS/registro detectada).")
+                    resolved = needed  # Forzar salida
+                    break
+                elif change_result == 'login':
+                    raise Exception("AMAZON_REDIRECTED_TO_LOGIN")
+                elif change_result == 'new_canvas':
+                    # Se cargó un nuevo canvas, ahora leer el nuevo progreso
+                    await page.wait_for_timeout(2000)  # Dar tiempo a que el texto se actualice
+                    new_resolved, new_needed = await get_captcha_progress(page)
+                    if new_resolved is None:
+                        # Si no podemos leer, asumimos que avanzó una ronda
+                        new_resolved = resolved + 1
+                    logger.debug(f"   Nuevo progreso después de resolver: {new_resolved}/{new_needed}")
+                    
+                    if new_resolved > resolved:
+                        # ¡Ronda correcta! Avanzamos
+                        logger.debug(f"   ✅ Ronda correcta. Avance: {resolved} → {new_resolved}")
+                        resolved = new_resolved
+                        needed = new_needed if new_needed else needed
+                        consecutive_fails = 0
+                    else:
+                        # El progreso no aumentó: la resolución fue incorrecta
+                        logger.warning(f"   ❌ Ronda fallida. El progreso no aumentó (sigue en {resolved}/{needed}). Reintentando la misma ronda...")
+                        consecutive_fails += 1
+                        if consecutive_fails >= 3:
+                            # Tres fallos consecutivos, refrescar todo el captcha? o cambiar de IP
+                            logger.warning("   Demasiados fallos consecutivos, refrescando el captcha completo...")
+                            await click_refresh_button(page)
+                            await page.wait_for_timeout(3000)
+                            # Reiniciamos el progreso (Amazon lo habrá reseteado a 0)
+                            resolved, needed = await get_captcha_progress(page)
+                            if resolved is None:
+                                resolved = 0
+                            consecutive_fails = 0
+                        # No incrementamos resolved, repetimos la misma ronda (el canvas ya cambió, pero no contó)
+                        continue
+                else:
+                    # No hubo cambio de canvas ni éxito: posiblemente el captcha se quedó pegado
+                    logger.warning("   No se detectó cambio de canvas ni éxito, reintentando...")
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"   Error resolviendo ronda: {e}")
+                consecutive_fails += 1
+                if consecutive_fails >= 3:
+                    raise Exception(f"Demasiados errores consecutivos en captcha: {e}")
+                continue
+        
+        if resolved >= needed:
+            logger.debug(f"   ✅ Captcha de coordenadas completado exitosamente después de {total_attempts} intentos totales.")
+            # Asegurarse de que la página haya avanzado (puede que esté en pantalla SMS o registro)
+            await page.wait_for_timeout(3000)
+        else:
+            raise Exception(f"No se pudo completar el captcha después de {max_total_attempts} intentos. Progreso final: {resolved}/{needed}")
+        
+
 
         # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
     title = await page.title()
-
-
-
-
-
-
-
 
     
     if "Confirma tu identidad" in title or "Verify your identity" in title:
@@ -867,20 +846,23 @@ async def click_refresh_button(page):
 # ===================================================================
 async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
     """
-    Resuelve captcha de coordenadas con reintentos y refreshes automáticos.
-    - Hasta MAX_REFRESH_ATTEMPTS intentos (por defecto 3)
-    - Cada intento espera coordenadas con timeout de 50 segundos
-    - Si no hay coordenadas, hace clic en "Nuevo rompecabezas" y reintenta
+    Resuelve una ronda de captcha de coordenadas.
+    - Hasta MAX_REFRESH_ATTEMPTS (3) intentos para obtener coordenadas.
+    - Cada intento espera COORD_TIMEOUT (50s) por coordenadas.
+    - Si no hay coordenadas, hace clic en "Nuevo rompecabezas" y reintenta.
+    - Si obtiene coordenadas, hace clic y confirma.
+    Retorna True si la ronda se resolvió (se hizo clic en confirmar).
+    Lanza excepción si falla después de los intentos.
     """
-    MAX_REFRESH_ATTEMPTS = 3  # Número máximo de refreshes antes de fallar
-    COORD_TIMEOUT = 50        # segundos para esperar coordenadas
+    MAX_REFRESH_ATTEMPTS = 3
+    COORD_TIMEOUT = 50
 
     logger.debug(f"   Resolviendo captcha de coordenadas en paso: {step_name} (ronda {round_num})")
 
     for attempt in range(1, MAX_REFRESH_ATTEMPTS + 1):
         logger.debug(f"   Intento de coordenadas #{attempt} (refreshes restantes: {MAX_REFRESH_ATTEMPTS - attempt})")
 
-        # --- Esperar canvas o imagen (si es primer intento o después de refresh) ---
+        # --- Esperar canvas o imagen ---
         try:
             canvas = await page.wait_for_selector('canvas', timeout=20000)
             if canvas:
@@ -895,7 +877,7 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
                     raise Exception("No se encontró canvas ni imagen")
         except Exception as e:
             screenshot = await take_screenshot(page, f"{step_name}_coord_{round_num}_attempt_{attempt}_element_not_found")
-            raise Exception(f"No se encontró canvas/imagen en intento {attempt}: {e}. Captura: {screenshot[:100]}...")
+            raise Exception(f"No se encontró canvas/imagen en intento {attempt}: {e}")
 
         # --- Obtener bounding box ---
         box = None
@@ -906,9 +888,9 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
             await page.wait_for_timeout(500)
         if not box:
             screenshot = await take_screenshot(page, f"{step_name}_coord_{round_num}_attempt_{attempt}_no_bbox")
-            raise Exception(f"No se obtuvo bounding box en intento {attempt}. Captura: {screenshot[:100]}...")
+            raise Exception(f"No se obtuvo bounding box en intento {attempt}")
 
-        # --- Capturar imagen del captcha (para enviar a servicios) ---
+        # --- Capturar imagen del captcha ---
         img_path = None
         if click_element == canvas:
             screenshot_bytes = await canvas.screenshot()
@@ -927,7 +909,7 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
         await take_screenshot(page, f"{step_name}_coord_{round_num}_attempt_{attempt}_before_solve")
         hint_text = "Haz clic en todas las imágenes que contengan el objeto indicado"
 
-        # --- Funciones asíncronas para cada servicio ---
+        # --- Llamar a servicios de captcha ---
         async def solve_2captcha_async():
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, solve_2captcha_coordinates, img_path, hint_text)
@@ -944,7 +926,6 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
         if not tasks:
             raise Exception("No hay servicios de captcha configurados")
 
-        # --- Esperar coordenadas con timeout de COORD_TIMEOUT segundos ---
         coordinates = None
         errors = []
         try:
@@ -954,59 +935,52 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
             )
         except asyncio.TimeoutError:
             logger.warning(f"   ⏰ Timeout de {COORD_TIMEOUT}s alcanzado (intento {attempt})")
-            # No hay coordenadas, irá a la sección de refresh
             coordinates = None
         else:
-            # Procesar resultados
             for res in results:
                 if isinstance(res, Exception):
                     errors.append(str(res))
                     logger.warning(f"   Servicio falló: {res}")
-                elif res:  # lista de coordenadas
+                elif res:
                     coordinates = res
                     break
 
-        # --- Si obtuvimos coordenadas, resolver ---
         if coordinates:
             logger.debug(f"   ✅ Coordenadas obtenidas (intento {attempt}): {coordinates}")
+            # Realizar clics
             for point in coordinates:
                 abs_x = box['x'] + int(point['x'])
                 abs_y = box['y'] + int(point['y'])
                 await page.mouse.click(abs_x, abs_y)
                 await asyncio.sleep(0.2)
 
+            # Buscar botón de confirmar
             confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"], button[type="submit"]')
             if confirm_btn:
                 await confirm_btn.click()
                 logger.debug(f"   Botón de confirmar clickeado (intento {attempt})")
                 await page.wait_for_load_state('domcontentloaded', timeout=10000)
+                # Pequeña espera para que el backend procese
+                await page.wait_for_timeout(1500)
+                # Retornamos True para indicar que se resolvió esta ronda (independientemente de si fue correcta o no)
+                return True
             else:
                 logger.warning(f"   No se encontró botón de confirmar en intento {attempt}")
-
-            await page.wait_for_timeout(1000)
-            await take_screenshot(page, f"{step_name}_coord_{round_num}_attempt_{attempt}_after_solve")
-            return True
-
-        # --- No se obtuvieron coordenadas: intentar refrescar el captcha ---
-        logger.warning(f"   No se recibieron coordenadas en intento {attempt}")
-        if attempt < MAX_REFRESH_ATTEMPTS:
-            logger.debug("   🔄 Buscando botón 'Obtenga un nuevo rompecabezas' para refrescar...")
-            refreshed = await click_refresh_button(page)
-            if not refreshed:
-                logger.warning("   ❌ No se pudo hacer clic en refrescar, reintentando sin refresh...")
-            # Esperar a que el nuevo canvas esté listo (adicional)
-            await page.wait_for_timeout(3000)
+                # Aún así, damos por intentado el clic (puede que el captcha sea de tipo diferentes)
+                return True
         else:
-            # Último intento fallido
-            screenshot = await take_screenshot(page, f"{step_name}_coord_{round_num}_no_solution_after_{MAX_REFRESH_ATTEMPTS}_attempts")
-            raise Exception(f"CAPTCHA_NO_SOLUTION after {MAX_REFRESH_ATTEMPTS} attempts. Errors: {errors}. Captura: {screenshot[:100]}...")
+            logger.warning(f"   No se recibieron coordenadas en intento {attempt}")
+            if attempt < MAX_REFRESH_ATTEMPTS:
+                logger.debug("   🔄 Intentando refrescar el captcha...")
+                refreshed = await click_refresh_button(page)
+                if not refreshed:
+                    logger.warning("   ❌ No se pudo hacer clic en refrescar, reintentando sin refresh...")
+                await page.wait_for_timeout(3000)
+            else:
+                screenshot = await take_screenshot(page, f"{step_name}_coord_{round_num}_no_solution_after_{MAX_REFRESH_ATTEMPTS}_attempts")
+                raise Exception(f"CAPTCHA_NO_SOLUTION after {MAX_REFRESH_ATTEMPTS} attempts. Errors: {errors}")
 
-    # Nunca debería llegar aquí
     raise Exception("CAPTCHA_FAILED_UNEXPECTED")
-
-
-
-
 
 
 
@@ -1599,6 +1573,66 @@ async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeo
             logger.warning(f"   ⚠️ Error al hacer clic en reenviar: {e}")
     return None
 
+
+async def get_captcha_progress(page):
+    """
+    Extrae el texto de progreso del captcha de coordenadas.
+    Ejemplo: "Resueltos: 1 de 3" o "Resueltos: 2 Necesarios: 3"
+    Retorna (resolved, needed) o (None, None) si no se encuentra.
+    """
+    content = await page.content()
+    # Patrón para español: "Resueltos: X de Y" o "Resueltos: X Necesarios: Y"
+    match = re.search(r'Resueltos:\s*(\d+)\s*(?:de|Necesarios:)\s*(\d+)', content, re.IGNORECASE)
+    if match:
+        resolved = int(match.group(1))
+        needed = int(match.group(2))
+        logger.debug(f"📊 Progreso captcha: {resolved}/{needed}")
+        return resolved, needed
+    # Patrón en inglés: "Solved: X of Y" o "Solved: X Needed: Y"
+    match_en = re.search(r'Solved:\s*(\d+)\s*(?:of|Needed:)\s*(\d+)', content, re.IGNORECASE)
+    if match_en:
+        resolved = int(match_en.group(1))
+        needed = int(match_en.group(2))
+        logger.debug(f"📊 Captcha progress: {resolved}/{needed}")
+        return resolved, needed
+    return None, None
+
+async def wait_for_canvas_change(page, previous_canvas_id=None, timeout=20):
+    """
+    Espera a que el canvas del captcha cambie (nuevo desafío) o a que aparezca pantalla de éxito.
+    Retorna 'new_canvas' si detecta un canvas diferente, 'sms' si aparece campo de código,
+    'register' si aparece formulario de registro, 'login' si redirige a login, o None si timeout.
+    """
+    start = time.time()
+    # Intentamos obtener un identificador único del canvas actual (ej. su data:)
+    if previous_canvas_id is None:
+        # Obtener el canvas actual
+        canvas = await page.query_selector('canvas')
+        if canvas:
+            previous_canvas_id = await canvas.get_attribute('data-challenge-id') or str(await canvas.bounding_box())
+    
+    while time.time() - start < timeout:
+        # 1. Buscar campo de SMS
+        if await page.query_selector('#cvf-input-code, #cvf-input-otp, input[name="otpCode"]'):
+            logger.debug("   📱 Campo SMS detectado, captcha completado.")
+            return 'sms'
+        # 2. Buscar formulario de registro
+        if await page.query_selector('#ap_customer_name'):
+            logger.debug("   📝 Formulario de registro detectado.")
+            return 'register'
+        # 3. Buscar página de login (error)
+        if await page.query_selector('#ap_email'):
+            logger.warning("   🚫 Redirigido a login, captcha fallido.")
+            return 'login'
+        # 4. Verificar si el canvas ha cambiado
+        canvas = await page.query_selector('canvas')
+        if canvas:
+            current_id = await canvas.get_attribute('data-challenge-id') or str(await canvas.bounding_box())
+            if previous_canvas_id and current_id != previous_canvas_id:
+                logger.debug("   🎨 Nuevo canvas detectado (siguiente ronda).")
+                return 'new_canvas'
+        await page.wait_for_timeout(500)
+    return None
 # -------------------------------------------------------------------
 # FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA (optimizada)
 # -------------------------------------------------------------------
