@@ -683,8 +683,14 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         
         if resolved >= needed:
             logger.debug(f"   ✅ Captcha de coordenadas completado exitosamente después de {total_attempts} intentos totales.")
-            # Asegurarse de que la página haya avanzado (puede que esté en pantalla SMS o registro)
+            # Esperar un poco para que la página se estabilice
             await page.wait_for_timeout(3000)
+            # Verificar que estamos en la pantalla esperada (SMS o registro)
+            if await page.query_selector('#cvf-input-code, #ap_customer_name'):
+                return True
+            else:
+                # Si no, lanzar excepción para que el flujo principal lo maneje
+                raise Exception("CAPTCHA_COMPLETED_BUT_UNKNOWN_STATE")
         else:
             raise Exception(f"No se pudo completar el captcha después de {max_total_attempts} intentos. Progreso final: {resolved}/{needed}")
         
@@ -2477,19 +2483,56 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             # Esperar campo de código
                             try:
                                 code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                            # Dentro del bucle for num_att in range(1, max_number_attempts_per_country + 1):
+                            # ... después de intentar obtener code_input ...
                             except Exception as e:
                                 error_msg = await page.query_selector('.a-alert-content, .a-alert-error')
                                 if error_msg:
                                     error_text = await error_msg.text_content()
                                     if "No se puede enviar un mensaje SMS" in error_text or "Verifica a través de WhatsApp" in error_text:
                                         logger.warning(f"⚠️ SMS no disponible para {test_country} (intento {num_att})")
-                                        # Si quedan intentos de número, continuar con el siguiente número del mismo país
-                                        if num_att < max_number_attempts_per_country:
-                                            logger.debug("   🔄 Intentando con otro número del mismo país...")
-                                            continue   # saltar a la siguiente iteración del bucle de números
+                                        # Hacer clic en "Verificar usando WhatsApp" para poder acceder al enlace "Cambiar"
+                                        whatsapp_btn = await page.query_selector('#secondary_channel_button input.a-button-input')
+                                        if not whatsapp_btn:
+                                            whatsapp_btn = await page.query_selector('#secondary_channel_button')
+                                        if whatsapp_btn:
+                                            await whatsapp_btn.click()
+                                            logger.debug("   ✅ Clic en 'Verificar usando WhatsApp'")
+                                            await page.wait_for_load_state('load', timeout=15000)
+                                            await page.wait_for_timeout(3000)
                                         else:
-                                            logger.warning(f"   Se agotaron los números para {test_country}, pasando al siguiente país.")
-                                            break    # sale del bucle de números y pasa al siguiente país
+                                            logger.warning("   ⚠️ No se encontró botón de WhatsApp, continuando...")
+                                        
+                                        # Ahora buscar el enlace "Cambiar" y hacer clic (para cambiar de número)
+                                        change_link = None
+                                        for sel in ['a:has-text("Cambiar")', 'a[href*="/ap/register?"]', 'a[href*="sign_in_otp_change"]']:
+                                            try:
+                                                change_link = await page.wait_for_selector(sel, timeout=5000)
+                                                if change_link:
+                                                    await change_link.click()
+                                                    logger.debug("   🔄 Enlace 'Cambiar' clickeado")
+                                                    await page.wait_for_load_state('domcontentloaded', timeout=15000)
+                                                    break
+                                            except:
+                                                continue
+                                        if not change_link:
+                                            logger.warning("   ⚠️ No se encontró enlace 'Cambiar', se usará la navegación directa...")
+                                            # Opcional: navegar a la URL de registro directamente (menos fiable)
+                                        
+                                        # Cancelar el número actual
+                                        try:
+                                            if service_name == 'hero':
+                                                await cancel_hero_sms(service_id)
+                                            elif service_name == '5sim':
+                                                await cancel_fivesim(service_id)
+                                        except Exception as cancel_err:
+                                            logger.debug(f"   ⚠️ Error cancelando número: {cancel_err}")
+                                        
+                                        # No llamamos a cambiar_numero_y_reiniciar, simplemente hacemos continue
+                                        # para que el bucle externo (num_att) intente con otro número del mismo país
+                                        # Nota: al hacer continue, saltamos el resto del código de este intento y volvemos al inicio del for,
+                                        # donde se incrementará num_att y se obtendrá un nuevo número (porque num_att > 1 o test_country != current_country)
+                                        continue
                                     else:
                                         logger.error(f"❌ Error inesperado: {error_text}")
                                         raise Exception(f"Error en verificación SMS: {error_text}")
