@@ -1316,33 +1316,31 @@ SMS_SERVICES = [
 async def get_phone_number(account_country, force_service=None, force_country=None):
     """
     Obtiene un número de teléfono.
-    Si force_service y force_country se proporcionan, intenta solo ese servicio/país.
+    Si force_service está presente, solo intenta ese servicio.
+    Si force_country está presente, intenta ese país primero y luego el resto del orden (sin duplicados).
     De lo contrario, sigue el orden por precio de cada servicio.
     """
     # Prefijos para extraer número local (dígitos después del código país)
     prefix_len = {'ID': 2, 'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2,
                   'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}
-    
     prefix_len_plus = {'ID': 3, 'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3, 'FR': 3,
                   'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3, 'KG': 3, 'PL': 3, 'CO': 3, 'LV': 3, 'PK': 3, 'TJ': 3, 'KE': 3}
 
     # Mapeo de códigos de país a números para Hero SMS
     hero_country_map = {
-        'BR': 73,   # Brazil +55 $0.03
-        'CM': 41,   # Cameroon +237 $0.03
-        'MY': 7,    # Malaysia +60 $0.035
-        'KZ': 2,    # Kazakhstan +7 $0.035
-        'ID': 6,    # Indonesia +62 $0.045
-        'MA': 37,   # Morocco +212 $0.045
-        'KG': 11,   # Kyrgyzstan +996 $0.045
-        'CO': 33,   # Colombia +57 $0.05
-        'MX': 54,   # México +52 $0.08
+        'BR': 73,   # Brazil +55
+        'CM': 41,   # Cameroon +237
+        'MY': 7,    # Malaysia +60
+        'KZ': 2,    # Kazakhstan +7
+        'ID': 6,    # Indonesia +62
+        'MA': 37,   # Morocco +212
+        'KG': 11,   # Kyrgyzstan +996
+        'CO': 33,   # Colombia +57
+        'MX': 54,   # México +52
     }
 
     # Orden de países por precio (barato a caro) para Hero
-    # hero_order = ['CM', 'BR', 'MY' no llegan sms, 'KZ', 'ID', 'MA' Da error, 'KG', 'CO', 'MX']
-    # hero_order = ['CM', 'BR', 'MY', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
-    hero_order = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']  
+    hero_order = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
 
     # Orden manual para 5sim (si no se pueden obtener precios)
     FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
@@ -1354,10 +1352,11 @@ async def get_phone_number(account_country, force_service=None, force_country=No
     else:
         fivesim_order = FIVESIM_MANUAL_ORDER
 
-    # Si se forzó un servicio y país, intentar solo eso
+    # -------------------------------------------------------------------
+    # Caso 1: Se fuerza un servicio y un país específico
+    # -------------------------------------------------------------------
     if force_service and force_country:
-        logger.debug(f"🔒 Forzando servicio={force_service}, país={force_country}")
-        # Buscar el servicio
+        logger.debug(f"🔒 Forzando servicio={force_service}, país={force_country} (primero, luego resto del orden)")
         target_service = None
         for s in SMS_SERVICES:
             if s['name'] == force_service and s['enabled']:
@@ -1367,50 +1366,136 @@ async def get_phone_number(account_country, force_service=None, force_country=No
             logger.warning(f"   ❌ Servicio {force_service} no disponible")
             return None
 
-        try:
-            if force_service == 'hero':
-                country_num = hero_country_map.get(force_country)
-                if not country_num:
-                    logger.debug(f"   No hay mapeo Hero para {force_country}")
-                    return None
-                result = await target_service['get_number'](country_num, service='am')
-                if result:
-                    phone_full, service_id = result
-                    local_len = prefix_len.get(force_country, 0)
-                    if local_len and len(phone_full) > local_len:
-                        phone_local = phone_full[local_len:]
-                        phone_local = re.sub(r'\D', '', phone_local)
-                    else:
-                        phone_local = phone_full
-                    return {
-                        'full': f'+{phone_full}',
-                        'local': phone_local,
-                        'service_id': service_id,
-                        'service_name': force_service,
-                        'purchase_country': force_country
-                    }
-            elif force_service == '5sim':
-                result = await target_service['get_number'](force_country, product='amazon')
-                if result:
-                    phone_full, service_id = result
-                    local_len = prefix_len_plus.get(force_country, 0)
-                    if local_len and len(phone_full) > local_len:
-                        phone_local = phone_full[local_len:]
-                        phone_local = re.sub(r'\D', '', phone_local)
-                    else:
-                        phone_local = phone_full
-                    return {
-                        'full': phone_full,
-                        'local': phone_local,
-                        'service_id': service_id,
-                        'service_name': force_service,
-                        'purchase_country': force_country
-                    }
-        except Exception as e:
-            logger.warning(f"   Error obteniendo número forzado: {e}")
+        # Construir la lista de países a probar: primero el forzado, luego el resto del orden sin duplicados
+        if force_service == 'hero':
+            full_order = hero_order
+        elif force_service == '5sim':
+            full_order = fivesim_order
+        else:
+            full_order = [account_country]
+
+        # Crear lista ordenada: force_country primero, luego los demás en el orden original (sin repetir)
+        countries_to_try = [force_country]
+        for c in full_order:
+            if c != force_country:
+                countries_to_try.append(c)
+
+        for purchase_country in countries_to_try:
+            logger.debug(f"   Probando país {purchase_country} (servicio forzado {force_service})...")
+            try:
+                if force_service == 'hero':
+                    country_num = hero_country_map.get(purchase_country)
+                    if not country_num:
+                        logger.debug(f"   No hay mapeo Hero para {purchase_country}")
+                        continue
+                    result = await target_service['get_number'](country_num, service='am')
+                    if result:
+                        phone_full, service_id = result
+                        local_len = prefix_len.get(purchase_country, 0)
+                        if local_len and len(phone_full) > local_len:
+                            phone_local = phone_full[local_len:]
+                            phone_local = re.sub(r'\D', '', phone_local)
+                        else:
+                            phone_local = phone_full
+                        return {
+                            'full': f'+{phone_full}',
+                            'local': phone_local,
+                            'service_id': service_id,
+                            'service_name': force_service,
+                            'purchase_country': purchase_country
+                        }
+                elif force_service == '5sim':
+                    result = await target_service['get_number'](purchase_country, product='amazon')
+                    if result:
+                        phone_full, service_id = result
+                        local_len = prefix_len_plus.get(purchase_country, 0)
+                        if local_len and len(phone_full) > local_len:
+                            phone_local = phone_full[local_len:]
+                            phone_local = re.sub(r'\D', '', phone_local)
+                        else:
+                            phone_local = phone_full
+                        return {
+                            'full': phone_full,
+                            'local': phone_local,
+                            'service_id': service_id,
+                            'service_name': force_service,
+                            'purchase_country': purchase_country
+                        }
+            except Exception as e:
+                logger.warning(f"   Error con {force_service} en {purchase_country}: {e}")
+                continue
         return None
 
-    # Si no hay fuerza, recorrer servicios normalmente
+    # -------------------------------------------------------------------
+    # Caso 2: Se fuerza solo el servicio (sin país): iterar sobre todos los países de ese servicio
+    # -------------------------------------------------------------------
+    if force_service and not force_country:
+        logger.debug(f"🔒 Forzando solo servicio={force_service} (probando todos los países en orden)")
+        target_service = None
+        for s in SMS_SERVICES:
+            if s['name'] == force_service and s['enabled']:
+                target_service = s
+                break
+        if not target_service:
+            logger.warning(f"   ❌ Servicio {force_service} no disponible")
+            return None
+
+        # Obtener el orden de países para ese servicio
+        if force_service == 'hero':
+            country_order = hero_order
+        elif force_service == '5sim':
+            country_order = fivesim_order
+        else:
+            country_order = [account_country]
+
+        for purchase_country in country_order:
+            logger.debug(f"   Probando país {purchase_country} (servicio forzado {force_service})...")
+            try:
+                if force_service == 'hero':
+                    country_num = hero_country_map.get(purchase_country)
+                    if not country_num:
+                        continue
+                    result = await target_service['get_number'](country_num, service='am')
+                    if result:
+                        phone_full, service_id = result
+                        local_len = prefix_len.get(purchase_country, 0)
+                        if local_len and len(phone_full) > local_len:
+                            phone_local = phone_full[local_len:]
+                            phone_local = re.sub(r'\D', '', phone_local)
+                        else:
+                            phone_local = phone_full
+                        return {
+                            'full': f'+{phone_full}',
+                            'local': phone_local,
+                            'service_id': service_id,
+                            'service_name': force_service,
+                            'purchase_country': purchase_country
+                        }
+                elif force_service == '5sim':
+                    result = await target_service['get_number'](purchase_country, product='amazon')
+                    if result:
+                        phone_full, service_id = result
+                        local_len = prefix_len_plus.get(purchase_country, 0)
+                        if local_len and len(phone_full) > local_len:
+                            phone_local = phone_full[local_len:]
+                            phone_local = re.sub(r'\D', '', phone_local)
+                        else:
+                            phone_local = phone_full
+                        return {
+                            'full': phone_full,
+                            'local': phone_local,
+                            'service_id': service_id,
+                            'service_name': force_service,
+                            'purchase_country': purchase_country
+                        }
+            except Exception as e:
+                logger.warning(f"   Error con {force_service} en {purchase_country}: {e}")
+                continue
+        return None
+
+    # -------------------------------------------------------------------
+    # Caso 3: Sin fuerza: iterar sobre servicios y países normalmente
+    # -------------------------------------------------------------------
     for service in SMS_SERVICES:
         if not service['enabled']:
             continue
@@ -1465,23 +1550,11 @@ async def get_phone_number(account_country, force_service=None, force_country=No
                             'service_name': service['name'],
                             'purchase_country': purchase_country
                         }
-                # Otros servicios (no implementados)
-                else:
-                    result = await service['get_number'](account_country, service='amazon')
-                    if result:
-                        phone_full, service_id = result
-                        phone_local = re.sub(r'\D', '', phone_full)
-                        return {
-                            'full': phone_full,
-                            'local': phone_local,
-                            'service_id': service_id,
-                            'service_name': service['name'],
-                            'purchase_country': account_country
-                        }
             except Exception as e:
                 logger.warning(f"   Error con {service['name']} en {purchase_country}: {e}")
                 continue
     return None
+
 
 async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30):
     for attempt in range(max_retries):
@@ -1984,8 +2057,8 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                     elif service_name == '5sim':
                                         await cancel_fivesim(service_id)
                                 
-                                # Obtener un nuevo número (mismo servicio/país)
-                                phone_info = await get_phone_number(country_code, force_service=current_service, force_country=current_country)
+                                # Obtener un nuevo número (mismo servicio, pero sin forzar país -> probará todos los países de ese servicio)
+                                phone_info = await get_phone_number(country_code, force_service=current_service, force_country=None)
                                 if not phone_info:
                                     logger.warning("   ❌ No se pudo obtener otro número, pasando al siguiente intento global.")
                                     raise Exception("No hay números disponibles para este país/servicio")
@@ -2249,12 +2322,12 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         await page.wait_for_load_state('domcontentloaded', timeout=15000)
                         await page.wait_for_timeout(2000)
 
-                        # 2. Obtener nuevo número (mismo servicio, mismo país)
+                        # 2. Obtener nuevo número (mismo servicio, pero sin forzar país -> probará todos los países de ese servicio)
                         current_service = phone_info['service_name']
-                        current_country = phone_info['purchase_country']
-                        new_phone = await get_phone_number(country_code, force_service=current_service, force_country=current_country)
+                        # NOTA: Ya no forzamos el país, solo el servicio. Así probará otros países si el actual no tiene números.
+                        new_phone = await get_phone_number(country_code, force_service=current_service, force_country=None)
                         if not new_phone:
-                            raise Exception("No se pudo obtener otro número")
+                            raise Exception("No se pudo obtener otro número (se agotaron los países para este servicio)")
 
                         # 3. Actualizar variables
                         phone_info = new_phone
@@ -2262,6 +2335,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         service_id = phone_info['service_id']
                         service_name = phone_info['service_name']
                         purchase_country = phone_info['purchase_country']
+                        logger.debug(f"   ✅ Nuevo número obtenido: {phone_info['full']} (país: {purchase_country})")
 
                         # 4. Ingresar el nuevo número y hacer clic en "Continuar"
                         phone_field = await page.wait_for_selector(phone_field_selector, timeout=10000)
