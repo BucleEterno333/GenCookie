@@ -1859,7 +1859,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
 
                     # ----- PASO 10.3: Manejar números ya registrados (bucle de cambio) -----
-                    max_phone_attempts = 3
+                    max_phone_attempts = 10
                     phone_attempt = 1
                     phone_success = False
                     current_service = phone_info['service_name']
@@ -1874,7 +1874,10 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             page_content = await page.content()
                             if "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content:
                                 logger.warning("   ❌ Página de error de Amazon detectada (Lo sentimos, no podemos crear tu cuenta). Lanzando excepción para reintento interno.")
+                                last_screenshot = await take_screenshot(page, "error_losentimos")
                                 raise Exception("AMAZON_ERROR_LOSENTIMOS")
+
+
                             
                             # --- Si no hay error, intentar cambiar número ---
                             logger.debug("   Intentando cambiar número...")
@@ -2235,7 +2238,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         # Al salir, la página ya estará en la pantalla de verificación SMS
 
                     # --- Bucle de reintentos de número (hasta 3 números) ---
-                    max_number_attempts = 3
+                    max_number_attempts = 6
                     sms_success = False
                     for num_att in range(1, max_number_attempts + 1):
                         logger.debug(f"📞 Intento de número {num_att}/{max_number_attempts}")
@@ -2254,7 +2257,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                 logger.debug("   Clic en 'Enviar código por SMS'")
                                 await page.wait_for_load_state('load', timeout=15000)
 
-                            # 15.2 Esperar campo de código
+                        # 15.2 Esperar campo de código
                         try:
                             code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
                         except Exception as e:
@@ -2293,7 +2296,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                     # Continuar con el siguiente intento del bucle (siguiente número)
                                     continue
                                 else:
-                                    logger.error(f"❌ Error en verificación SMS: {error_text}")
+                                    logger.error(f"❌ Error en verificación SMS: Detectamos actividad inusual (en inglés): {error_text}")
                                     raise Exception(f"Error en verificación SMS: {error_text}")
                             else:
                                 raise Exception(f"Campo de código no apareció y no se detectó mensaje de error: {e}")
