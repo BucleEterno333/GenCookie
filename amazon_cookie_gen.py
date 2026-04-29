@@ -2404,7 +2404,6 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                 account_data['phone'] = phone_info['local']
                                 account_data['purchase_country'] = purchase_country
                                 # Reiniciar el bucle de verificación SMS (por ejemplo, hacer continue)
-                                continue  # Volver al inicio del bucle de intentos de número
                             except Exception as e:
                                 logger.error(f"Error cambiando número registrado en paso SMS: {e}")
                                 raise
