@@ -245,7 +245,15 @@ def deduct_credits(token, amount=3):
 
 
 
-
+async def log_current_url(page, step_name):
+    """Registra la URL actual de la página en los logs."""
+    try:
+        current_url = page.url
+        logger.debug(f"📍 [{step_name}] URL actual: {current_url}")
+        return current_url
+    except Exception as e:
+        logger.warning(f"⚠️ No se pudo obtener URL en paso {step_name}: {e}")
+        return None
 
 
 
@@ -644,51 +652,85 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 logger.warning("   Se alcanzó el máximo de rondas para captcha de coordenadas")
                 screenshot = await take_screenshot(page, "coordinate_captcha_max_rounds")
                 raise Exception("COORDINATE_CAPTCHA_MAX_ROUNDS")
-        
-        # Después de resolver el captcha, determinar el estado de la página
-        await page.wait_for_timeout(2000)
+            
 
-        has_sms_field = await page.query_selector('#cvf-input-code') is not None
-        has_reg_form = await page.query_selector('#ap_customer_name') is not None
-        has_login_field = await page.query_selector('#ap_email') is not None
-        has_proceed_button = await page.query_selector('span#intention-submit-button input.a-button-input') is not None
+            
+            # Dentro de handle_captcha_if_present, después de resolver el captcha de coordenadas
+            # (reemplazar el bloque "Después de resolver el captcha" completo)
 
-        if has_sms_field:
-            logger.debug("   Captcha resuelto, página de verificación SMS detectada. Continuando...")
-            return True
-
-        if has_reg_form:
-            logger.debug("   Captcha resuelto, pero aún en el formulario de registro (posible error de validación).")
-            # No lanzamos excepción, simplemente retornamos True para que el flujo principal evalúe el error
-            return True
-
-        if has_proceed_button:
-            logger.debug("   ✅ Captcha resuelto, detectada página intermedia 'Proceder a crear una cuenta'. Haciendo clic...")
-            await smart_click(page, 'span#intention-submit-button input.a-button-input', timeout=5000, wait_for_navigation=False)
+            logger.debug("   Esperando que la página avance después del captcha...")
+            await page.unroute('**/*')  # quitar bloqueo temporalmente
+            await page.route('**/*', lambda route: route.continue_())  # permitir todo
             await page.wait_for_timeout(2000)
-            # Verificar si el clic llevó al formulario de registro
-            if await page.wait_for_selector('#ap_customer_name', state='visible', timeout=10000):
-                logger.debug("   ✅ Formulario de registro cargado después del clic en proceder")
-                return True
-            else:
-                # Si no apareció el formulario, quizás redirigió a login
-                if await page.query_selector('#ap_email') is not None:
-                    logger.warning("   Redirigido a login después del clic en proceder. Lanzando excepción.")
-                    raise Exception("AMAZON_REDIRECTED_TO_LOGIN")
-                else:
-                    raise Exception("UNKNOWN_STATE_AFTER_CAPTCHA")
 
-        if has_login_field and not has_reg_form:
-            logger.warning("   Redirigido a la página de inicio de sesión (no a verificación SMS). Amazon bloqueó la cuenta.")
-            raise Exception("AMAZON_REDIRECTED_TO_LOGIN")
+            await log_current_url(page, "post_captcha_unblocked")
+            await take_screenshot(page, "post_captcha_initial")
 
-        # Si no detectamos ninguna, esperar un poco y asumir que avanzó
-        logger.debug("   Captcha resuelto, no se detectó formulario ni SMS. Esperando 3 segundos...")
-        await page.wait_for_timeout(3000)
-        if await page.query_selector('#cvf-input-code') is not None:
+            start_wait = time.time()
+            timeout_wait = 30
+            found = False
+            while time.time() - start_wait < timeout_wait:
+                current_url = await log_current_url(page, "waiting_loop")
+                
+                # Detectar campo SMS
+                sms_field = await page.query_selector('#cvf-input-code, #cvf-input-otp, #otp-code, input[name="otpCode"], input[type="tel"]')
+                if sms_field:
+                    logger.debug("   ✅ Página de verificación SMS detectada. Continuando...")
+                    found = True
+                    break
+                
+                # Botón "Proceder a crear una cuenta"
+                proceed = await page.query_selector('span#intention-submit-button input.a-button-input, input[value="Proceder a crear una cuenta"], button:has-text("Proceder")')
+                if proceed:
+                    logger.debug("   🔘 Botón 'Proceder' detectado, haciendo clic...")
+                    await proceed.click()
+                    await page.wait_for_timeout(3000)
+                    await log_current_url(page, "after_proceed_click")
+                    # Puede que ahora aparezca el formulario de registro
+                    if await page.wait_for_selector('#ap_customer_name', timeout=8000):
+                        logger.debug("   ✅ Formulario de registro cargado después de proceder.")
+                        found = True
+                        break
+                    else:
+                        continue
+                
+                # Formulario de registro
+                if await page.query_selector('#ap_customer_name'):
+                    logger.debug("   ✅ Formulario de registro detectado (posible error de validación).")
+                    found = True
+                    break
+                
+                # Selección SMS vs WhatsApp
+                whatsapp = await page.query_selector('#secondary_channel_button input.a-button-input, button:has-text("Enviar código por SMS")')
+                if whatsapp:
+                    logger.debug("   📱 Pantalla de selección de método detectada. Seleccionando SMS...")
+                    await whatsapp.click()
+                    await page.wait_for_timeout(3000)
+                    continue
+                
+                # Redirección a login (error)
+                if await page.query_selector('#ap_email'):
+                    logger.warning("   🚫 Redirigido a página de login. Amazon bloqueó la cuenta.")
+                    await take_screenshot(page, "redirected_to_login_after_captcha")
+                    raise Exception(f"AMAZON_REDIRECTED_TO_LOGIN - URL: {current_url}")
+                
+                # Error general
+                content = await page.content()
+                if "Lo sentimos" in content or "no podemos crear tu cuenta" in content:
+                    logger.warning("   ❌ Página de error de Amazon detectada.")
+                    await take_screenshot(page, "error_page_after_captcha")
+                    raise Exception(f"AMAZON_ERROR_LOSENTIMOS - URL: {current_url}")
+                
+                await page.wait_for_timeout(1000)
+
+            if not found:
+                current_url = await log_current_url(page, "unknown_state")
+                await take_screenshot(page, f"unknown_state_final_{int(time.time())}")
+                raise Exception(f"UNKNOWN_STATE_AFTER_CAPTCHA - URL: {current_url}")
+
+            # Restaurar el bloqueo de recursos si se desea (opcional)
+            await page.route('**/*', block_resources)
             return True
-        else:
-            raise Exception("UNKNOWN_STATE_AFTER_CAPTCHA")
 
         # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
     title = await page.title()
@@ -1583,9 +1625,10 @@ async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeo
 # -------------------------------------------------------------------
 async def take_screenshot(page, step_name):
     try:
+        current_url = page.url
         screenshot_bytes = await page.screenshot(type='jpeg', quality=SCREENSHOT_QUALITY)
         screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
-        logger.debug(f"📸 Screenshot tomado en paso: {step_name} (tamaño: {len(screenshot_bytes)} bytes)")
+        logger.debug(f"📸 Screenshot tomado en paso: {step_name} | URL: {current_url[:100]} (tamaño: {len(screenshot_bytes)} bytes)")
         return screenshot_b64
     except Exception as e:
         logger.warning(f"⚠️ Error tomando screenshot en paso {step_name}: {e}")
