@@ -1365,8 +1365,6 @@ async def get_phone_number(account_country, force_service=None, force_country=No
     # Orden de países por precio (barato a caro) para Hero
     hero_order = HERO_COUNTRY_ORDER 
 
-    # Orden manual para 5sim (si no se pueden obtener precios)
-    FIVESIM_MANUAL_ORDER = FIVESIM_MANUAL_ORDER
 
     # Para 5sim, obtener precios reales
     fivesim_prices = await get_fivesim_prices()
