@@ -2417,13 +2417,8 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                         await page.wait_for_timeout(3000)
                                     else:
                                         logger.warning("   ⚠️ No se encontró botón de WhatsApp, continuando...")
-                                elif "Hemos enviado tu OTP" in error_text:
-                                    logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
-                                    await page.wait_for_timeout(3000)
-                                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
-                                
-                                
 
+                                    
 
                                     # ----- 2. Cancelar el número actual (opcional) -----
                                     try:
@@ -2438,8 +2433,16 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                     await cambiar_numero_y_reiniciar()
                                     # Continuar con el siguiente intento del bucle (siguiente número)
                                     continue
+
+                                elif "Hemos enviado tu OTP" in error_text:
+                                    logger.debug("   ℹ️ Mensaje de envío detectado, esperando campo de código...")
+                                    await page.wait_for_timeout(3000)
+                                    code_input = await page.wait_for_selector('#cvf-input-code', state='visible', timeout=30000)
+                                
+                                
+
                                 else:
-                                    logger.error(f"❌ Error en verificación SMS: Detectamos actividad inusual (en inglés): {error_text}")
+                                    logger.error(f"❌ Error en verificación SMS: {error_text}")
                                     raise Exception(f"Error en verificación SMS: {error_text}")
                             else:
                                 raise Exception(f"Campo de código no apareció y no se detectó mensaje de error: {e}")
