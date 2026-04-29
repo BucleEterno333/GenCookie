@@ -2135,6 +2135,9 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                     change_link = await page.wait_for_selector(sel, timeout=3000)
                                     if change_link:
                                         logger.debug(f"   ✅ Enlace 'Cambiar' encontrado con selector: {sel}")
+                                        await change_link.click()
+                                        logger.debug(f"   ✅ Enlace 'Cambiar' clickeado")
+
                                         break
                                 except Exception:
                                     continue
