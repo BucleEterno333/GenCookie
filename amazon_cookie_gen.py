@@ -862,7 +862,7 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
     """
     COORD_TIMEOUT = 51
     NUM_REQUESTS = 4
-    TOLERANCIA = 30   # píxeles (Chebyshev)
+    TOLERANCIA = 80   # píxeles (Chebyshev)
 
     logger.debug(f"   Resolviendo captcha con {NUM_REQUESTS} peticiones paralelas (timeout {COORD_TIMEOUT}s)")
 
