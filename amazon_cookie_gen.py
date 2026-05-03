@@ -372,12 +372,32 @@ def solve_anticaptcha_coordinates(image_path, hint):
                             coords = res_result['solution'].get('coordinates')
                             if coords:
                                 points = []
-                                for item in coords:
-                                    if isinstance(item, dict):
-                                        points.append({'x': int(item['x']), 'y': int(item['y'])})
-                                    elif isinstance(item, list) and len(item) == 2:
-                                        points.append({'x': int(item[0]), 'y': int(item[1])})
-                                return points
+                                # ----- AQUI ESTA LA MEJORA: aceptar distintos formatos -----
+                                if isinstance(coords, list):
+                                    for item in coords:
+                                        if isinstance(item, dict):
+                                            # Formato: [{'x': 1, 'y': 2}, ...]
+                                            points.append({'x': int(item['x']), 'y': int(item['y'])})
+                                        elif isinstance(item, list) and len(item) == 2:
+                                            # Formato: [[1,2], [3,4], ...]  <--- ESTE ES EL NUEVO
+                                            points.append({'x': int(item[0]), 'y': int(item[1])})
+                                        else:
+                                            logger.warning(f"   Formato de coordenada desconocido: {item}")
+                                elif isinstance(coords, str):
+                                    # Formato: "x,y;x,y;..."
+                                    for pair in coords.split(';'):
+                                        if pair:
+                                            x, y = pair.split(',')
+                                            points.append({'x': int(x), 'y': int(y)})
+                                else:
+                                    logger.warning(f"   Formato de coordenadas desconocido: {type(coords)}")
+                                
+                                if points:
+                                    logger.debug(f"   ✅ Coordenadas parseadas: {points}")
+                                    return points
+                                else:
+                                    logger.warning("   anticaptcha devolvió coordenadas pero no se pudieron parsear")
+                                    return None
                             else:
                                 logger.warning("   anticaptcha devolvió solución sin coordenadas")
                                 return None
@@ -389,7 +409,6 @@ def solve_anticaptcha_coordinates(image_path, hint):
     except Exception as e:
         logger.warning(f"Error en anticaptcha HTTP: {e}")
         return None
-
 def solve_funcaptcha_2captcha(page_url, site_key, surl=None):
     """Resuelve FunCaptcha usando 2captcha, probando múltiples configuraciones."""
     if not API_KEY_2CAPTCHA:
