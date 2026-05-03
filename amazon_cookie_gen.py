@@ -161,6 +161,38 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------------------
 # FUNCIONES AUXILIARES
 # -------------------------------------------------------------------
+
+# Almacén de sesiones exitosas (proxy + timestamp)
+# Estructura: { "session_id": {"last_used": timestamp, "success_count": int} }
+GOOD_SESSIONS = {}
+SESSION_LIFETIME = 3600  # segundos (1 hora)
+
+def add_good_session(session_id):
+    """Registra una sesión como exitosa (sin captcha)."""
+    GOOD_SESSIONS[session_id] = {
+        "last_used": time.time(),
+        "success_count": GOOD_SESSIONS.get(session_id, {}).get("success_count", 0) + 1
+    }
+    logger.debug(f"✅ Sesión {session_id} marcada como buena (total: {len(GOOD_SESSIONS)})")
+
+def get_best_session():
+    """Devuelve el session_id más reciente y exitoso, o None."""
+    if not GOOD_SESSIONS:
+        return None
+    # Ordenar por último uso (más reciente primero) y luego por éxito
+    best = max(GOOD_SESSIONS.items(), key=lambda x: (x[1]["last_used"], x[1]["success_count"]))
+    session_id = best[0]
+    # Limpiar sesiones vencidas
+    now = time.time()
+    expired = [sid for sid, data in GOOD_SESSIONS.items() if now - data["last_used"] > SESSION_LIFETIME]
+    for sid in expired:
+        del GOOD_SESSIONS[sid]
+        logger.debug(f"🗑️ Sesión {sid} expirada")
+    return session_id
+
+
+
+
 def is_service_enabled():
     """Consulta el estado del interruptor en CheckerCT."""
     try:
@@ -940,7 +972,7 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
         await confirm_btn.click()
         logger.debug(f"   Botón de confirmar clickeado")
         await page.wait_for_load_state('domcontentloaded', timeout=10000)
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(3000)
         return True
     else:
         logger.warning("   No se encontró botón de confirmar, asumiendo éxito")
@@ -1555,60 +1587,84 @@ async def get_captcha_progress(page):
     logger.debug("📊 No se pudo leer el progreso, se asume 0/3")
     return 0, 3
 
-async def wait_for_canvas_change(page, previous_canvas_id=None, timeout=5):
+async def wait_for_canvas_change(page, previous_canvas_id=None, timeout=10):
     """
-    Espera a que el canvas cambie o aparezca éxito/error.
+    Espera a que el canvas cambie después de una acción (clic en Confirmar).
+    Estrategia: esperar a que el canvas desaparezca (o cambie su ID) y luego aparezca uno nuevo.
     Retorna:
-      'new_canvas' - canvas diferente
-      'sms' - campo de código
-      'register' - formulario de registro
-      'login' - página de login
-      'error' - mensaje "Incorrecto..."
-      None - timeout
+      'new_canvas' - si detecta un canvas diferente
+      'sms' - si aparece campo de código
+      'register' - si aparece formulario de registro
+      'login' - si redirige a login
+      None - si timeout
     """
     start = time.time()
-    if previous_canvas_id is None:
-        canvas = await page.query_selector('canvas')
-        if canvas:
-            previous_canvas_id = await canvas.get_attribute('data-challenge-id')
-            if not previous_canvas_id:
-                box = await canvas.bounding_box()
-                previous_canvas_id = f"{box['x']}_{box['y']}_{box['width']}_{box['height']}" if box else None
-                logger.debug(f"   ID canvas inicial (bounding): {previous_canvas_id}")
-
+    
+    # --- 1. Esperar a que el canvas actual desaparezca o cambie de posición ---
+    # Guardamos el bounding box del canvas anterior (si existe)
+    old_box = None
+    if previous_canvas_id:
+        # Intentar obtener bounding box del canvas anterior a partir del ID (si se guardó)
+        # En nuestro caso, previous_canvas_id es el ID calculado (data-challenge-id o bounding)
+        pass
+    
+    # Variable para saber si el canvas ya cambió
+    canvas_disappeared = False
+    first_sight = None
+    
     while time.time() - start < timeout:
-        # 1. Error
-        error_elem = await page.query_selector('.a-alert-content:has-text("Incorrecto"), div:has-text("Incorrecto. Vuelva a intentarlo.")')
-        if error_elem:
-            logger.debug("   ❌ Mensaje de error detectado")
-            return 'error'
-
-        # 2. SMS
+        # 1. Detectar mensajes de éxito (SMS, registro)
         if await page.query_selector('#cvf-input-code, #cvf-input-otp, input[name="otpCode"]'):
-            logger.debug("   📱 Campo SMS detectado")
+            logger.debug("   📱 Campo SMS detectado, captcha completado.")
             return 'sms'
-        # 3. Registro
         if await page.query_selector('#ap_customer_name'):
-            logger.debug("   📝 Formulario de registro detectado")
+            logger.debug("   📝 Formulario de registro detectado.")
             return 'register'
-        # 4. Login
         if await page.query_selector('#ap_email'):
-            logger.warning("   🚫 Redirigido a login")
+            logger.warning("   🚫 Redirigido a login.")
             return 'login'
-        # 5. Cambio de canvas
+        
+        # 2. Detectar el canvas actual
         canvas = await page.query_selector('canvas')
         if canvas:
+            # Obtener identificador del canvas (data-challenge-id o bounding box)
             current_id = await canvas.get_attribute('data-challenge-id')
             if not current_id:
                 box = await canvas.bounding_box()
                 current_id = f"{box['x']}_{box['y']}_{box['width']}_{box['height']}" if box else None
+            
+            # Si tenemos un ID anterior y el actual es diferente, es un nuevo canvas
             if previous_canvas_id and current_id and current_id != previous_canvas_id:
-                logger.debug(f"   🎨 Nuevo canvas detectado (ID antiguo: {previous_canvas_id[:30]}... nuevo: {current_id[:30]}...)")
+                logger.debug(f"   🎨 Nuevo canvas detectado (ID cambiado: {previous_canvas_id[:30]} → {current_id[:30]})")
                 return 'new_canvas'
+            
+            # Si no tenemos ID anterior, pero este canvas tiene diferentes dimensiones o posición
+            if previous_canvas_id is None and canvas:
+                # Asumimos que es el primer canvas, guardamos su ID y seguimos
+                previous_canvas_id = current_id
+        else:
+            # No hay canvas visible: puede estar desapareciendo para cambiar
+            if not canvas_disappeared:
+                logger.debug("   Canvas desapareció, esperando que aparezca uno nuevo...")
+                canvas_disappeared = True
+            # Esperar un poco más
+            await page.wait_for_timeout(500)
+            continue
+        
+        # Si ya desapareció y ahora vuelve a aparecer con otro ID
+        if canvas_disappeared and canvas:
+            new_id = await canvas.get_attribute('data-challenge-id')
+            if not new_id:
+                box = await canvas.bounding_box()
+                new_id = f"{box['x']}_{box['y']}_{box['width']}_{box['height']}" if box else None
+            if new_id and new_id != previous_canvas_id:
+                logger.debug(f"   🎨 Nuevo canvas detectado después de desaparición (ID: {new_id[:30]})")
+                return 'new_canvas'
+        
         await page.wait_for_timeout(500)
-    logger.debug("   ⏱️ Timeout esperando cambio")
+    
+    logger.debug("   ⏱️ Timeout esperando cambio de canvas")
     return None
-
 # --------------------------------------------------------------------
 # FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA (optimizada)
 # -------------------------------------------------------------------
