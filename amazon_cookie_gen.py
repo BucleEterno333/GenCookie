@@ -861,93 +861,150 @@ async def click_refresh_button(page):
 # ===================================================================
 async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
     """
-    Envía 4 peticiones a AntiCaptcha en paralelo.
-    La primera respuesta que contenga EXACTAMENTE 5 puntos se considera válida.
-    Si después de 40 segundos no llega ninguna respuesta con 5 puntos, retorna False.
-    Si llega, hace clic en los 5 puntos y en Confirmar, y retorna True.
+    Lanza N peticiones a AntiCaptcha en paralelo.
+    Valida cada respuesta: exactamente 5 puntos y 5 celdas distintas (sin repetir).
+    Compara sets de celdas entre respuestas válidas.
+    Cuando encuentra M coincidencias, cancela las demás y usa esas coordenadas.
+    Retorna True si hizo clic, False si no hubo consenso.
     """
-    COORD_TIMEOUT = 40  # segundos
-    NUM_REQUESTS = 4
-    EXPECTED_POINTS = 5
+    # ===== CONFIGURACIÓN AQUÍ =====
+    NUM_TAREAS = 8          # número de peticiones paralelas
+    MIN_COINCIDENCIAS = 3   # mínimo de respuestas iguales para aceptar
+    TIMEOUT_TOTAL = 52      # segundos máximo esperando respuestas
+    # ==============================
 
-    logger.debug(f"   Resolviendo captcha: buscando {EXPECTED_POINTS} puntos (4 peticiones, timeout {COORD_TIMEOUT}s)")
+    # Parámetros de la cuadrícula (según tus medidas)
+    CELL_SIZE = 105
+    GAP = 6
+    CANVAS_SIZE = 333  # asumiendo canvas cuadrado de 333x333
 
-    # --- Obtener canvas y bounding box ---
+    logger.debug(f"   Resolviendo captcha: {NUM_TAREAS} peticiones, busco {MIN_COINCIDENCIAS} coincidencias (timeout {TIMEOUT_TOTAL}s)")
+
+    # Obtener canvas y bounding box
     try:
         canvas = await page.wait_for_selector('canvas', timeout=20000)
         if not canvas:
             raise Exception("Canvas no encontrado")
         screenshot_bytes = await canvas.screenshot()
-        img_path = f'temp_canvas_captcha_{round_num}.png'
+        img_path = f'temp_canvas_{round_num}.png'
         with open(img_path, 'wb') as f:
             f.write(screenshot_bytes)
         box = await canvas.bounding_box()
         if not box or box['width'] == 0:
             raise Exception("Bounding box inválida")
     except Exception as e:
-        logger.error(f"   Error preparando canvas: {e}")
-        await take_screenshot(page, f"{step_name}_coord_{round_num}_error")
-        return False
+        logger.error(f"Error preparando canvas: {e}")
+        await take_screenshot(page, f"{step_name}_error")
+        raise Exception(f"Error canvas: {e}")
 
     hint_text = "Haz clic en todas las imágenes que contengan el objeto indicado"
 
-    async def fetch_coordinates():
+    # Función para convertir coordenadas a índice de celda (0-8)
+    def point_to_cell(x, y):
+        # Asumiendo cuadrícula 3x3 con celdas de CELL_SIZE y GAP entre ellas
+        total = CELL_SIZE + GAP
+        col = x // total
+        row = y // total
+        if col > 2: col = 2
+        if row > 2: row = 2
+        return row * 3 + col
+
+    def coords_to_cell_set(coords):
+        """Convierte lista de coordenadas a set de índices de celdas."""
+        cells = set()
+        for p in coords:
+            cells.add(point_to_cell(p['x'], p['y']))
+        return cells
+
+    def is_valid_response(coords):
+        """Valida: exactamente 5 puntos y 5 celdas distintas."""
+        if not coords or len(coords) != 5:
+            return False
+        cells = coords_to_cell_set(coords)
+        return len(cells) == 5
+
+    async def fetch_one():
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, solve_anticaptcha_coordinates, img_path, hint_text)
 
     # Lanzar tareas
-    tasks = [asyncio.create_task(fetch_coordinates()) for _ in range(NUM_REQUESTS)]
-    # Esperar hasta COORD_TIMEOUT, pero recolectar respuestas a medida que llegan
-    start_time = time.time()
+    tasks = [asyncio.create_task(fetch_one()) for _ in range(NUM_TAREAS)]
+    
+    # Almacenar respuestas válidas: lista de (cell_set, coords_original)
+    valid_responses = []
+    best_cell_set = None
     best_coords = None
-    while time.time() - start_time < COORD_TIMEOUT:
-        # Verificar tareas completadas
-        for task in tasks[:]:  # copia para iterar
-            if task.done():
-                tasks.remove(task)
-                try:
-                    res = task.result()
-                except Exception as e:
-                    logger.debug(f"   Tarea falló: {e}")
-                    continue
-                if res and isinstance(res, list) and len(res) == EXPECTED_POINTS:
-                    logger.debug(f"   ✅ Respuesta con {EXPECTED_POINTS} puntos recibida: {res}")
-                    best_coords = res
-                    break
-        if best_coords:
-            break
-        await asyncio.sleep(0.5)
+    start_time = time.time()
+    remaining = NUM_TAREAS
+    completed = 0
 
-    # Cancelar tareas pendientes
-    for task in tasks:
-        task.cancel()
+    # Bucle de recolección de resultados
+    while remaining > 0 and (time.time() - start_time) < TIMEOUT_TOTAL:
+        done, pending = await asyncio.wait(tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            try:
+                coords = task.result()
+            except Exception as e:
+                logger.debug(f"   Tarea falló: {e}")
+                remaining -= 1
+                continue
+            
+            # Validar respuesta
+            if is_valid_response(coords):
+                cell_set = coords_to_cell_set(coords)
+                logger.debug(f"   Respuesta válida: {len(coords)} puntos, celdas: {sorted(cell_set)}")
+                
+                # Comparar con respuestas anteriores
+                matched = False
+                for existing_set, existing_coords in valid_responses:
+                    if existing_set == cell_set:
+                        matched = True
+                        # Contar cuántas veces aparece este set
+                        count = 1 + sum(1 for s, _ in valid_responses if s == cell_set)
+                        if count >= MIN_COINCIDENCIAS:
+                            logger.debug(f"   ✅ Consenso alcanzado: {count} respuestas iguales")
+                            best_cell_set = cell_set
+                            best_coords = coords  # usar las coordenadas de esta respuesta
+                            break
+                if matched:
+                    break
+                else:
+                    valid_responses.append((cell_set, coords))
+            else:
+                logger.debug(f"   Respuesta inválida (puntos: {len(coords) if coords else 0})")
+            remaining -= 1
+        
+        if best_coords:
+            # Cancelar tareas pendientes
+            for t in pending:
+                t.cancel()
+            break
+        tasks = list(pending)
+        completed = NUM_TAREAS - remaining
 
     if not best_coords:
-        logger.warning(f"   No se recibió ninguna respuesta con {EXPECTED_POINTS} puntos en {COORD_TIMEOUT}s.")
+        logger.warning(f"   No se alcanzó consenso después de {completed} respuestas válidas de {NUM_TAREAS}.")
         return False
 
-    # Hacer clic en los puntos
+    # Hacer clic en las coordenadas del consenso
+    logger.debug(f"   Usando coordenadas: {best_coords}")
     for point in best_coords:
         abs_x = box['x'] + point['x']
         abs_y = box['y'] + point['y']
         await page.mouse.click(abs_x, abs_y)
         await asyncio.sleep(0.2)
 
-    # Clic en botón Confirmar
+    # Botón Confirmar
     confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"], button[type="submit"]')
     if confirm_btn:
         await confirm_btn.click()
         logger.debug("   Botón Confirmar clickeado")
         await page.wait_for_load_state('domcontentloaded', timeout=10000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(2000)
         return True
     else:
         logger.warning("   No se encontró botón Confirmar, asumiendo éxito")
         return True
-
-
-
-
 
 async def wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=120, resend_interval=40):
     """
