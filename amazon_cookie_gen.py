@@ -910,16 +910,16 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
         return cells
 
     # --- Variables para recolectar resultados ---
-    valid_responses = []          # lista de (celdas, puntos)
+    valid_responses = []          # lista de (celdas_tuple, puntos)
     tasks = [asyncio.create_task(fetch_one()) for _ in range(NUM_REQUESTS)]
     pending = tasks.copy()
     start_time = time.time()
-    best_cells = None
+    best_cells_tuple = None
     best_points = None
 
     # --- Bucle de espera dinámica ---
     while pending and (time.time() - start_time) < TIMEOUT:
-        # Esperar la primera tarea que termine (o timeout de 1s para no saturar)
+        # Esperar la primera tarea que termine (timeout 1s para no saturar)
         done, pending = await asyncio.wait(pending, timeout=1, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             try:
@@ -931,18 +931,19 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
             if points and len(points) == 5:
                 cells = coords_to_cells(points)
                 if len(cells) == 5:
-                    logger.debug(f"   Respuesta válida: celdas {sorted(cells)}")
-                    valid_responses.append((cells, points))
-                    # Contar frecuencias de cada conjunto de celdas
+                    cells_tuple = tuple(sorted(cells))
+                    logger.debug(f"   Respuesta válida: celdas {cells_tuple}")
+                    valid_responses.append((cells_tuple, points))
+                    # Contar frecuencias
                     from collections import Counter
-                    counter = Counter(cells for cells, _ in valid_responses)
+                    counter = Counter(cell_set for cell_set, _ in valid_responses)
                     most_common, count = counter.most_common(1)[0]
                     if count >= MIN_MATCHES:
                         logger.debug(f"   ✅ Alcanzadas {count} coincidencias. Usando celdas {most_common}")
-                        best_cells = most_common
+                        best_cells_tuple = most_common
                         # Obtener los puntos de la primera respuesta que tenga esas celdas
                         for c, pts in valid_responses:
-                            if c == best_cells:
+                            if c == best_cells_tuple:
                                 best_points = pts
                                 break
                         # Cancelar todas las tareas pendientes
@@ -957,16 +958,17 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
         if best_points:
             break
 
+    # Cancelar tareas restantes si aún hay
+    for t in pending:
+        t.cancel()
+
     # Si no se alcanzó consenso
     if not best_points:
-        # Cancelar tareas restantes
-        for t in pending:
-            t.cancel()
         logger.warning(f"   No se alcanzaron {MIN_MATCHES} coincidencias tras {len(valid_responses)} respuestas válidas")
         return False
 
     # --- Hacer clic en las coordenadas del consenso ---
-    logger.debug(f"   Haciendo clic en celdas: {sorted(best_cells)}")
+    logger.debug(f"   Haciendo clic en celdas: {best_cells_tuple}")
     for point in best_points:
         abs_x = box['x'] + point['x']
         abs_y = box['y'] + point['y']
@@ -982,8 +984,7 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
         return True
     else:
         logger.warning("   No se encontró botón Confirmar, asumiendo éxito")
-        return True
-    
+        return True  
 async def wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=120, resend_interval=40):
     """
     Espera el código SMS hasta timeout_total segundos.
