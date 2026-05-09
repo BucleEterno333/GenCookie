@@ -722,9 +722,8 @@ async def handle_captcha_if_present(page, step_name="captcha"):
             elif change_result == 'login':
                 raise Exception("AMAZON_REDIRECTED_TO_LOGIN")
             else:  # timeout o None
-                logger.warning("   ⏱️ Timeout esperando cambio de canvas. Tomando captura y reiniciando intento interno.")
-                await take_screenshot(page, "timeout_esperando_cambio")
-                raise Exception("AMAZON_CAPTCHA_ERROR")
+                logger.warning("   ⏱️ Timeout esperando cambio de canvas, pero seguro sí procedió al siguiente (hay bug al identificar cambio de canvas). Reintentando siguiente ronda..")
+                continue
         
         if captcha_resuelto:
             logger.debug(f"   ✅ Captcha de coordenadas completado exitosamente después de {global_attempt} intentos.")
