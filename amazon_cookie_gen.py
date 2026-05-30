@@ -21,6 +21,11 @@ from flask_cors import CORS
 from curl_cffi import requests
 from faker import Faker
 
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app, origins=["https://astralchk.com"], supports_credentials=True)
+
 # ========== CONFIGURACIÓN ==========
 API_KEY_CAPSOLVER = os.getenv('API_KEY_CAPSOLVER', '')
 HERO_SMS_API_KEY = os.getenv('HERO_SMS_API_KEY', '')
