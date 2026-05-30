@@ -32,6 +32,8 @@ RUN pip install --no-cache-dir nest_asyncio>=1.5.0 flask>=2.3.0 flask-cors>=4.0.
 
 RUN pip install --no-cache-dir --force-reinstall anticaptchaofficial
 
+RUN pip install curl_cffi
+
 # Copiar el script
 COPY amazon_cookie_gen.py .
 
