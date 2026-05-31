@@ -26,7 +26,7 @@ API_KEY_CAPSOLVER = os.getenv('API_KEY_CAPSOLVER', '')
 HERO_SMS_API_KEY = os.getenv('HERO_SMS_API_KEY', '')
 PROXY_STRING = os.getenv('PROXY_STRING', '')   # opcional
 API_HOST = os.getenv('API_HOST', '0.0.0.0')
-API_PORT = int(os.getenv('API_PORT', '5000'))
+API_PORT = int(os.getenv('API_PORT', '8080'))
 
 # ========== LOGGING ==========
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
