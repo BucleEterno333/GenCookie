@@ -10,6 +10,7 @@ Amazon Cookie Generator - Versión API REST optimizada para mínimo consumo de p
 - Detección de actividad inusual
 """
 
+from asyncio.log import logger
 import os
 import re
 import json
@@ -313,7 +314,7 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
         try:
             solved = capS(solver_key, images_raw, target).get("objects", [])
         except Exception as e:
-            print(f"* CapSolver Exception: {e}")
+            logger.debug(f"* CapSolver Exception: {e}")
             continue
         j5 = sess.post(f"{captcha_url}/verify", json={
             "state": {"iv": j4["state"]["iv"], "payload": j4["state"]["payload"]},
@@ -323,13 +324,13 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
             "locale": "en-us"
         }).json()
         if not j5.get("captcha_voucher"):
-            print(f"* Captcha Failed => Attempt {attempt + 1}/5")
+            logger.debug(f"* Captcha Failed => Attempt {attempt + 1}/5")
             continue
         captcha_jwt = j5["captcha_voucher"]
         jwt_client_id = json.loads(base64.urlsafe_b64decode(captcha_jwt.split(".")[1] + "=="))["client_id"]
         json6 = json.dumps({"challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1", "data": f'"{captcha_jwt}"'}, separators=(",", ":"))
         action_type = json.loads(sess.get(f"https://www.amazon.com/aaut/verify/cvf/{jwt_client_id}?context={urllib.parse.quote(client_ctx)}&options={urllib.parse.quote(json_opt)}&response={urllib.parse.quote(json6)}").headers.get("amz-aamation-resp")).get("actionType")
-        print(f"* WAF Attempt {attempt + 1}/5 => {action_type}")
+        logger.debug(f"* WAF Attempt {attempt + 1}/5 => {action_type}")
         if action_type == "PASS":
             return jwt_client_id
     raise Exception("WAF Failed After 5 Attempts")
@@ -380,7 +381,7 @@ def new_mail(sess) -> Tuple:
     """Crea email temporal - prueba 5 APIs"""
     for api in _MAIL_APIS:
         try:
-            print(f"* Probando {api['name']}...")
+            logger.debug(f"* Probando {api['name']}...")
             
             method, url, data, *extra = api["create"]()
             headers = extra[0] if extra else {}
@@ -388,7 +389,7 @@ def new_mail(sess) -> Tuple:
             res = _api_request(sess, method, url, data, headers)
             
             if res.status_code not in [200, 201]:
-                print(f"  Status: {res.status_code}")
+                logger.debug(f"  Status: {res.status_code}")
                 continue
             
             resp_data = res.json()
@@ -397,14 +398,14 @@ def new_mail(sess) -> Tuple:
             token = api["get_token"](resp_data)
             
             if not email:
-                print(f"  No se pudo extraer email de la respuesta")
+                logger.debug(f"  No se pudo extraer email de la respuesta")
                 continue
             
-            print(f"* {api['name']} OK: {email}")
+            logger.debug(f"* {api['name']} OK: {email}")
             return email, token, api["name"]
             
         except Exception as e:
-            print(f"* {api['name']} falló: {str(e)[:80]}")
+            logger.debug(f"* {api['name']} falló: {str(e)[:80]}")
             continue
     
     raise Exception("TODAS las APIs de mail fallaron")
@@ -422,7 +423,7 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
     if not api:
         raise Exception(f"API {api_name} no encontrada")
     
-    print(f"* Esperando mail en {api['name']}...")
+    logger.debug(f"* Esperando mail en {api['name']}...")
     
     for i in range(timeout // 5):
         time.sleep(5)
@@ -435,7 +436,7 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
             
             if not api["has_messages"](resp_data):
                 if i % 6 == 0:
-                    print(f"  Esperando... ({i*5}s)")
+                    logger.debug(f"  Esperando... ({i*5}s)")
                 continue
             
             messages = api["get_messages"](resp_data)
@@ -466,11 +467,11 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
                 match = re.search(pattern, body, re.IGNORECASE)
                 if match:
                     otp = match.group(1)
-                    print(f"* OTP encontrado: {otp}")
+                    logger.debug(f"* OTP encontrado: {otp}")
                     return otp
             
         except Exception as e:
-            print(f"  Error: {str(e)[:80]}")
+            logger.debug(f"  Error: {str(e)[:80]}")
             continue
 
 
@@ -496,13 +497,13 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
     for intento in range(1, max_attempts + 1):
         try:
-            print(f"\n{'='*60}")
-            print(f"INTENTO #{intento}")
-            print(f"{'='*60}")
+            logger.debug(f"\n{'='*60}")
+            logger.debug(f"INTENTO #{intento}")
+            logger.debug(f"{'='*60}")
 
             # Usar la proxy recibida
             if proxy:
-                print(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
+                logger.debug(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
 
             info = gen_profile()
             assoc_handle = "anywhere_v2_us"
@@ -527,15 +528,15 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
 
             current_ip = get_current_ip(sess)
-            print(f"IP: {current_ip}")
+            logger.debug(f"IP: {current_ip}")
 
             # Crear email temporal
             if not email:
                 email, mail_token, mail_api = new_mail(sess)
-            print(f"Email: {email} ({mail_api})")
+            logger.debug(f"Email: {email} ({mail_api})")
 
             # PASO 1: Cookies iniciales
-            print("* Visitando Amazon...")
+            logger.debug("* Visitando Amazon...")
             sess.get("https://www.amazon.com", timeout=30)
             time.sleep(random.uniform(2, 4))
             sess.get("https://www.amazon.com/ap/register", timeout=30)
@@ -559,7 +560,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             )
             
             if req1.status_code != 200 or "appActionToken" not in req1.text:
-                print(f"Bloqueo en req1 (Status: {req1.status_code})")
+                logger.debug(f"Bloqueo en req1 (Status: {req1.status_code})")
                 raise Exception("Proxy bloqueada")
             
             appActionToken = find(req1.text, 'name="appActionToken" value="', '"')
@@ -583,17 +584,17 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             if "already an account" in req2.text:
                 email = None
-                print("Email ya registrado")
+                logger.debug("Email ya registrado")
                 continue
                 
             if "detected unusual activity" in req2.text:
-                print("Actividad inusual - Rotando proxy")
+                logger.debug("Actividad inusual - Rotando proxy")
                 time.sleep(random.uniform(5, 10))
                 continue
             
             # PASO 4: WAF
             if "data-context" in req2.text and "data-external-id" in req2.text:
-                print("* Resolviendo WAF...")
+                logger.debug("* Resolviendo WAF...")
                 verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
                 dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
                 anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
@@ -619,10 +620,10 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
                 
                 if not jwt_client_id:
-                    print("WAF falló")
+                    logger.debug("WAF falló")
                     continue
                 
-                print(f"WAF PASS: {jwt_client_id[:50]}...")
+                logger.debug(f"WAF PASS: {jwt_client_id[:50]}...")
                 
                 data4 = {
                     "anti-csrftoken-a2z": anti_csrf,
@@ -649,7 +650,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                                         "Referer": req2.url, "Origin": "https://www.amazon.com"})
                 
                 if "/ap/register" in req4.url or "/ap/signin" in req4.url:
-                    print("WAF rechazado - Rotando proxy")
+                    logger.debug("WAF rechazado - Rotando proxy")
                     time.sleep(random.uniform(5, 10))
                     continue
                 
@@ -664,7 +665,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             }
             
             otp_code = mail_code(sess, mail_token, mail_api)
-            print(f"OTP: {otp_code}")
+            logger.debug(f"OTP: {otp_code}")
             
             data5 = {**base_openid, "autoReadStatus": "manual",
                     "verificationPageContactType": "email", "action": "code",
@@ -676,16 +677,16 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             # PASO 6: SMS
             activation_id, sms_phone = get_number(hero_key)
-            print(f"SMS: {sms_phone}")
+            logger.debug(f"SMS: {sms_phone}")
             
             data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
                     "verifyToken": verifyToken, "cvf_phone_cc": "CA",
                     "cvf_phone_num": sms_phone, "cvf_action": "collect"}
             
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
-            print("* Esperando SMS...")
+            logger.debug("* Esperando SMS...")
             sms_code = get_code(hero_key, activation_id)
-            print(f"SMS Code: {sms_code}")
+            logger.debug(f"SMS Code: {sms_code}")
             set_status(hero_key, activation_id, 6)
             
             anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
@@ -698,15 +699,15 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             req7 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data7)
             
             if "entered already exists with another account" in req7.text:
-                print("Número ya registrado")
+                logger.debug("Número ya registrado")
                 continue
                 
             if "new_account=1" not in req7.url:
-                print("Cuenta no creada")
+                logger.debug("Cuenta no creada")
                 continue
             
             # PASO 7: Dirección
-            print("* Agregando dirección...")
+            logger.debug("* Agregando dirección...")
             
             csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
             customer_id = find(req7.text, 'name="address-ui-widgets-obfuscated-customerId" value="', '"')
@@ -756,18 +757,18 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             cookies = "; ".join(f"{k}={v.replace(chr(34), chr(39))}" for k, v in sess.cookies.items())
             elapsed = round(time.time() - t, 2)
             
-            print(f"\n{'='*60}")
-            print(f"CUEATA CREADA!")
-            print(f"{'='*60}")
-            print(f"Email:    {email}")
-            print(f"Password: {password}")
-            print(f"Phone:    {sms_phone}")
-            print(f"IP:       {current_ip}")
-            print(f"Tiempo:   {elapsed}s | Intentos: {intento}")
-            print(f"{'='*60}")
-            print(f"COOKIES:")
-            print(f"{cookies}")
-            print(f"{'='*60}\n")
+            logger.debug(f"\n{'='*60}")
+            logger.debug(f"CUEATA CREADA!")
+            logger.debug(f"{'='*60}")
+            logger.debug(f"Email:    {email}")
+            logger.debug(f"Password: {password}")
+            logger.debug(f"Phone:    {sms_phone}")
+            logger.debug(f"IP:       {current_ip}")
+            logger.debug(f"Tiempo:   {elapsed}s | Intentos: {intento}")
+            logger.debug(f"{'='*60}")
+            logger.debug(f"COOKIES:")
+            logger.debug(f"{cookies}")
+            logger.debug(f"{'='*60}\n")
             
             return {
                 "name": info["full_name"], "phone": sms_phone,
@@ -779,8 +780,8 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
 
         except Exception as error:
-            print(f"Error en intento {intento}: {error}")
-            print(f"Reintentando en 5s...")
+            logger.debug(f"Error en intento {intento}: {error}")
+            logger.debug(f"Reintentando en 5s...")
             time.sleep(5)
             email = None
             mail_token = None
@@ -3724,17 +3725,17 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.cli:
-        print("🍪 Generador de Cookies Amazon - Modo CLI (optimizado - mínimo consumo)")
+        logger.debug("🍪 Generador de Cookies Amazon - Modo CLI (optimizado - mínimo consumo)")
         if not API_KEY_2CAPTCHA and not API_KEY_ANTICAPTCHA:
-            print("❌ ERROR: Configura al menos una API de captcha")
+            logger.error("❌ ERROR: Configura al menos una API de captcha")
             sys.exit(1)
         if not PROXY_HOST_PORT:
-            print("❌ ERROR: PROXY_STRING no configurada")
+            logger.error("❌ ERROR: PROXY_STRING no configurada")
             sys.exit(1)
         while True:
-            print("\n--- MENÚ ---")
-            print("1. Generar cookie")
-            print("2. Salir")
+            logger.debug("\n--- MENÚ ---")
+            logger.debug("1. Generar cookie")
+            logger.debug("2. Salir")
             op = input("Opción: ").strip()
             if op == '1':
                 pais = input("Código de país (ej: MX, US): ").strip().upper()
@@ -3746,18 +3747,18 @@ if __name__ == '__main__':
                     res = loop.run_until_complete(generate_cookie_api(pais, add_flag))
                     if res['success']:
                         data = res['data']
-                        print(f"\n✅ Cookie generada:")
-                        print(f"   Teléfono: {data['phone']}")
-                        print(f"   Contraseña: {data['password']}")
-                        print(f"   Cookie: {data['cookie_string']}")
+                        logger.debug(f"\n✅ Cookie generada:")
+                        logger.debug(f"   Teléfono: {data['phone']}")
+                        logger.debug(f"   Contraseña: {data['password']}")
+                        logger.debug(f"   Cookie: {data['cookie_string']}")
                     else:
-                        print(f"\n❌ Error: {res['error']}")
+                        logger.debug(f"\n❌ Error: {res['error']}")
                         if res.get('screenshot'):
-                            print("   📸 Captura de pantalla disponible")
+                            logger.debug("   📸 Captura de pantalla disponible")
                 finally:
                     loop.close()
             elif op == '2':
                 break
     else:
-        print(f"🚀 Iniciando API optimizada (mínimo consumo) en {API_HOST}:{API_PORT}")
+        logger.debug(f"🚀 Iniciando API optimizada (mínimo consumo) en {API_HOST}:{API_PORT}")
         app.run(host=API_HOST, port=API_PORT, debug=False, threaded=True)
