@@ -791,7 +791,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
 
 
-async def run_fast_method_parallel(capsolver_key, hero_key, proxy_string, max_total_attempts=6, parallel_workers=2):
+async def run_fast_method_parallel(capsolver_key, hero_key, proxy_string, max_total_attempts=8, parallel_workers=3):
     """
     Lanza varios intentos del método rápido en paralelo.
     - max_total_attempts: número total de intentos (cada intento = una IP nueva)
@@ -3559,8 +3559,8 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                 CAPSOLVER_API_KEY,
                 HERO_SMS_API_KEY,
                 PROXY_STRING,
-                max_total_attempts=6,    # 6 intentos totales
-                parallel_workers=2        # 2 hilos simultáneos
+                max_total_attempts=8,    # 8 intentos totales
+                parallel_workers=3        # 3 hilos simultáneos
             )
             if fast_result:
                 logger.debug("✅ Método rápido exitoso. Devolviendo cookie.")
