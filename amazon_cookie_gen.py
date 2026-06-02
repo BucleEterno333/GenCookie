@@ -39,6 +39,8 @@ import itertools
 import os
 from typing import Tuple, List, Dict, Optional
 from faker import Faker
+import urllib.parse
+
 
 # Forzar UTF-8 en la salida
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -307,6 +309,7 @@ def capS(api_key: str, images: list, question: str) -> dict:
 
 def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key) -> str:
     """Bypassea WAF Amazon"""
+    import urllib.parse  # <-- agrega esto
     for attempt in range(5):
         j4 = sess.get(f"{captcha_url}/problem?kind=visual&domain=www.amazon.com&locale=en-US&problem=gridcaptcha-v2-5-0.1-0&num_solutions_required=1&id={aamation_id}").json()
         target = json.loads(j4["assets"]["target"])[0]
@@ -492,6 +495,8 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
     - max_attempts: número máximo de intentos (cada intento usa una IP diferente gracias a proxy rotativa)
     - proxy: cadena con formato user:pass@host:port o host:port
     """
+    import urllib.parse  # <-- agrega esto
+
     if t is None:
         t = time.time()
 
