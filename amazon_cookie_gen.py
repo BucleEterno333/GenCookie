@@ -808,38 +808,39 @@ async def run_fast_method_parallel(capsolver_key, hero_key, proxy_string, max_to
         batch_size = min(workers, total_attempts - round_num * workers)
         logger.debug(f"🚀 Ronda {round_num+1}/{rounds} con {batch_size} intentos paralelos")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
-            futures = []
-            for i in range(batch_size):
-                # Cada intento ejecuta process con max_attempts=1 (un solo intento por hilo)
-                future = loop.run_in_executor(
-                    executor,
-                    process,
-                    capsolver_key, hero_key,
-                    None, None, None, None, None,
-                    proxy_string, None, 1  # max_attempts=1
-                )
-                futures.append(future)
+        # Crear tareas asyncio para cada intento
+        tasks = []
+        for i in range(batch_size):
+            task = loop.run_in_executor(
+                None,  # usa el ThreadPoolExecutor por defecto
+                process,
+                capsolver_key, hero_key,
+                None, None, None, None, None,
+                proxy_string, None, 1  # max_attempts=1
+            )
+            tasks.append(asyncio.create_task(task))
 
-            # Esperar el primero que termine exitosamente
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result = await future
-                    if result:
-                        # Cancelar los demás futuros (opcional)
-                        for f in futures:
-                            if f != future:
-                                f.cancel()
-                        return result
-                except Exception as e:
-                    logger.debug(f"   Intento falló: {e}")
-                    continue
+        # Esperar la primera que complete (exitosa o con excepción)
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
+        for d in done:
+            try:
+                result = d.result()
+                if result:
+                    # Cancelar las tareas pendientes
+                    for p in pending:
+                        p.cancel()
+                    return result
+            except Exception as e:
+                logger.debug(f"   Intento falló: {e}")
+                # Continuar con la siguiente tarea completada (si hay más)
+
+        # Si ninguna tarea de esta ronda tuvo éxito, cancelar las pendientes y continuar
+        for p in pending:
+            p.cancel()
         logger.debug(f"   Todos los intentos de la ronda {round_num+1} fallaron")
 
     return None
-
-
 
 # -------------------------------------------------------------------
 # MAPA DE PAÍSES A DOMINIOS Y URLS BASE
