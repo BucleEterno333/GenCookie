@@ -797,7 +797,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
 
 
-async def run_fast_method_parallel(capsolver_key, hero_key, proxy_string, max_total_attempts=8, parallel_workers=3):
+async def run_fast_method_parallel(capsolver_key, hero_key, proxy_string, max_total_attempts=8, parallel_workers=1):
     """
     Lanza varios intentos del método rápido en paralelo.
     - max_total_attempts: número total de intentos (cada intento = una IP nueva)
