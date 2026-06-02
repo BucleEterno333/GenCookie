@@ -797,56 +797,6 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
 
 
-async def run_fast_method_parallel(capsolver_key, hero_key, proxy_string, max_total_attempts=8, parallel_workers=1):
-    """
-    Lanza varios intentos del método rápido en paralelo.
-    - max_total_attempts: número total de intentos (cada intento = una IP nueva)
-    - parallel_workers: cuántos se ejecutan simultáneamente
-    Retorna el primer resultado exitoso o None si todos fallan.
-    """
-    workers = parallel_workers
-    total_attempts = max_total_attempts
-    rounds = (total_attempts + workers - 1) // workers
-
-    loop = asyncio.get_running_loop()
-
-    for round_num in range(rounds):
-        batch_size = min(workers, total_attempts - round_num * workers)
-        logger.debug(f"🚀 Ronda {round_num+1}/{rounds} con {batch_size} intentos paralelos")
-
-        # Lista de Futures (asyncio.Future) devueltos por run_in_executor
-        futures = []
-        for _ in range(batch_size):
-            future = loop.run_in_executor(
-                None,  # usa el ThreadPoolExecutor por defecto
-                process,
-                capsolver_key, hero_key,
-                None, None, None, None, None,
-                proxy_string, None, 1   # max_attempts=1
-            )
-            futures.append(future)
-
-        # Esperar el primero que complete (sea exitoso o excepción)
-        done, pending = await asyncio.wait(futures, return_when=asyncio.FIRST_COMPLETED)
-
-        for d in done:
-            try:
-                result = d.result()
-                if result:
-                    # Cancelar las tareas pendientes (no completadas)
-                    for p in pending:
-                        p.cancel()
-                    return result
-            except Exception as e:
-                logger.debug(f"   Intento falló: {e}")
-
-        # Si ninguna tarea de esta ronda tuvo éxito, cancelar las pendientes
-        for p in pending:
-            p.cancel()
-        logger.debug(f"   Todos los intentos de la ronda {round_num+1} fallaron")
-
-    return None
-
 # -------------------------------------------------------------------
 # MAPA DE PAÍSES A DOMINIOS Y URLS BASE
 # -------------------------------------------------------------------
@@ -3558,32 +3508,48 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
         if country not in base_urls:
             return {'success': False, 'error': f'País no soportado: {country}', 'country': country, 'screenshot': None}
 
-        # ----- INTENTAR PRIMERO CON MÉTODO RÁPIDO (curl_cffi) -----
+        # ----- INTENTAR PRIMERO CON MÉTODO RÁPIDO (curl_cffi) de forma SECUENCIAL -----
         if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
-            logger.debug("🔧 Intentando método rápido (curl_cffi + Capsolver)...")
-            fast_result = await run_fast_method_parallel(
-                CAPSOLVER_API_KEY,
-                HERO_SMS_API_KEY,
-                PROXY_STRING,
-                max_total_attempts=8,    # 8 intentos totales
-                parallel_workers=3        # 3 hilos simultáneos
-            )
-            if fast_result:
-                logger.debug("✅ Método rápido exitoso. Devolviendo cookie.")
-                # Convertir al formato esperado por la API
-                account_data = {
-                    'phone': fast_result['phone'],
-                    'password': fast_result['password'],
-                    'name': fast_result['name'],
-                    'address': 'No address added',
-                    'cookie_string': fast_result['cookies'],
-                    'cookie_dict': dict(x.split('=', 1) for x in fast_result['cookies'].split('; ') if '=' in x),
-                    'country': country,
-                    'purchase_country': country   # asumimos mismo país
-                }
-                return {'success': True, 'data': account_data, 'country': country, 'screenshot': None}
-            else:
-                logger.debug("⚠️ Método rápido falló. Recurriendo a Playwright...")
+            logger.debug("🔧 Intentando método rápido (curl_cffi + Capsolver) de forma secuencial...")
+            loop = asyncio.get_running_loop()
+            max_attempts = 10   # número total de intentos (cada uno con IP diferente gracias a proxy rotativa)
+            for attempt in range(1, max_attempts + 1):
+                logger.debug(f"   Intento rápido #{attempt}/{max_attempts}")
+                try:
+                    # Ejecutar process en un hilo separado para no bloquear el event loop
+                    fast_result = await loop.run_in_executor(
+                        None,
+                        process,
+                        CAPSOLVER_API_KEY,
+                        HERO_SMS_API_KEY,
+                        None, None, None, None, None,
+                        PROXY_STRING,
+                        None,
+                        1   # max_attempts=1 para que cada llamada intente una sola vez
+                    )
+                    if fast_result:
+                        logger.debug("✅ Método rápido exitoso. Devolviendo cookie.")
+                        account_data = {
+                            'phone': fast_result['phone'],
+                            'password': fast_result['password'],
+                            'name': fast_result['name'],
+                            'address': 'No address added',
+                            'cookie_string': fast_result['cookies'],
+                            'cookie_dict': dict(x.split('=', 1) for x in fast_result['cookies'].split('; ') if '=' in x),
+                            'country': country,
+                            'purchase_country': country
+                        }
+                        return {'success': True, 'data': account_data, 'country': country, 'screenshot': None}
+                except Exception as e:
+                    logger.debug(f"   Intento rápido #{attempt} falló: {e}")
+                    # Si es el último intento, salimos del bucle (no seguir)
+                    if attempt == max_attempts:
+                        logger.debug("⚠️ Todos los intentos rápidos fallaron. Recurriendo a Playwright...")
+                    else:
+                        # Esperar un poco antes del siguiente intento (evitar saturar)
+                        await asyncio.sleep(2)
+            # Si llegamos aquí es porque todos los intentos fallaron
+            logger.debug("⚠️ Método rápido falló después de todos los intentos. Recurriendo a Playwright...")
         else:
             logger.debug("⚠️ Método rápido no disponible (faltan claves o proxy). Usando Playwright directamente.")
 
@@ -3603,6 +3569,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
     except Exception as e:
         logger.exception(f"💥 Excepción en generate_cookie_api: {e}")
         return {'success': False, 'error': str(e), 'country': country, 'screenshot': None}
+    
 # -------------------------------------------------------------------
 # API FLASK
 # -------------------------------------------------------------------
