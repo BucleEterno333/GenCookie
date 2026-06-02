@@ -36,6 +36,8 @@ from curl_cffi import requests as curl_requests
 import concurrent.futures
 import itertools
 import os
+from typing import Tuple, List, Dict, Optional
+from faker import Faker
 
 # Forzar UTF-8 en la salida
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -332,7 +334,7 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
     raise Exception("WAF Failed After 5 Attempts")
 
 
-def get_number(api_key: str) -> tuple[str, str]:
+def get_number(api_key: str) -> Tuple[str, str]:
     """Obtiene número SMS"""
     r = requests.get(f"{_SMS_API}?api_key={api_key}&action=getNumber&service=am&country=36").text
     if not r.startswith("ACCESS_NUMBER"):
@@ -373,7 +375,7 @@ def _api_request(sess, method, url, json_data=None, headers=None, timeout=15):
     return res
 
 
-def new_mail(sess) -> tuple:
+def new_mail(sess) -> Tuple:
     """Crea email temporal - prueba 5 APIs"""
     for api in _MAIL_APIS:
         try:
@@ -1727,7 +1729,7 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
             if points and len(points) == 5:
                 cells = coords_to_cells(points)
                 if len(cells) == 5:
-                    cells_tuple = tuple(sorted(cells))
+                    cells_tuple = Tuple(sorted(cells))
                     logger.debug(f"   Respuesta válida: celdas {cells_tuple}")
                     valid_responses.append((cells_tuple, points))
                     # Contar frecuencias
