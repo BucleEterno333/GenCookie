@@ -47,7 +47,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 # CONFIGURACIÓN DESDE VARIABLES DE ENTORNO (con valores por defecto)
 # -------------------------------------------------------------------
 CAPTCHA_PROVIDER = os.getenv('CAPTCHA_PROVIDER', '2captcha')
-CAPSOLVER_KEY = os.getenv('CAPSLOVER_KEY', '')
+CAPSOLVER_API_KEY = os.getenv('CAPSOLVER_API_KEY', '')
 API_KEY_2CAPTCHA = os.getenv('API_KEY_2CAPTCHA', '')
 API_KEY_ANTICAPTCHA = os.getenv('API_KEY_ANTICAPTCHA', '')
 PROXY_STRING = os.getenv('PROXY_STRING', '')
