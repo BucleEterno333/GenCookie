@@ -808,34 +808,33 @@ async def run_fast_method_parallel(capsolver_key, hero_key, proxy_string, max_to
         batch_size = min(workers, total_attempts - round_num * workers)
         logger.debug(f"🚀 Ronda {round_num+1}/{rounds} con {batch_size} intentos paralelos")
 
-        # Crear tareas asyncio para cada intento
-        tasks = []
-        for i in range(batch_size):
-            task = loop.run_in_executor(
+        # Lista de Futures (asyncio.Future) devueltos por run_in_executor
+        futures = []
+        for _ in range(batch_size):
+            future = loop.run_in_executor(
                 None,  # usa el ThreadPoolExecutor por defecto
                 process,
                 capsolver_key, hero_key,
                 None, None, None, None, None,
-                proxy_string, None, 1  # max_attempts=1
+                proxy_string, None, 1   # max_attempts=1
             )
-            tasks.append(asyncio.create_task(task))
+            futures.append(future)
 
-        # Esperar la primera que complete (exitosa o con excepción)
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        # Esperar el primero que complete (sea exitoso o excepción)
+        done, pending = await asyncio.wait(futures, return_when=asyncio.FIRST_COMPLETED)
 
         for d in done:
             try:
                 result = d.result()
                 if result:
-                    # Cancelar las tareas pendientes
+                    # Cancelar las tareas pendientes (no completadas)
                     for p in pending:
                         p.cancel()
                     return result
             except Exception as e:
                 logger.debug(f"   Intento falló: {e}")
-                # Continuar con la siguiente tarea completada (si hay más)
 
-        # Si ninguna tarea de esta ronda tuvo éxito, cancelar las pendientes y continuar
+        # Si ninguna tarea de esta ronda tuvo éxito, cancelar las pendientes
         for p in pending:
             p.cancel()
         logger.debug(f"   Todos los intentos de la ronda {round_num+1} fallaron")
