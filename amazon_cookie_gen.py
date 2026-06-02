@@ -31,6 +31,11 @@ from urllib3.util.retry import Retry
 from playwright.async_api import async_playwright
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import capsolver
+from curl_cffi import requests as curl_requests
+import concurrent.futures
+import itertools
+import os
 
 # Forzar UTF-8 en la salida
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -77,6 +82,761 @@ USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:130.0) Gecko/20100101 Firefox/130.0'
 ]
+
+
+
+
+
+_SMS_API = "https://hero-sms.com/stubs/handler_api.php"
+PROXY_LIST = []
+
+# 5 APIs de mail temporal con sus formatos específicos
+_MAIL_APIS = [
+    {
+        "name": "tmailor",
+        "base": "https://tmailor.com/api",
+        "create": lambda: (
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "newemail", "curentToken": "", "fbToken": None}
+        ),
+        "inbox": lambda token: (
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "listinbox", "accesstoken": token, "fbToken": None, "curentToken": token}
+        ),
+        "read": lambda token, msg_id: (
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "read", "accesstoken": token, "email_code": msg_id["id"], "email_token": msg_id["email_id"], "fbToken": None, "curentToken": token}
+        ),
+        "get_email": lambda data: data.get("email"),
+        "get_token": lambda data: data.get("accesstoken"),
+        "has_messages": lambda data: bool(data.get("data")),
+        "get_messages": lambda data: list(data.get("data", {}).values()),
+        "get_msg_id": lambda msg: {"id": msg["id"], "email_id": msg["email_id"]},
+        "get_body": lambda data: data.get("data", {}).get("body", ""),
+        "check_errors": lambda data: None,
+    },
+    {
+        "name": "mailtm",
+        "base": "https://api.mail.tm",
+        "create": lambda: (
+            "POST",
+            "https://api.mail.tm/accounts",
+            {"address": None, "password": "Pass1234!"},
+            {"Content-Type": "application/json"}
+        ),
+        "inbox": lambda token: (
+            "GET",
+            f"https://api.mail.tm/messages?page=1",
+            None,
+            {"Authorization": f"Bearer {token}"}
+        ),
+        "read": lambda token, msg_id: (
+            "GET",
+            f"https://api.mail.tm/messages/{msg_id['id']}",
+            None,
+            {"Authorization": f"Bearer {token}"}
+        ),
+        "get_email": lambda data: data.get("address"),
+        "get_token": lambda data: data.get("token") or data.get("jwt"),
+        "has_messages": lambda data: bool(data.get("hydra:member") or data.get("data")),
+        "get_messages": lambda data: data.get("hydra:member") or data.get("data", []),
+        "get_msg_id": lambda msg: {"id": msg["id"]},
+        "get_body": lambda data: data.get("text") or data.get("body", ""),
+        "check_errors": lambda data: None,
+        "pre_create": lambda sess: None,  # mail.tm necesita cuenta primero
+    },
+    {
+        "name": "tempmail_lol",
+        "base": "https://api.tempmail.lol",
+        "create": lambda: (
+            "GET",
+            "https://api.tempmail.lol/generate",
+            None,
+            None
+        ),
+        "inbox": lambda token: (
+            "GET",
+            f"https://api.tempmail.lol/auth/{token}",
+            None,
+            None
+        ),
+        "read": lambda token, msg_id: (
+            "GET",
+            f"https://api.tempmail.lol/auth/{token}/email/{msg_id['id']}",
+            None,
+            None
+        ),
+        "get_email": lambda data: data.get("address"),
+        "get_token": lambda data: data.get("token"),
+        "has_messages": lambda data: bool(data.get("email") or data.get("messages")),
+        "get_messages": lambda data: data.get("email") or data.get("messages") or [],
+        "get_msg_id": lambda msg: {"id": msg.get("id", msg.get("uid", 0))},
+        "get_body": lambda data: data.get("body") or data.get("html", ""),
+        "check_errors": lambda data: None,
+    },
+    {
+        "name": "10minutemail",
+        "base": "https://10minutemail.com",
+        "create": lambda: (
+            "GET",
+            "https://10minutemail.com/session/address",
+            None,
+            None
+        ),
+        "inbox": lambda token: (
+            "GET",
+            f"https://10minutemail.com/messages/messagesAfter/0",
+            None,
+            None
+        ),
+        "read": lambda token, msg_id: (
+            "GET",
+            f"https://10minutemail.com/messages/{msg_id['id']}",
+            None,
+            None
+        ),
+        "get_email": lambda data: data.get("address") or data.get("mail"),
+        "get_token": lambda data: data.get("token") or data.get("session"),
+        "has_messages": lambda data: isinstance(data, list) and len(data) > 0,
+        "get_messages": lambda data: data if isinstance(data, list) else [],
+        "get_msg_id": lambda msg: {"id": msg.get("id", msg.get("messageId", 0))},
+        "get_body": lambda data: data.get("body") or data.get("html", ""),
+        "check_errors": lambda data: None,
+    },
+    {
+        "name": "guerrillamail",
+        "base": "https://www.guerrillamail.com",
+        "create": lambda: (
+            "GET",
+            "https://www.guerrillamail.com/ajax.php?f=get_email_address&ip=127.0.0.1&agent=Mozilla",
+            None,
+            None
+        ),
+        "inbox": lambda token: (
+            "GET",
+            f"https://www.guerrillamail.com/ajax.php?f=get_email_list&offset=0&sid_token={token}",
+            None,
+            None
+        ),
+        "read": lambda token, msg_id: (
+            "GET",
+            f"https://www.guerrillamail.com/ajax.php?f=fetch_email&email_id={msg_id['id']}&sid_token={token}",
+            None,
+            None
+        ),
+        "get_email": lambda data: data.get("email_addr"),
+        "get_token": lambda data: data.get("sid_token"),
+        "has_messages": lambda data: bool(data.get("list")),
+        "get_messages": lambda data: data.get("list", []),
+        "get_msg_id": lambda msg: {"id": msg.get("mail_id")},
+        "get_body": lambda data: data.get("mail_body") or data.get("body", ""),
+        "check_errors": lambda data: None,
+    },
+]
+
+
+def get_current_ip(sess):
+    """Obtiene la IP actual"""
+    try:
+        ip = sess.get("https://api.ipify.org?format=json", timeout=10).json().get("ip", "Desconocida")
+        return ip
+    except:
+        try:
+            ip = sess.get("http://ipinfo.io/ip", timeout=10).text.strip()
+            return ip
+        except:
+            return "No se pudo obtener IP"
+
+
+def gen_profile() -> dict:
+    """Genera perfil falso"""
+    fake = Faker("en_US")
+    first, last = fake.first_name(), fake.last_name()
+    us = random.choice([
+        {"street": "Broadway", "city": "Los Angeles", "state": "CA", "zip": "90001", "area": "213"},
+        {"street": "Michigan Ave", "city": "Detroit", "state": "MI", "zip": "48226", "area": "313"},
+        {"street": "Collins Ave", "city": "Denver", "state": "CO", "zip": "80202", "area": "303"},
+        {"street": "Congress Ave", "city": "Austin", "state": "TX", "zip": "78701", "area": "512"},
+        {"street": "Las Vegas Blvd", "city": "Las Vegas", "state": "NV", "zip": "89101", "area": "702"},
+        {"street": "King St", "city": "Honolulu", "state": "HI", "zip": "96813", "area": "808"},
+        {"street": "Canal St", "city": "New Orleans", "state": "LA", "zip": "70112", "area": "504"},
+        {"street": "Broad St", "city": "Charlotte", "state": "NC", "zip": "28202", "area": "704"},
+        {"street": "Rodeo Dr", "city": "Beverly Hills", "state": "CA", "zip": "90210", "area": "310"},
+        {"street": "Park Ave", "city": "Phoenix", "state": "AZ", "zip": "85003", "area": "602"},
+    ])
+    ua = f"Mozilla/5.0 (Linux; Android {random.randint(10, 14)}; {random.choice(['Pixel 8', 'SM-S918B', 'SM-A556B', 'Redmi Note 12', 'Pixel 7a', 'moto g52', 'OnePlus 12', 'Galaxy A54'])}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(134, 147)}.0.0.0 Mobile Safari/537.36"
+    return {
+        "first_name": first, "last_name": last,
+        "full_name": f"{first} {last}",
+        "phone": f"{us['area']}555{random.randint(1000, 9999)}",
+        "street": f"{random.randint(100, 999)} {us['street']}",
+        "city": us["city"], "state": us["state"], "zip": us["zip"],
+        "user_agent": ua,
+    }
+
+
+def find(string: str, start: str, end: str, strip: bool = True) -> str:
+    """Extrae texto entre dos delimitadores"""
+    try:
+        result = string.split(start, 1)[1].split(end, 1)[0]
+        return result.strip() if strip else result
+    except (IndexError, AttributeError):
+        raise ValueError(f"Capture failed: '{start}' -> '{end}' not found")
+
+
+def capR(pattern: str, text: str) -> str:
+    """Extrae con regex"""
+    match = re.search(pattern, text)
+    if not match:
+        raise ValueError(f"Extract failed: '{pattern}' not found")
+    return match.group(1)
+
+
+def capS(api_key: str, images: list, question: str) -> dict:
+    """Resuelve captcha WAF"""
+    capsolver.api_key = api_key
+    return capsolver.solve({"type": "AwsWafClassification", "question": f"aws:grid:{question}", "images": images})
+
+
+def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key) -> str:
+    """Bypassea WAF Amazon"""
+    for attempt in range(5):
+        j4 = sess.get(f"{captcha_url}/problem?kind=visual&domain=www.amazon.com&locale=en-US&problem=gridcaptcha-v2-5-0.1-0&num_solutions_required=1&id={aamation_id}").json()
+        target = json.loads(j4["assets"]["target"])[0]
+        images_raw = json.loads(j4["assets"]["images"])
+        try:
+            solved = capS(solver_key, images_raw, target).get("objects", [])
+        except Exception as e:
+            print(f"* CapSolver Exception: {e}")
+            continue
+        j5 = sess.post(f"{captcha_url}/verify", json={
+            "state": {"iv": j4["state"]["iv"], "payload": j4["state"]["payload"]},
+            "key": j4["key"], "hmac_tag": j4["hmac_tag"],
+            "client_solution": solved,
+            "metrics": {"solve_time_millis": random.randint(5000, 8000)},
+            "locale": "en-us"
+        }).json()
+        if not j5.get("captcha_voucher"):
+            print(f"* Captcha Failed => Attempt {attempt + 1}/5")
+            continue
+        captcha_jwt = j5["captcha_voucher"]
+        jwt_client_id = json.loads(base64.urlsafe_b64decode(captcha_jwt.split(".")[1] + "=="))["client_id"]
+        json6 = json.dumps({"challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1", "data": f'"{captcha_jwt}"'}, separators=(",", ":"))
+        action_type = json.loads(sess.get(f"https://www.amazon.com/aaut/verify/cvf/{jwt_client_id}?context={urllib.parse.quote(client_ctx)}&options={urllib.parse.quote(json_opt)}&response={urllib.parse.quote(json6)}").headers.get("amz-aamation-resp")).get("actionType")
+        print(f"* WAF Attempt {attempt + 1}/5 => {action_type}")
+        if action_type == "PASS":
+            return jwt_client_id
+    raise Exception("WAF Failed After 5 Attempts")
+
+
+def get_number(api_key: str) -> tuple[str, str]:
+    """Obtiene número SMS"""
+    r = requests.get(f"{_SMS_API}?api_key={api_key}&action=getNumber&service=am&country=36").text
+    if not r.startswith("ACCESS_NUMBER"):
+        raise Exception(f"SMS getNumber failed -> {r}")
+    _, activation_id, phone = r.split(":")
+    phone = phone.strip()
+    phone = phone.lstrip("1") if phone.startswith("1") and len(phone) == 11 else phone
+    return activation_id, phone
+
+
+def get_code(api_key: str, activation_id: str, timeout: int = 120) -> str:
+    """Espera código SMS"""
+    for _ in range(timeout // 5):
+        time.sleep(5)
+        r = requests.get(f"{_SMS_API}?api_key={api_key}&action=getStatus&id={activation_id}").text
+        if r.startswith("STATUS_OK"):
+            return r.split(":")[1].strip()
+        if r == "STATUS_CANCEL":
+            raise Exception("SMS activation canceled")
+    raise Exception("SMS timeout")
+
+
+def set_status(api_key: str, activation_id: str, status: int) -> None:
+    """Cambia estado SMS"""
+    requests.get(f"{_SMS_API}?api_key={api_key}&action=setStatus&status={status}&id={activation_id}")
+
+
+def _api_request(sess, method, url, json_data=None, headers=None, timeout=15):
+    """Hace request a API de mail"""
+    if headers is None:
+        headers = {}
+    
+    if json_data:
+        res = sess.request(method, url, json=json_data, headers=headers, timeout=timeout)
+    else:
+        res = sess.request(method, url, headers=headers, timeout=timeout)
+    
+    return res
+
+
+def new_mail(sess) -> tuple:
+    """Crea email temporal - prueba 5 APIs"""
+    for api in _MAIL_APIS:
+        try:
+            print(f"* Probando {api['name']}...")
+            
+            method, url, data, *extra = api["create"]()
+            headers = extra[0] if extra else {}
+            
+            res = _api_request(sess, method, url, data, headers)
+            
+            if res.status_code not in [200, 201]:
+                print(f"  Status: {res.status_code}")
+                continue
+            
+            resp_data = res.json()
+            
+            email = api["get_email"](resp_data)
+            token = api["get_token"](resp_data)
+            
+            if not email:
+                print(f"  No se pudo extraer email de la respuesta")
+                continue
+            
+            print(f"* {api['name']} OK: {email}")
+            return email, token, api["name"]
+            
+        except Exception as e:
+            print(f"* {api['name']} falló: {str(e)[:80]}")
+            continue
+    
+    raise Exception("TODAS las APIs de mail fallaron")
+
+
+def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
+    """Obtiene código OTP del email"""
+    # Buscar la API
+    api = None
+    for a in _MAIL_APIS:
+        if a["name"] == api_name:
+            api = a
+            break
+    
+    if not api:
+        raise Exception(f"API {api_name} no encontrada")
+    
+    print(f"* Esperando mail en {api['name']}...")
+    
+    for i in range(timeout // 5):
+        time.sleep(5)
+        try:
+            method, url, data, *extra = api["inbox"](token)
+            headers = extra[0] if extra else {}
+            
+            res = _api_request(sess, method, url, data, headers)
+            resp_data = res.json()
+            
+            if not api["has_messages"](resp_data):
+                if i % 6 == 0:
+                    print(f"  Esperando... ({i*5}s)")
+                continue
+            
+            messages = api["get_messages"](resp_data)
+            if not messages:
+                continue
+            
+            msg = messages[0]
+            msg_id = api["get_msg_id"](msg)
+            
+            method, url, data, *extra = api["read"](token, msg_id)
+            headers = extra[0] if extra else {}
+            
+            res2 = _api_request(sess, method, url, data, headers)
+            body = str(api["get_body"](res2.json()))
+            
+            # Buscar OTP
+            patterns = [
+                r'class="data">(\d{6})</td>',
+                r'">(\d{6})</',
+                r'\b(\d{6})\b',
+                r'OTP[:\s]*(\d{6})',
+                r'code[:\s]*(\d{6,8})',
+                r'verification[:\s]*(\d{6,8})',
+                r'(\d{6})',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, body, re.IGNORECASE)
+                if match:
+                    otp = match.group(1)
+                    print(f"* OTP encontrado: {otp}")
+                    return otp
+            
+        except Exception as e:
+            print(f"  Error: {str(e)[:80]}")
+            continue
+
+
+
+
+    
+    raise Exception(f"Mail OTP timeout en {api['name']}")
+
+
+
+
+
+
+def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
+            activation_id=None, sms_phone=None, proxy=None, t=None, max_attempts=6):
+    """
+    Versión adaptada para ser llamada desde la API.
+    - max_attempts: número máximo de intentos (cada intento usa una IP diferente gracias a proxy rotativa)
+    - proxy: cadena con formato user:pass@host:port o host:port
+    """
+    if t is None:
+        t = time.time()
+
+    for intento in range(1, max_attempts + 1):
+        try:
+            print(f"\n{'='*60}")
+            print(f"INTENTO #{intento}")
+            print(f"{'='*60}")
+
+            # Usar la proxy recibida
+            if proxy:
+                print(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
+
+            info = gen_profile()
+            assoc_handle = "anywhere_v2_us"
+            arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
+            password = "dfbc1992"  # Puedes cambiarlo o generarlo aleatoriamente
+
+            sess = curl_requests.Session(impersonate="chrome")
+            sess.headers.update({
+                "User-Agent": info["user_agent"],
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "sec-ch-ua": '"Chromium";v="147", "Not?A_Brand";v="99"',
+                "sec-ch-ua-mobile": "?1",
+                "sec-ch-ua-platform": '"Android"',
+                "DNT": "1",
+            })
+
+            if proxy:
+                sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+
+            current_ip = get_current_ip(sess)
+            print(f"IP: {current_ip}")
+
+            # Crear email temporal
+            if not email:
+                email, mail_token, mail_api = new_mail(sess)
+            print(f"Email: {email} ({mail_api})")
+
+            # PASO 1: Cookies iniciales
+            print("* Visitando Amazon...")
+            sess.get("https://www.amazon.com", timeout=30)
+            time.sleep(random.uniform(2, 4))
+            sess.get("https://www.amazon.com/ap/register", timeout=30)
+            time.sleep(random.uniform(1, 3))
+            
+            # PASO 2: Claim
+            sess.get(f"https://www.amazon.com/ax/claim?arb={arb}")
+            time.sleep(random.uniform(1, 2))
+            
+            data1 = {"arb": arb, "email": email, "claimCollectionLayoutType": "unifiedAuthClaimCollection"}
+            
+            req1 = sess.post(
+                "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
+                "&openid.ns=http://specs.openid.net/auth/2.0"
+                "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
+                "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
+                "&openid.assoc_handle=anywhere_v2_us"
+                "&openid.return_to=https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                data=data1,
+                headers={"Referer": "https://www.amazon.com/ap/register", "Origin": "https://www.amazon.com"}
+            )
+            
+            if req1.status_code != 200 or "appActionToken" not in req1.text:
+                print(f"Bloqueo en req1 (Status: {req1.status_code})")
+                raise Exception("Proxy bloqueada")
+            
+            appActionToken = find(req1.text, 'name="appActionToken" value="', '"')
+            workflowState = find(req1.text, 'name="workflowState" value="', '"')
+            openid_return_to = find(req1.text, 'name="openid.return_to" value="', '"')
+            prevRID = find(req1.text, 'name="prevRID" value="', '"')
+            
+            # PASO 3: Registro
+            time.sleep(random.uniform(2, 4))
+            
+            data2 = {
+                "appActionToken": appActionToken, "appAction": "REGISTER",
+                "shouldShowPersistentLabels": "true", "openid.return_to": openid_return_to,
+                "prevRID": prevRID, "workflowState": workflowState,
+                "customerName": info["full_name"], "email": email,
+                "password": password, "showPasswordChecked": "true"
+            }
+            
+            req2 = sess.post("https://www.amazon.com/ap/register", data=data2,
+                            headers={"Referer": req1.url, "Origin": "https://www.amazon.com"})
+            
+            if "already an account" in req2.text:
+                email = None
+                print("Email ya registrado")
+                continue
+                
+            if "detected unusual activity" in req2.text:
+                print("Actividad inusual - Rotando proxy")
+                time.sleep(random.uniform(5, 10))
+                continue
+            
+            # PASO 4: WAF
+            if "data-context" in req2.text and "data-external-id" in req2.text:
+                print("* Resolviendo WAF...")
+                verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
+                anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+                
+                json3 = json.dumps({
+                    "clientData": json.dumps({
+                        "sessionId": sess.cookies.get("session-id", ""),
+                        "marketplaceId": "ATVPDKIKX0DER",
+                        "clientUseCase": "/ap/register"
+                    }, separators=(",", ":")),
+                    "challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1",
+                    "locale": "en-US", "externalId": dataExternalId,
+                    "enableHeaderFooter": False, "enableBypassMechanism": False,
+                    "enableModalView": False, "eventTrigger": None,
+                    "aaExternalToken": None, "forceJsFlush": False,
+                    "aamationToken": None,
+                }, separators=(",", ":"))
+                
+                req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
+                clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
+                aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
+                captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
+                jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
+                
+                if not jwt_client_id:
+                    print("WAF falló")
+                    continue
+                
+                print(f"WAF PASS: {jwt_client_id[:50]}...")
+                
+                data4 = {
+                    "anti-csrftoken-a2z": anti_csrf,
+                    "cvf_aamation_response_token": jwt_client_id,
+                    "cvf_captcha_captcha_action": "verifyAamationChallenge",
+                    "cvf_aamation_error_code": "",
+                    "clientContext": sess.cookies.get("ubid-main"),
+                    "openid.pape.max_auth_age": "900",
+                    "openid.return_to": "https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                    "forceMobileLayout": "1",
+                    "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
+                    "openid.assoc_handle": assoc_handle,
+                    "openid.mode": "checkid_setup",
+                    "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
+                    "pageId": assoc_handle,
+                    "openid.ns": "http://specs.openid.net/auth/2.0",
+                    "shouldShowPersistentLabels": "true",
+                    "verifyToken": verifyToken
+                }
+                
+                time.sleep(random.uniform(2, 3))
+                req4 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data4,
+                                headers={"Content-Type": "application/x-www-form-urlencoded",
+                                        "Referer": req2.url, "Origin": "https://www.amazon.com"})
+                
+                if "/ap/register" in req4.url or "/ap/signin" in req4.url:
+                    print("WAF rechazado - Rotando proxy")
+                    time.sleep(random.uniform(5, 10))
+                    continue
+                
+                verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
+            
+            # PASO 5: OTP Email
+            base_openid = {
+                "forceMobileLayout": "1", "openid.assoc_handle": assoc_handle,
+                "openid.mode": "checkid_setup", "language": "en_US",
+                "openid.ns": "http://specs.openid.net/auth/2.0",
+                "shouldShowPersistentLabels": "true"
+            }
+            
+            otp_code = mail_code(sess, mail_token, mail_api)
+            print(f"OTP: {otp_code}")
+            
+            data5 = {**base_openid, "autoReadStatus": "manual",
+                    "verificationPageContactType": "email", "action": "code",
+                    "verifyToken": verifyToken, "code": otp_code}
+            
+            req5 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data5)
+            anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
+            verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
+            
+            # PASO 6: SMS
+            activation_id, sms_phone = get_number(hero_key)
+            print(f"SMS: {sms_phone}")
+            
+            data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
+                    "verifyToken": verifyToken, "cvf_phone_cc": "CA",
+                    "cvf_phone_num": sms_phone, "cvf_action": "collect"}
+            
+            req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
+            print("* Esperando SMS...")
+            sms_code = get_code(hero_key, activation_id)
+            print(f"SMS Code: {sms_code}")
+            set_status(hero_key, activation_id, 6)
+            
+            anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
+            verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
+            
+            data7 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
+                    "verificationPageContactType": "sms", "verifyToken": verifyToken,
+                    "code": sms_code, "cvf_action": "code", "resendContactType": "sms"}
+            
+            req7 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data7)
+            
+            if "entered already exists with another account" in req7.text:
+                print("Número ya registrado")
+                continue
+                
+            if "new_account=1" not in req7.url:
+                print("Cuenta no creada")
+                continue
+            
+            # PASO 7: Dirección
+            print("* Agregando dirección...")
+            
+            csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
+            customer_id = find(req7.text, 'name="address-ui-widgets-obfuscated-customerId" value="', '"')
+            wizard_id = find(req7.text, 'name="address-ui-widgets-address-wizard-interaction-id" value="', '"')
+            prev_token = find(req7.text, 'name="address-ui-widgets-previous-address-form-state-token" value="', '"')
+            widget_csrf = urllib.parse.quote(find(req7.text, 'name="address-ui-widgets-csrfToken" value="', '"'))
+            form_load = find(req7.text, 'name="address-ui-widgets-form-load-start-time" value="', '"')
+            
+            sess.headers.update({
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://www.amazon.com",
+                "Referer": req7.url,
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-User": "?1"
+            })
+            
+            data8 = (
+                f"csrfToken={csrf_addr}&addressID="
+                f"&address-ui-widgets-addressFormButtonText=save"
+                f"&address-ui-widgets-addressFormHideHeading=true"
+                f"&address-ui-widgets-addressFormHideSubmitButton=false"
+                f"&address-ui-widgets-enableAddressDetails=true"
+                f"&address-ui-widgets-enableAddressWizardForm=true"
+                f"&address-ui-widgets-address-wizard-interaction-id={wizard_id}"
+                f"&address-ui-widgets-obfuscated-customerId={customer_id}"
+                f"&address-ui-widgets-csrfToken={widget_csrf}"
+                f"&address-ui-widgets-form-load-start-time={form_load}"
+                f"&address-ui-widgets-isAddressSuggestionsView=true"
+                f"&address-ui-widgets-suggested-address-selection=original-address-"
+                f"&original-address-address-ui-widgets-enterAddressFullName={urllib.parse.quote(info['full_name'])}"
+                f"&original-address-address-ui-widgets-enterAddressLine1={urllib.parse.quote(info['street'])}"
+                f"&original-address-address-ui-widgets-enterAddressLine2="
+                f"&original-address-address-ui-widgets-enterAddressCity={urllib.parse.quote(info['city'])}"
+                f"&original-address-address-ui-widgets-enterAddressStateOrRegion={info['state']}"
+                f"&original-address-address-ui-widgets-enterAddressPostalCode={info['zip']}"
+                f"&original-address-address-ui-widgets-countryCode=US"
+                f"&original-address-address-ui-widgets-enterAddressPhoneNumber={info['phone']}"
+                f"&address-ui-widgets-use-as-my-default=true"
+                f"&address-ui-widgets-previous-address-form-state-token={prev_token}"
+                f"&address-ui-widgets-saveOriginalOrSuggestedAddress=Submit+Query"
+            )
+            
+            sess.post("https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button", data=data8)
+            
+            cookies = "; ".join(f"{k}={v.replace(chr(34), chr(39))}" for k, v in sess.cookies.items())
+            elapsed = round(time.time() - t, 2)
+            
+            print(f"\n{'='*60}")
+            print(f"CUEATA CREADA!")
+            print(f"{'='*60}")
+            print(f"Email:    {email}")
+            print(f"Password: {password}")
+            print(f"Phone:    {sms_phone}")
+            print(f"IP:       {current_ip}")
+            print(f"Tiempo:   {elapsed}s | Intentos: {intento}")
+            print(f"{'='*60}")
+            print(f"COOKIES:")
+            print(f"{cookies}")
+            print(f"{'='*60}\n")
+            
+            return {
+                "name": info["full_name"], "phone": sms_phone,
+                "password": password, "email": email,
+                "cookies": cookies, "status": "Cuenta generada!",
+                "response": cookies, "ip": current_ip,
+                "time": elapsed, "intentos": intento
+            }
+
+
+        except Exception as error:
+            print(f"Error en intento {intento}: {error}")
+            print(f"Reintentando en 5s...")
+            time.sleep(5)
+            email = None
+            mail_token = None
+            mail_api = None
+            continue
+
+    raise Exception("Todos los intentos del método rápido fallaron")
+
+
+
+async def run_fast_method_parallel(capsolver_key, hero_key, proxy_string, max_total_attempts=6, parallel_workers=2):
+    """
+    Lanza varios intentos del método rápido en paralelo.
+    - max_total_attempts: número total de intentos (cada intento = una IP nueva)
+    - parallel_workers: cuántos se ejecutan simultáneamente
+    Retorna el primer resultado exitoso o None si todos fallan.
+    """
+    workers = parallel_workers
+    total_attempts = max_total_attempts
+    rounds = (total_attempts + workers - 1) // workers
+
+    loop = asyncio.get_running_loop()
+
+    for round_num in range(rounds):
+        batch_size = min(workers, total_attempts - round_num * workers)
+        logger.debug(f"🚀 Ronda {round_num+1}/{rounds} con {batch_size} intentos paralelos")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+            futures = []
+            for i in range(batch_size):
+                # Cada intento ejecuta process con max_attempts=1 (un solo intento por hilo)
+                future = loop.run_in_executor(
+                    executor,
+                    process,
+                    capsolver_key, hero_key,
+                    None, None, None, None, None,
+                    proxy_string, None, 1  # max_attempts=1
+                )
+                futures.append(future)
+
+            # Esperar el primero que termine exitosamente
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = await future
+                    if result:
+                        # Cancelar los demás futuros (opcional)
+                        for f in futures:
+                            if f != future:
+                                f.cancel()
+                        return result
+                except Exception as e:
+                    logger.debug(f"   Intento falló: {e}")
+                    continue
+
+        logger.debug(f"   Todos los intentos de la ronda {round_num+1} fallaron")
+
+    return None
+
+
 
 # -------------------------------------------------------------------
 # MAPA DE PAÍSES A DOMINIOS Y URLS BASE
@@ -2784,18 +3544,56 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 # -------------------------------------------------------------------
 async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10):
     logger.debug(f"🚀 generate_cookie_api llamada con country={country}, add_address={add_address}, max_retries={max_retries}")
+
     try:
         if country not in base_urls:
             return {'success': False, 'error': f'País no soportado: {country}', 'country': country, 'screenshot': None}
-        account_data, error_msg, screenshot = await create_amazon_account(country, add_address_flag=add_address, max_retries=max_retries, max_internal_retries=max_internal_retries)
+
+        # ----- INTENTAR PRIMERO CON MÉTODO RÁPIDO (curl_cffi) -----
+        if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
+            logger.debug("🔧 Intentando método rápido (curl_cffi + Capsolver)...")
+            fast_result = await run_fast_method_parallel(
+                CAPSOLVER_API_KEY,
+                HERO_SMS_API_KEY,
+                PROXY_STRING,
+                max_total_attempts=6,    # 6 intentos totales
+                parallel_workers=2        # 2 hilos simultáneos
+            )
+            if fast_result:
+                logger.debug("✅ Método rápido exitoso. Devolviendo cookie.")
+                # Convertir al formato esperado por la API
+                account_data = {
+                    'phone': fast_result['phone'],
+                    'password': fast_result['password'],
+                    'name': fast_result['name'],
+                    'address': 'No address added',
+                    'cookie_string': fast_result['cookies'],
+                    'cookie_dict': dict(x.split('=', 1) for x in fast_result['cookies'].split('; ') if '=' in x),
+                    'country': country,
+                    'purchase_country': country   # asumimos mismo país
+                }
+                return {'success': True, 'data': account_data, 'country': country, 'screenshot': None}
+            else:
+                logger.debug("⚠️ Método rápido falló. Recurriendo a Playwright...")
+        else:
+            logger.debug("⚠️ Método rápido no disponible (faltan claves o proxy). Usando Playwright directamente.")
+
+        # ----- SI EL MÉTODO RÁPIDO FALLÓ O NO ESTÁ DISPONIBLE, USAR PLAYWRIGHT -----
+        account_data, error_msg, screenshot = await create_amazon_account(
+            country,
+            add_address_flag=add_address,
+            max_retries=max_retries,
+            max_internal_retries=max_internal_retries
+        )
+
         if account_data:
             return {'success': True, 'data': account_data, 'country': country, 'screenshot': screenshot}
         else:
             return {'success': False, 'error': error_msg, 'country': country, 'screenshot': screenshot}
+
     except Exception as e:
         logger.exception(f"💥 Excepción en generate_cookie_api: {e}")
         return {'success': False, 'error': str(e), 'country': country, 'screenshot': None}
-
 # -------------------------------------------------------------------
 # API FLASK
 # -------------------------------------------------------------------
