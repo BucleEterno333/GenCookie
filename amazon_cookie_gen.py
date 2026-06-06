@@ -98,7 +98,32 @@ PROXY_LIST = []
 
 # 5 APIs de mail temporal con sus formatos específicos
 _MAIL_APIS = [
-
+    {
+        "name": "tmailor",
+        "base": "https://tmailor.com/api",
+        "create": lambda: (
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "newemail", "curentToken": "", "fbToken": None}
+        ),
+        "inbox": lambda token: (
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "listinbox", "accesstoken": token, "fbToken": None, "curentToken": token}
+        ),
+        "read": lambda token, msg_id: (
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "read", "accesstoken": token, "email_code": msg_id["id"], "email_token": msg_id["email_id"], "fbToken": None, "curentToken": token}
+        ),
+        "get_email": lambda data: data.get("email"),
+        "get_token": lambda data: data.get("accesstoken"),
+        "has_messages": lambda data: bool(data.get("data")),
+        "get_messages": lambda data: list(data.get("data", {}).values()),
+        "get_msg_id": lambda msg: {"id": msg["id"], "email_id": msg["email_id"]},
+        "get_body": lambda data: data.get("data", {}).get("body", ""),
+        "check_errors": lambda data: None,
+    },
     {
         "name": "mailtm",
         "base": "https://api.mail.tm",
@@ -214,33 +239,6 @@ _MAIL_APIS = [
         "get_messages": lambda data: data.get("list", []),
         "get_msg_id": lambda msg: {"id": msg.get("mail_id")},
         "get_body": lambda data: data.get("mail_body") or data.get("body", ""),
-        "check_errors": lambda data: None,
-    },
-
-    {
-        "name": "tmailor",
-        "base": "https://tmailor.com/api",
-        "create": lambda: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "newemail", "curentToken": "", "fbToken": None}
-        ),
-        "inbox": lambda token: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "listinbox", "accesstoken": token, "fbToken": None, "curentToken": token}
-        ),
-        "read": lambda token, msg_id: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "read", "accesstoken": token, "email_code": msg_id["id"], "email_token": msg_id["email_id"], "fbToken": None, "curentToken": token}
-        ),
-        "get_email": lambda data: data.get("email"),
-        "get_token": lambda data: data.get("accesstoken"),
-        "has_messages": lambda data: bool(data.get("data")),
-        "get_messages": lambda data: list(data.get("data", {}).values()),
-        "get_msg_id": lambda msg: {"id": msg["id"], "email_id": msg["email_id"]},
-        "get_body": lambda data: data.get("data", {}).get("body", ""),
         "check_errors": lambda data: None,
     },
 ]
@@ -598,164 +596,6 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 logger.debug("Actividad inusual - Rotando proxy")
                 time.sleep(random.uniform(5, 10))
                 continue
-
-
-
-
-
-
-
-
-            # ======================= NUEVO: BUCLE DE REINTENTOS INTERNOS PARA WAF =======================
-            WAF_MAX_RETRIES = 3
-            waf_success = False
-            waf_last_error = None
-
-            for waf_attempt in range(1, WAF_MAX_RETRIES + 1):
-                try:
-                    if waf_attempt > 1:
-                        logger.debug(f"   🔁 Reintentando WAF (intento {waf_attempt}/{WAF_MAX_RETRIES}) sin cambiar IP")
-                        # Crear una nueva sesión con el mismo proxy
-                        old_sess = sess
-                        sess = curl_requests.Session(impersonate="chrome")
-                        sess.headers.update(old_sess.headers.copy())
-                        if proxy:
-                            sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
-                        # Rehacer pasos iniciales hasta req2
-                        sess.get("https://www.amazon.com", timeout=30)
-                        time.sleep(random.uniform(2, 4))
-                        sess.get("https://www.amazon.com/ap/register", timeout=30)
-                        time.sleep(random.uniform(1, 3))
-                        sess.get(f"https://www.amazon.com/ax/claim?arb={arb}")
-                        req1 = sess.post(
-                            "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
-                            "&openid.ns=http://specs.openid.net/auth/2.0"
-                            "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
-                            "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
-                            "&openid.assoc_handle=anywhere_v2_us"
-                            "&openid.return_to=https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
-                            data=data1,
-                            headers={"Referer": "https://www.amazon.com/ap/register", "Origin": "https://www.amazon.com"}
-                        )
-                        if req1.status_code != 200 or "appActionToken" not in req1.text:
-                            raise Exception("Fallo al reenviar req1")
-                        appActionToken = find(req1.text, 'name="appActionToken" value="', '"')
-                        workflowState = find(req1.text, 'name="workflowState" value="', '"')
-                        openid_return_to = find(req1.text, 'name="openid.return_to" value="', '"')
-                        prevRID = find(req1.text, 'name="prevRID" value="', '"')
-                        time.sleep(random.uniform(2, 4))
-                        req2 = sess.post("https://www.amazon.com/ap/register", data=data2,
-                                        headers={"Referer": req1.url, "Origin": "https://www.amazon.com"})
-                        if "already an account" in req2.text:
-                            raise Exception("Email ya registrado en reintento")
-                        if "detected unusual activity" in req2.text:
-                            raise Exception("Actividad inusual persistente")
-
-                    # --- Bloque de resolución WAF ---
-                    if "data-context" in req2.text and "data-external-id" in req2.text:
-                        logger.debug("* Resolviendo WAF...")
-                        verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
-                        dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
-                        anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
-                        
-                        json3 = json.dumps({
-                            "clientData": json.dumps({
-                                "sessionId": sess.cookies.get("session-id", ""),
-                                "marketplaceId": "ATVPDKIKX0DER",
-                                "clientUseCase": "/ap/register"
-                            }, separators=(",", ":")),
-                            "challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1",
-                            "locale": "en-US", "externalId": dataExternalId,
-                            "enableHeaderFooter": False, "enableBypassMechanism": False,
-                            "enableModalView": False, "eventTrigger": None,
-                            "aaExternalToken": None, "forceJsFlush": False,
-                            "aamationToken": None,
-                        }, separators=(",", ":"))
-                        
-                        req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
-                        clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
-                        aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
-                        captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
-                        jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
-                        
-                        if not jwt_client_id:
-                            raise Exception("WAF_NO_TOKEN")
-                        
-                        logger.debug(f"WAF PASS: {jwt_client_id[:50]}...")
-                        
-                        data4 = {
-                            "anti-csrftoken-a2z": anti_csrf,
-                            "cvf_aamation_response_token": jwt_client_id,
-                            "cvf_captcha_captcha_action": "verifyAamationChallenge",
-                            "cvf_aamation_error_code": "",
-                            "clientContext": sess.cookies.get("ubid-main"),
-                            "openid.pape.max_auth_age": "900",
-                            "openid.return_to": "https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
-                            "forceMobileLayout": "1",
-                            "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
-                            "openid.assoc_handle": assoc_handle,
-                            "openid.mode": "checkid_setup",
-                            "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
-                            "pageId": assoc_handle,
-                            "openid.ns": "http://specs.openid.net/auth/2.0",
-                            "shouldShowPersistentLabels": "true",
-                            "verifyToken": verifyToken
-                        }
-                        
-                        time.sleep(random.uniform(2, 3))
-                        req4 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data4,
-                                        headers={"Content-Type": "application/x-www-form-urlencoded",
-                                                "Referer": req2.url, "Origin": "https://www.amazon.com"})
-                        
-                        # Si la respuesta redirige a login/register, es un error fatal para este intento global
-                        if "/ap/register" in req4.url or "/ap/signin" in req4.url:
-                            page_text_lower = req4.text.lower()
-                            if "detected unusual activity" in page_text_lower or "we cannot create your account" in page_text_lower:
-                                logger.debug(f"   ❌ Actividad inusual - reintento interno no sirve, se rotará proxy")
-                                raise Exception("WAF_UNUSUAL_ACTIVITY")
-                            else:
-                                logger.debug(f"   ❌ Redirección inesperada a login/register - abortando intento global")
-                                raise Exception("WAF_FATAL_REDIRECT")
-                        
-                        # Extraer nuevo verifyToken después del WAF
-                        verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
-                        if not verifyToken:
-                            raise Exception("No se encontró verifyToken después de WAF")
-                        waf_success = True
-                        break
-                    else:
-                        # No hay captcha, verificar que tengamos verifyToken
-                        verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
-                        if not verifyToken:
-                            raise Exception("No hay captcha ni verifyToken - flujo inválido")
-                        waf_success = True
-                        break
-
-                except Exception as e:
-                    waf_last_error = e
-                    error_str = str(e)
-                    logger.debug(f"   Error en reintento WAF {waf_attempt}: {error_str}")
-                    # Errores fatales no se reintentan internamente
-                    if "FATAL" in error_str or "REDIRECT" in error_str:
-                        raise
-                    if waf_attempt == WAF_MAX_RETRIES:
-                        raise Exception(f"WAF_FAILED_AFTER_{WAF_MAX_RETRIES}_RETRIES: {error_str}")
-                    else:
-                        time.sleep(random.uniform(3, 6))
-                        continue
-
-            if not waf_success:
-                raise Exception("WAF no resuelto después de reintentos internos")
-            # ======================= FIN DEL BUCLE DE REINTENTOS WAF =======================
-
-
-            # Asegurar anti_csrf por si no se definió en el flujo sin captcha
-            if 'anti_csrf' not in locals() or not anti_csrf:
-                anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
-
-
-
-
             
             # PASO 4: WAF
             if "data-context" in req2.text and "data-external-id" in req2.text:
