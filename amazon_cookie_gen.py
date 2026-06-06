@@ -98,32 +98,7 @@ PROXY_LIST = []
 
 # 5 APIs de mail temporal con sus formatos específicos
 _MAIL_APIS = [
-    {
-        "name": "tmailor",
-        "base": "https://tmailor.com/api",
-        "create": lambda: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "newemail", "curentToken": "", "fbToken": None}
-        ),
-        "inbox": lambda token: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "listinbox", "accesstoken": token, "fbToken": None, "curentToken": token}
-        ),
-        "read": lambda token, msg_id: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "read", "accesstoken": token, "email_code": msg_id["id"], "email_token": msg_id["email_id"], "fbToken": None, "curentToken": token}
-        ),
-        "get_email": lambda data: data.get("email"),
-        "get_token": lambda data: data.get("accesstoken"),
-        "has_messages": lambda data: bool(data.get("data")),
-        "get_messages": lambda data: list(data.get("data", {}).values()),
-        "get_msg_id": lambda msg: {"id": msg["id"], "email_id": msg["email_id"]},
-        "get_body": lambda data: data.get("data", {}).get("body", ""),
-        "check_errors": lambda data: None,
-    },
+
     {
         "name": "mailtm",
         "base": "https://api.mail.tm",
@@ -239,6 +214,33 @@ _MAIL_APIS = [
         "get_messages": lambda data: data.get("list", []),
         "get_msg_id": lambda msg: {"id": msg.get("mail_id")},
         "get_body": lambda data: data.get("mail_body") or data.get("body", ""),
+        "check_errors": lambda data: None,
+    },
+
+    {
+        "name": "tmailor",
+        "base": "https://tmailor.com/api",
+        "create": lambda: (
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "newemail", "curentToken": "", "fbToken": None}
+        ),
+        "inbox": lambda token: (
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "listinbox", "accesstoken": token, "fbToken": None, "curentToken": token}
+        ),
+        "read": lambda token, msg_id: (
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "read", "accesstoken": token, "email_code": msg_id["id"], "email_token": msg_id["email_id"], "fbToken": None, "curentToken": token}
+        ),
+        "get_email": lambda data: data.get("email"),
+        "get_token": lambda data: data.get("accesstoken"),
+        "has_messages": lambda data: bool(data.get("data")),
+        "get_messages": lambda data: list(data.get("data", {}).values()),
+        "get_msg_id": lambda msg: {"id": msg["id"], "email_id": msg["email_id"]},
+        "get_body": lambda data: data.get("data", {}).get("body", ""),
         "check_errors": lambda data: None,
     },
 ]
@@ -487,6 +489,7 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
 
 
 
+
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             activation_id=None, sms_phone=None, proxy=None, t=None, max_attempts=6):
     """
@@ -494,7 +497,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
     - max_attempts: número máximo de intentos (cada intento usa una IP diferente gracias a proxy rotativa)
     - proxy: cadena con formato user:pass@host:port o host:port
     """
-    import urllib.parse
+    import urllib.parse  # <-- agrega esto
 
     if t is None:
         t = time.time()
@@ -505,13 +508,14 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             logger.debug(f"INTENTO #{intento}")
             logger.debug(f"{'='*60}")
 
+            # Usar la proxy recibida
             if proxy:
                 logger.debug(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
 
             info = gen_profile()
             assoc_handle = "anywhere_v2_us"
             arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
-            password = "dfbc1992"
+            password = "dfbc1992"  # Puedes cambiarlo o generarlo aleatoriamente
 
             sess = curl_requests.Session(impersonate="chrome")
             sess.headers.update({
@@ -594,6 +598,15 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 logger.debug("Actividad inusual - Rotando proxy")
                 time.sleep(random.uniform(5, 10))
                 continue
+
+
+
+
+
+
+
+
+
 
             # ======================= NUEVO: BUCLE DE REINTENTOS INTERNOS PARA WAF =======================
             WAF_MAX_RETRIES = 3
@@ -734,9 +747,91 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 # No debería llegar aquí, pero por si acaso
                 raise Exception("WAF no resuelto después de reintentos internos")
 
-            # ======================= FIN DEL BUCLE DE REINTENTOS WAF =======================
 
-            # PASO 5: OTP Email (el resto del flujo continúa igual)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            
+            # PASO 4: WAF
+            if "data-context" in req2.text and "data-external-id" in req2.text:
+                logger.debug("* Resolviendo WAF...")
+                verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
+                anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+                
+                json3 = json.dumps({
+                    "clientData": json.dumps({
+                        "sessionId": sess.cookies.get("session-id", ""),
+                        "marketplaceId": "ATVPDKIKX0DER",
+                        "clientUseCase": "/ap/register"
+                    }, separators=(",", ":")),
+                    "challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1",
+                    "locale": "en-US", "externalId": dataExternalId,
+                    "enableHeaderFooter": False, "enableBypassMechanism": False,
+                    "enableModalView": False, "eventTrigger": None,
+                    "aaExternalToken": None, "forceJsFlush": False,
+                    "aamationToken": None,
+                }, separators=(",", ":"))
+                
+                req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
+                clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
+                aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
+                captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
+                jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
+                
+                if not jwt_client_id:
+                    logger.debug("WAF falló")
+                    continue
+                
+                logger.debug(f"WAF PASS: {jwt_client_id[:50]}...")
+                
+                data4 = {
+                    "anti-csrftoken-a2z": anti_csrf,
+                    "cvf_aamation_response_token": jwt_client_id,
+                    "cvf_captcha_captcha_action": "verifyAamationChallenge",
+                    "cvf_aamation_error_code": "",
+                    "clientContext": sess.cookies.get("ubid-main"),
+                    "openid.pape.max_auth_age": "900",
+                    "openid.return_to": "https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                    "forceMobileLayout": "1",
+                    "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
+                    "openid.assoc_handle": assoc_handle,
+                    "openid.mode": "checkid_setup",
+                    "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
+                    "pageId": assoc_handle,
+                    "openid.ns": "http://specs.openid.net/auth/2.0",
+                    "shouldShowPersistentLabels": "true",
+                    "verifyToken": verifyToken
+                }
+                
+                time.sleep(random.uniform(2, 3))
+                req4 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data4,
+                                headers={"Content-Type": "application/x-www-form-urlencoded",
+                                        "Referer": req2.url, "Origin": "https://www.amazon.com"})
+                
+                if "/ap/register" in req4.url or "/ap/signin" in req4.url:
+                    logger.debug("WAF rechazado - Rotando proxy")
+                    time.sleep(random.uniform(5, 10))
+                    continue
+                
+                verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
+            
+            # PASO 5: OTP Email
             base_openid = {
                 "forceMobileLayout": "1", "openid.assoc_handle": assoc_handle,
                 "openid.mode": "checkid_setup", "language": "en_US",
@@ -858,6 +953,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 "time": elapsed, "intentos": intento
             }
 
+
         except Exception as error:
             logger.debug(f"Error en intento {intento}: {error}")
             logger.debug(f"Reintentando en 5s...")
@@ -868,6 +964,8 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             continue
 
     raise Exception("Todos los intentos del método rápido fallaron")
+
+
 
 # -------------------------------------------------------------------
 # MAPA DE PAÍSES A DOMINIOS Y URLS BASE
