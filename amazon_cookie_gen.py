@@ -487,7 +487,6 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
 
 
 
-
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             activation_id=None, sms_phone=None, proxy=None, t=None, max_attempts=6):
     """
@@ -495,7 +494,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
     - max_attempts: número máximo de intentos (cada intento usa una IP diferente gracias a proxy rotativa)
     - proxy: cadena con formato user:pass@host:port o host:port
     """
-    import urllib.parse  # <-- agrega esto
+    import urllib.parse
 
     if t is None:
         t = time.time()
@@ -506,14 +505,13 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             logger.debug(f"INTENTO #{intento}")
             logger.debug(f"{'='*60}")
 
-            # Usar la proxy recibida
             if proxy:
                 logger.debug(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
 
             info = gen_profile()
             assoc_handle = "anywhere_v2_us"
             arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
-            password = "dfbc1992"  # Puedes cambiarlo o generarlo aleatoriamente
+            password = "dfbc1992"
 
             sess = curl_requests.Session(impersonate="chrome")
             sess.headers.update({
@@ -596,72 +594,149 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 logger.debug("Actividad inusual - Rotando proxy")
                 time.sleep(random.uniform(5, 10))
                 continue
-            
-            # PASO 4: WAF
-            if "data-context" in req2.text and "data-external-id" in req2.text:
-                logger.debug("* Resolviendo WAF...")
-                verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
-                dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
-                anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
-                
-                json3 = json.dumps({
-                    "clientData": json.dumps({
-                        "sessionId": sess.cookies.get("session-id", ""),
-                        "marketplaceId": "ATVPDKIKX0DER",
-                        "clientUseCase": "/ap/register"
-                    }, separators=(",", ":")),
-                    "challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1",
-                    "locale": "en-US", "externalId": dataExternalId,
-                    "enableHeaderFooter": False, "enableBypassMechanism": False,
-                    "enableModalView": False, "eventTrigger": None,
-                    "aaExternalToken": None, "forceJsFlush": False,
-                    "aamationToken": None,
-                }, separators=(",", ":"))
-                
-                req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
-                clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
-                aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
-                captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
-                jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
-                
-                if not jwt_client_id:
-                    logger.debug("WAF falló")
-                    continue
-                
-                logger.debug(f"WAF PASS: {jwt_client_id[:50]}...")
-                
-                data4 = {
-                    "anti-csrftoken-a2z": anti_csrf,
-                    "cvf_aamation_response_token": jwt_client_id,
-                    "cvf_captcha_captcha_action": "verifyAamationChallenge",
-                    "cvf_aamation_error_code": "",
-                    "clientContext": sess.cookies.get("ubid-main"),
-                    "openid.pape.max_auth_age": "900",
-                    "openid.return_to": "https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
-                    "forceMobileLayout": "1",
-                    "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
-                    "openid.assoc_handle": assoc_handle,
-                    "openid.mode": "checkid_setup",
-                    "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
-                    "pageId": assoc_handle,
-                    "openid.ns": "http://specs.openid.net/auth/2.0",
-                    "shouldShowPersistentLabels": "true",
-                    "verifyToken": verifyToken
-                }
-                
-                time.sleep(random.uniform(2, 3))
-                req4 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data4,
-                                headers={"Content-Type": "application/x-www-form-urlencoded",
-                                        "Referer": req2.url, "Origin": "https://www.amazon.com"})
-                
-                if "/ap/register" in req4.url or "/ap/signin" in req4.url:
-                    logger.debug("WAF rechazado - Rotando proxy")
-                    time.sleep(random.uniform(5, 10))
-                    continue
-                
-                verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
-            
-            # PASO 5: OTP Email
+
+            # ======================= NUEVO: BUCLE DE REINTENTOS INTERNOS PARA WAF =======================
+            WAF_MAX_RETRIES = 3
+            waf_success = False
+            waf_last_error = None
+
+            for waf_attempt in range(1, WAF_MAX_RETRIES + 1):
+                try:
+                    if waf_attempt > 1:
+                        logger.debug(f"   🔁 Reintentando WAF (intento {waf_attempt}/{WAF_MAX_RETRIES}) sin cambiar IP")
+                        # Crear una nueva sesión con el mismo proxy
+                        old_sess = sess
+                        sess = curl_requests.Session(impersonate="chrome")
+                        sess.headers.update(old_sess.headers.copy())
+                        if proxy:
+                            sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+                        # Rehacer pasos iniciales hasta req2
+                        sess.get("https://www.amazon.com", timeout=30)
+                        time.sleep(random.uniform(2, 4))
+                        sess.get("https://www.amazon.com/ap/register", timeout=30)
+                        time.sleep(random.uniform(1, 3))
+                        sess.get(f"https://www.amazon.com/ax/claim?arb={arb}")
+                        req1 = sess.post(
+                            "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
+                            "&openid.ns=http://specs.openid.net/auth/2.0"
+                            "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
+                            "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
+                            "&openid.assoc_handle=anywhere_v2_us"
+                            "&openid.return_to=https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                            data=data1,
+                            headers={"Referer": "https://www.amazon.com/ap/register", "Origin": "https://www.amazon.com"}
+                        )
+                        if req1.status_code != 200 or "appActionToken" not in req1.text:
+                            raise Exception("Fallo al reenviar req1")
+                        appActionToken = find(req1.text, 'name="appActionToken" value="', '"')
+                        workflowState = find(req1.text, 'name="workflowState" value="', '"')
+                        openid_return_to = find(req1.text, 'name="openid.return_to" value="', '"')
+                        prevRID = find(req1.text, 'name="prevRID" value="', '"')
+                        time.sleep(random.uniform(2, 4))
+                        req2 = sess.post("https://www.amazon.com/ap/register", data=data2,
+                                        headers={"Referer": req1.url, "Origin": "https://www.amazon.com"})
+                        if "already an account" in req2.text:
+                            raise Exception("Email ya registrado en reintento")
+                        if "detected unusual activity" in req2.text:
+                            raise Exception("Actividad inusual persistente")
+
+                    # --- Bloque original de resolución WAF ---
+                    if "data-context" in req2.text and "data-external-id" in req2.text:
+                        logger.debug("* Resolviendo WAF...")
+                        verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                        dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
+                        anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+                        
+                        json3 = json.dumps({
+                            "clientData": json.dumps({
+                                "sessionId": sess.cookies.get("session-id", ""),
+                                "marketplaceId": "ATVPDKIKX0DER",
+                                "clientUseCase": "/ap/register"
+                            }, separators=(",", ":")),
+                            "challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1",
+                            "locale": "en-US", "externalId": dataExternalId,
+                            "enableHeaderFooter": False, "enableBypassMechanism": False,
+                            "enableModalView": False, "eventTrigger": None,
+                            "aaExternalToken": None, "forceJsFlush": False,
+                            "aamationToken": None,
+                        }, separators=(",", ":"))
+                        
+                        req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
+                        clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
+                        aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
+                        captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
+                        jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
+                        
+                        if not jwt_client_id:
+                            logger.debug("WAF falló - token vacío")
+                            raise Exception("WAF_NO_TOKEN")
+                        
+                        logger.debug(f"WAF PASS: {jwt_client_id[:50]}...")
+                        
+                        data4 = {
+                            "anti-csrftoken-a2z": anti_csrf,
+                            "cvf_aamation_response_token": jwt_client_id,
+                            "cvf_captcha_captcha_action": "verifyAamationChallenge",
+                            "cvf_aamation_error_code": "",
+                            "clientContext": sess.cookies.get("ubid-main"),
+                            "openid.pape.max_auth_age": "900",
+                            "openid.return_to": "https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                            "forceMobileLayout": "1",
+                            "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
+                            "openid.assoc_handle": assoc_handle,
+                            "openid.mode": "checkid_setup",
+                            "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
+                            "pageId": assoc_handle,
+                            "openid.ns": "http://specs.openid.net/auth/2.0",
+                            "shouldShowPersistentLabels": "true",
+                            "verifyToken": verifyToken
+                        }
+                        
+                        time.sleep(random.uniform(2, 3))
+                        req4 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data4,
+                                        headers={"Content-Type": "application/x-www-form-urlencoded",
+                                                "Referer": req2.url, "Origin": "https://www.amazon.com"})
+                        
+                        # --- MEJORADO: solo considerar error si la redirección es a registro/login Y hay indicios de bloqueo ---
+                        redirect_to_login = "/ap/register" in req4.url or "/ap/signin" in req4.url
+                        if redirect_to_login:
+                            # Verificar si es realmente un fallo de WAF o solo una redirección benigna
+                            page_text_lower = req4.text.lower()
+                            if "detected unusual activity" in page_text_lower or "we cannot create your account" in page_text_lower:
+                                logger.debug(f"   ❌ WAF rechazado (intento {waf_attempt}) - actividad inusual")
+                                raise Exception("WAF_REJECTED_UNUSUAL")
+                            else:
+                                # Podría ser un número de teléfono ya registrado, etc. Mejor salir y probar otro proxy
+                                logger.debug(f"   ❌ Redirección inesperada a login/register sin mensaje claro")
+                                raise Exception("WAF_REDIRECT_UNKNOWN")
+                        
+                        # Si llegamos aquí, WAF fue exitoso y no redirigió a login
+                        verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
+                        waf_success = True
+                        break   # Salir del bucle de reintentos WAF
+                    else:
+                        # No había captcha que resolver
+                        waf_success = True
+                        break
+
+                except Exception as e:
+                    waf_last_error = e
+                    logger.debug(f"   Error en reintento WAF {waf_attempt}: {e}")
+                    if waf_attempt == WAF_MAX_RETRIES:
+                        # Después de 3 reintentos internos, este intento global se considera fallido
+                        raise Exception(f"WAF_FAILED_AFTER_{WAF_MAX_RETRIES}_RETRIES: {e}")
+                    else:
+                        # Dormir un poco antes del siguiente reintento interno
+                        time.sleep(random.uniform(3, 6))
+                        continue
+
+            if not waf_success:
+                # No debería llegar aquí, pero por si acaso
+                raise Exception("WAF no resuelto después de reintentos internos")
+
+            # ======================= FIN DEL BUCLE DE REINTENTOS WAF =======================
+
+            # PASO 5: OTP Email (el resto del flujo continúa igual)
             base_openid = {
                 "forceMobileLayout": "1", "openid.assoc_handle": assoc_handle,
                 "openid.mode": "checkid_setup", "language": "en_US",
@@ -783,7 +858,6 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 "time": elapsed, "intentos": intento
             }
 
-
         except Exception as error:
             logger.debug(f"Error en intento {intento}: {error}")
             logger.debug(f"Reintentando en 5s...")
@@ -794,8 +868,6 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             continue
 
     raise Exception("Todos los intentos del método rápido fallaron")
-
-
 
 # -------------------------------------------------------------------
 # MAPA DE PAÍSES A DOMINIOS Y URLS BASE
