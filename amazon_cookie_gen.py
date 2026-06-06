@@ -606,8 +606,6 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
 
 
-
-
             # ======================= NUEVO: BUCLE DE REINTENTOS INTERNOS PARA WAF =======================
             WAF_MAX_RETRIES = 3
             waf_success = False
@@ -653,7 +651,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                         if "detected unusual activity" in req2.text:
                             raise Exception("Actividad inusual persistente")
 
-                    # --- Bloque original de resolución WAF ---
+                    # --- Bloque de resolución WAF ---
                     if "data-context" in req2.text and "data-external-id" in req2.text:
                         logger.debug("* Resolviendo WAF...")
                         verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
@@ -681,7 +679,6 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                         jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
                         
                         if not jwt_client_id:
-                            logger.debug("WAF falló - token vacío")
                             raise Exception("WAF_NO_TOKEN")
                         
                         logger.debug(f"WAF PASS: {jwt_client_id[:50]}...")
@@ -710,58 +707,51 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                                         headers={"Content-Type": "application/x-www-form-urlencoded",
                                                 "Referer": req2.url, "Origin": "https://www.amazon.com"})
                         
-                        # --- MEJORADO: solo considerar error si la redirección es a registro/login Y hay indicios de bloqueo ---
-                        redirect_to_login = "/ap/register" in req4.url or "/ap/signin" in req4.url
-                        if redirect_to_login:
-                            # Verificar si es realmente un fallo de WAF o solo una redirección benigna
+                        # Si la respuesta redirige a login/register, es un error fatal para este intento global
+                        if "/ap/register" in req4.url or "/ap/signin" in req4.url:
                             page_text_lower = req4.text.lower()
                             if "detected unusual activity" in page_text_lower or "we cannot create your account" in page_text_lower:
-                                logger.debug(f"   ❌ WAF rechazado (intento {waf_attempt}) - actividad inusual")
-                                raise Exception("WAF_REJECTED_UNUSUAL")
+                                logger.debug(f"   ❌ Actividad inusual - reintento interno no sirve, se rotará proxy")
+                                raise Exception("WAF_UNUSUAL_ACTIVITY")
                             else:
-                                # Podría ser un número de teléfono ya registrado, etc. Mejor salir y probar otro proxy
-                                logger.debug(f"   ❌ Redirección inesperada a login/register sin mensaje claro")
-                                raise Exception("WAF_REDIRECT_UNKNOWN")
+                                logger.debug(f"   ❌ Redirección inesperada a login/register - abortando intento global")
+                                raise Exception("WAF_FATAL_REDIRECT")
                         
-                        # Si llegamos aquí, WAF fue exitoso y no redirigió a login
+                        # Extraer nuevo verifyToken después del WAF
                         verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
+                        if not verifyToken:
+                            raise Exception("No se encontró verifyToken después de WAF")
                         waf_success = True
-                        break   # Salir del bucle de reintentos WAF
+                        break
                     else:
-                        # No había captcha que resolver
+                        # No hay captcha, verificar que tengamos verifyToken
+                        verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                        if not verifyToken:
+                            raise Exception("No hay captcha ni verifyToken - flujo inválido")
                         waf_success = True
                         break
 
                 except Exception as e:
                     waf_last_error = e
-                    logger.debug(f"   Error en reintento WAF {waf_attempt}: {e}")
+                    error_str = str(e)
+                    logger.debug(f"   Error en reintento WAF {waf_attempt}: {error_str}")
+                    # Errores fatales no se reintentan internamente
+                    if "FATAL" in error_str or "REDIRECT" in error_str:
+                        raise
                     if waf_attempt == WAF_MAX_RETRIES:
-                        # Después de 3 reintentos internos, este intento global se considera fallido
-                        raise Exception(f"WAF_FAILED_AFTER_{WAF_MAX_RETRIES}_RETRIES: {e}")
+                        raise Exception(f"WAF_FAILED_AFTER_{WAF_MAX_RETRIES}_RETRIES: {error_str}")
                     else:
-                        # Dormir un poco antes del siguiente reintento interno
                         time.sleep(random.uniform(3, 6))
                         continue
 
             if not waf_success:
-                # No debería llegar aquí, pero por si acaso
                 raise Exception("WAF no resuelto después de reintentos internos")
+            # ======================= FIN DEL BUCLE DE REINTENTOS WAF =======================
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            # Asegurar anti_csrf por si no se definió en el flujo sin captcha
+            if 'anti_csrf' not in locals() or not anti_csrf:
+                anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
 
 
 
