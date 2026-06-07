@@ -686,7 +686,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             if not phone_info:
                 raise Exception("No se pudo obtener número de teléfono")
             sms_phone = phone_info['full']          # Número completo (con código país)
-            activation_id = phone_info['service_id']
+            service_id = phone_info['service_id']
             service_name = phone_info['service_name']
             purchase_country = phone_info['purchase_country']
             logger.debug(f"SMS: {sms_phone} (servicio: {service_name}, país: {purchase_country})")
@@ -716,9 +716,9 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
             logger.debug("* Esperando SMS...")
             if service_name == 'hero':
-                sms_code = get_hero_sms_code_sync(activation_id)
+                sms_code = get_hero_sms_code_sync(service_id)
             elif service_name == '5sim':
-                sms_code = get_fivesim_code_sync(activation_id)
+                sms_code = get_fivesim_code_sync(service_id)
             else:
                 raise Exception(f"Servicio SMS desconocido: {service_name}")
 
@@ -726,6 +726,8 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 raise Exception("No se recibió código SMS")
 
             logger.debug(f"SMS Code: {sms_code}")
+            if service_name == 'hero':
+                set_status(hero_key, service_id, 6)
             # Para 5sim no es necesario marcar, se libera automáticamente al recibir el código
             
             anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
@@ -2632,7 +2634,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             if not phone_info:
                 raise Exception("No se pudo obtener número de teléfono")
             sms_phone = phone_info['local']          # número local (sin prefijo internacional)
-            activation_id = phone_info['service_id'] # ID de la activación
+            service_id = phone_info['service_id']
             service_name = phone_info['service_name'] # 'hero' o '5sim'
             purchase_country = phone_info['purchase_country']
             logger.debug(f"Número obtenido: {phone_info['full']} (servicio: {service_name}, país: {purchase_country})")
