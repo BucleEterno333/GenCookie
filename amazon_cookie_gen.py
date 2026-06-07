@@ -714,7 +714,14 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                     "cvf_phone_num": sms_phone, "cvf_action": "collect"}
 
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
-            logger.debug("* Esperando SMS...")
+            # Verificar si hubo error en el envío del número
+            if "El número de teléfono móvil no es válido" in req6.text or "invalid phone number" in req6.text.lower():
+                logger.warning("⚠️ Número inválido para Amazon, reintentando...")
+                continue
+            if "Lo sentimos" in req6.text:
+                logger.warning("⚠️ Página de error de Amazon, reintentando...")
+                continue
+            logger.debug("* Esperando SMS... (número enviado correctamente)")
             if service_name == 'hero':
                 sms_code = get_hero_sms_code_sync(service_id)
             elif service_name == '5sim':
@@ -2141,12 +2148,27 @@ async def get_phone_number(account_country, force_service=None, force_country=No
     De lo contrario, sigue el orden por precio de cada servicio.
     """
     # Prefijos para extraer número local (dígitos después del código país)
-    prefix_len = {'ID': 2, 'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2,
-                  'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2}
-    prefix_len_plus = {'ID': 3, 'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3, 'FR': 3,
-                  'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3, 'KG': 3, 'PL': 3, 'CO': 3, 'LV': 3, 'PK': 3, 'TJ': 3, 'KE': 3}
+    prefix_len = {
+        'ID': 2, 'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2,
+        'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2,
+        # Países adicionales para Hero SMS
+        'BR': 2,   # Brasil +55 (2 dígitos después del 55)
+        'CM': 3,   # Camerún +237 (3 dígitos)
+        'MA': 3,   # Marruecos +212 (3 dígitos)
+        'KG': 3,   # Kirguistán +996 (3 dígitos)
+        'CO': 2,   # Colombia +57 (2 dígitos)
+    }
+    prefix_len_plus = {
+        'ID': 3, 'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3, 'FR': 3,
+        'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3, 'KG': 3, 'PL': 3, 'CO': 3, 'LV': 3, 'PK': 3, 'TJ': 3, 'KE': 3,
+        # Los mismos países para 5sim (si usas + y código)
+        'BR': 3,   # +55 son 2 dígitos? En realidad el número devuelto por 5sim puede incluir el código de país como prefijo, ajusta según lo que observes.
+        'CM': 4,
+        'MA': 4,
+    }
 
     # Mapeo de códigos de país a números para Hero SMS
+    #CAMBIAR ORDEN?
     hero_country_map = {
         'BR': 73,   # Brazil +55
         'CM': 41,   # Cameroon +237
