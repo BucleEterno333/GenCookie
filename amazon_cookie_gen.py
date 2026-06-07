@@ -490,7 +490,7 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
 
 
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
-            activation_id=None, sms_phone=None, proxy=None, t=None, max_attempts=6):
+            activation_id=None, sms_phone=None, proxy=None, t=None, max_attempts=6, country_code='BR'):
     """
     Versión adaptada para ser llamada desde la API.
     - max_attempts: número máximo de intentos (cada intento usa una IP diferente gracias a proxy rotativa)
@@ -681,19 +681,50 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
             
-            # PASO 6: SMS
-            activation_id, sms_phone = get_number(hero_key)
-            logger.debug(f"SMS: {sms_phone}")
-            
+            # PASO 6: SMS - Obtener número usando la lógica unificada (barato + reintentos por país)
+            phone_info = get_phone_number_sync(country_code)
+            if not phone_info:
+                raise Exception("No se pudo obtener número de teléfono")
+            sms_phone = phone_info['full']          # Número completo (con código país)
+            activation_id = phone_info['service_id']
+            service_name = phone_info['service_name']
+            purchase_country = phone_info['purchase_country']
+            logger.debug(f"SMS: {sms_phone} (servicio: {service_name}, país: {purchase_country})")
+
+            # Ajustar el código de país para el parámetro cvf_phone_cc según el país de compra
+            # Amazon espera un código de país de 2 letras (por ejemplo, 'US', 'CA', 'MX'...)
+            # Mapeo de países de compra a código de país de Amazon (por si el número es de otro país)
+            country_code_map = {
+                'CM': 'CM',   # Cameroon no tiene dominio propio, usar US?
+                'BR': 'BR',
+                'ID': 'ID',
+                'MA': 'MA',
+                'KG': 'KG',
+                'CO': 'CO',
+                'MX': 'MX',
+                # etc. Para 5sim pueden ser otros
+            }
+            amazon_cc = country_code_map.get(purchase_country, 'US')
+            logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
+
             data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
-                    "verifyToken": verifyToken, "cvf_phone_cc": "CA",
+                    "verifyToken": verifyToken, "cvf_phone_cc": amazon_cc,
                     "cvf_phone_num": sms_phone, "cvf_action": "collect"}
-            
+
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
             logger.debug("* Esperando SMS...")
-            sms_code = get_code(hero_key, activation_id)
+            if service_name == 'hero':
+                sms_code = get_hero_sms_code_sync(activation_id)
+            elif service_name == '5sim':
+                sms_code = get_fivesim_code_sync(activation_id)
+            else:
+                raise Exception(f"Servicio SMS desconocido: {service_name}")
+
+            if not sms_code:
+                raise Exception("No se recibió código SMS")
+
             logger.debug(f"SMS Code: {sms_code}")
-            set_status(hero_key, activation_id, 6)
+            # Para 5sim no es necesario marcar, se libera automáticamente al recibir el código
             
             anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
@@ -2046,6 +2077,58 @@ SMS_SERVICES = [
 # ===================================================================
 # FUNCIÓN PRINCIPAL PARA OBTENER NÚMERO (CORREGIDA)
 # ===================================================================
+def get_phone_number_sync(country_code, force_service=None, force_country=None):
+    """Versión síncrona de get_phone_number (ejecuta asyncio.run())"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(get_phone_number(country_code, force_service, force_country))
+    finally:
+        loop.close()
+
+def get_hero_sms_code_sync(activation_id, timeout=180):
+    """SMS code polling síncrono para Hero SMS"""
+    start = time.time()
+    url = "https://hero-sms.com/stubs/handler_api.php"
+    while time.time() - start < timeout:
+        params = {'api_key': HERO_SMS_API_KEY, 'action': 'getStatusV2', 'id': activation_id}
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('sms') and data['sms'].get('code'):
+                    return data['sms']['code']
+        except Exception:
+            pass
+        time.sleep(5)
+    return None
+
+def get_fivesim_code_sync(order_id, timeout=180):
+    """SMS code polling síncrono para 5sim"""
+    url = f"{FIVESIM_BASE_URL}/user/check/{order_id}"
+    headers = {'Authorization': f'Bearer {FIVESIM_API_KEY}', 'Accept': 'application/json'}
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('status') == 'RECEIVED':
+                    sms = data.get('sms', [])
+                    if sms:
+                        code = sms[0].get('code')
+                        if not code:
+                            text = sms[0].get('text', '')
+                            codes = re.findall(r'\b(\d{5,6})\b', text)
+                            code = codes[0] if codes else None
+                        if code:
+                            return code
+        except Exception:
+            pass
+        time.sleep(5)
+    return None
+
+
 async def get_phone_number(account_country, force_service=None, force_country=None):
     """
     Obtiene un número de teléfono.
@@ -2542,16 +2625,16 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             logger.debug(f"   ✅ Proxy OK - IP pública: {ip}")
 
             # ----- PASO 3: Obtener número de teléfono temporal -----
-            logger.debug("📱 Obteniendo número de teléfono temporal...")
-            phone_info = await get_phone_number(country_code)
+            # Obtener número usando la lógica unificada (servicios y países ordenados por precio)
+            phone_info = get_phone_number_sync(country_code)
             if not phone_info:
-                raise Exception("No se pudo obtener número de teléfono de ningún servicio")
-            phone_number = phone_info['local']
-            service_id = phone_info['service_id']
-            service_name = phone_info['service_name']
-            purchase_country = phone_info.get('purchase_country', country_code)
-            logger.debug(f"   ✅ Número obtenido: {phone_number} (servicio: {service_name}, ID: {service_id})")
-            account_data['phone'] = phone_number
+                raise Exception("No se pudo obtener número de teléfono")
+            sms_phone = phone_info['local']          # número local (sin prefijo internacional)
+            activation_id = phone_info['service_id'] # ID de la activación
+            service_name = phone_info['service_name'] # 'hero' o '5sim'
+            purchase_country = phone_info['purchase_country']
+            logger.debug(f"Número obtenido: {phone_info['full']} (servicio: {service_name}, país: {purchase_country})")
+            account_data['phone'] = sms_phone
             account_data['purchase_country'] = purchase_country
 
             # ----- PASO 4: Generar credenciales -----
@@ -3536,7 +3619,8 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                         process,
                         CAPSOLVER_API_KEY, HERO_SMS_API_KEY,
                         None, None, None, None, None,
-                        PROXY_STRING, None, 1
+                        PROXY_STRING, None, 1,
+                        country      
                     )
                     if fast_result:
                         logger.debug("✅ Método rápido exitoso.")
