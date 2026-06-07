@@ -897,7 +897,7 @@ wallet_urls = {
 # -------------------------------------------------------------------
 # HERO_COUNTRY_ORDER = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
 
-HERO_COUNTRY_ORDER = ['CM', 'BR', 'ID', 'MA', 'KG', 'CO', 'MX']
+HERO_COUNTRY_ORDER = ['CM','ID', 'MA', 'KG', 'CO', 'MX', 'BR'] # Se deja Brasil al final porque NO LLEGA SMS
 FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
 
 # -------------------------------------------------------------------
