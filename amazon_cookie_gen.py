@@ -2626,7 +2626,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
             # ----- PASO 3: Obtener número de teléfono temporal -----
             # Obtener número usando la lógica unificada (servicios y países ordenados por precio)
-            phone_info = get_phone_number_sync(country_code)
+            phone_info = await get_phone_number(country_code)
             if not phone_info:
                 raise Exception("No se pudo obtener número de teléfono")
             sms_phone = phone_info['local']          # número local (sin prefijo internacional)
