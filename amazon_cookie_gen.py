@@ -696,12 +696,14 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             # Mapeo de países de compra a código de país de Amazon (por si el número es de otro país)
             country_code_map = {
                 'CM': 'CM',   # Cameroon no tiene dominio propio, usar US?
-                'BR': 'BR',
                 'ID': 'ID',
                 'MA': 'MA',
                 'KG': 'KG',
                 'CO': 'CO',
                 'MX': 'MX',
+                'BR': 'BR', # ño llega sms
+
+
                 # etc. Para 5sim pueden ser otros
             }
             amazon_cc = country_code_map.get(purchase_country, 'US')
