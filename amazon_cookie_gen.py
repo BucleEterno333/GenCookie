@@ -40,6 +40,9 @@ import os
 from typing import Tuple, List, Dict, Optional
 from faker import Faker
 import urllib.parse
+from bs4 import BeautifulSoup
+import threading
+
 
 
 # Forzar UTF-8 en la salida
@@ -243,7 +246,16 @@ _MAIL_APIS = [
     },
 ]
 
-
+def extract_hidden_inputs(html):
+    """Extrae todos los inputs ocultos de un formulario HTML."""
+    soup = BeautifulSoup(html, 'html.parser')
+    hidden = {}
+    for inp in soup.find_all('input', type='hidden'):
+        name = inp.get('name')
+        value = inp.get('value', '')
+        if name:
+            hidden[name] = value
+    return hidden
 
 def get_current_ip(sess):
     """Obtiene la IP actual"""
@@ -381,39 +393,35 @@ def _api_request(sess, method, url, json_data=None, headers=None, timeout=15):
     return res
 
 
-def new_mail(sess) -> Tuple:
-    """Crea email temporal - prueba 5 APIs"""
-    for api in _MAIL_APIS:
-        try:
-            logger.debug(f"* Probando {api['name']}...")
-            
-            method, url, data, *extra = api["create"]()
-            headers = extra[0] if extra else {}
-            
-            res = _api_request(sess, method, url, data, headers)
-            
-            if res.status_code not in [200, 201]:
-                logger.debug(f"  Status: {res.status_code}")
+def new_mail(sess, result_container):
+    """Crea email temporal y guarda el resultado en el contenedor"""
+    try:
+        for api in _MAIL_APIS:
+            try:
+                method, url, data, *extra = api["create"]()
+                headers = extra[0] if extra else {}
+                
+                res = _api_request(sess, method, url, data, headers)
+                
+                if res.status_code not in [200, 201]:
+                    continue
+                
+                resp_data = res.json()
+                
+                email = api["get_email"](resp_data)
+                token = api["get_token"](resp_data)
+                
+                if email and token:
+                    result_container["email"] = email
+                    result_container["token"] = token
+                    result_container["api"] = api["name"]
+                    logger.debug(f"* Email creado: {email} ({api['name']})")
+                    return
+            except:
                 continue
-            
-            resp_data = res.json()
-            
-            email = api["get_email"](resp_data)
-            token = api["get_token"](resp_data)
-            
-            if not email:
-                logger.debug(f"  No se pudo extraer email de la respuesta")
-                continue
-            
-            logger.debug(f"* {api['name']} OK: {email}")
-            return email, token, api["name"]
-            
-        except Exception as e:
-            logger.debug(f"* {api['name']} falló: {str(e)[:80]}")
-            continue
-    
-    raise Exception("TODAS las APIs de mail fallaron")
-
+        result_container["error"] = "No se pudo crear email"
+    except Exception as e:
+        result_container["error"] = str(e)
 
 def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
     """Obtiene código OTP del email"""
@@ -536,10 +544,29 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             current_ip = get_current_ip(sess)
             logger.debug(f"IP: {current_ip}")
 
-            # Crear email temporal
+            # Crear email temporal (con paralelismo)
             if not email:
-                email, mail_token, mail_api = new_mail(sess)
-            logger.debug(f"Email: {email} ({mail_api})")
+                mail_result = {}
+                mail_thread = threading.Thread(target=new_mail, args=(sess, mail_result))
+                mail_thread.start()
+                
+                # Mientras se crea el email, hacer el claim
+                sess.get(f"https://www.amazon.com/ax/claim?arb={arb}")
+                
+                # Esperar a que el email esté listo
+                mail_thread.join(timeout=10)
+                
+                if "error" in mail_result:
+                    raise Exception(f"Error creando email: {mail_result['error']}")
+                
+                email = mail_result.get("email")
+                mail_token = mail_result.get("token")
+                mail_api = mail_result.get("api")
+                
+                if not email:
+                    raise Exception("No se pudo obtener email")
+                
+                logger.debug(f"Email listo: {email} ({mail_api})")
 
             # PASO 1: Cookies iniciales
             logger.debug("* Visitando Amazon...")
@@ -587,6 +614,8 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             req2 = sess.post("https://www.amazon.com/ap/register", data=data2,
                             headers={"Referer": req1.url, "Origin": "https://www.amazon.com"})
+            anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+            verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
             
             if "already an account" in req2.text:
                 email = None
@@ -601,9 +630,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             # PASO 4: WAF
             if "data-context" in req2.text and "data-external-id" in req2.text:
                 logger.debug("* Resolviendo WAF...")
-                verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
                 dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
-                anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
                 
                 json3 = json.dumps({
                     "clientData": json.dumps({
@@ -673,10 +700,16 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             otp_code = mail_code(sess, mail_token, mail_api)
             logger.debug(f"OTP: {otp_code}")
             
-            data5 = {**base_openid, "autoReadStatus": "manual",
-                    "verificationPageContactType": "email", "action": "code",
-                    "verifyToken": verifyToken, "code": otp_code}
-            
+            # Después de req4, extrae todos los hidden inputs de la página
+            hidden_inputs = extract_hidden_inputs(req4.text)
+
+            # Construye data5 incluyendo todos los hidden inputs
+            data5 = {**base_openid, **hidden_inputs,
+                    "autoReadStatus": "manual",
+                    "verificationPageContactType": "email",
+                    "action": "code",
+                    "code": otp_code}
+                        
             req5 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data5)
             anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
@@ -709,9 +742,13 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             amazon_cc = country_code_map.get(purchase_country, 'US')
             logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
 
-            data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
-                    "verifyToken": verifyToken, "cvf_phone_cc": amazon_cc,
-                    "cvf_phone_num": sms_phone, "cvf_action": "collect"}
+            # Después de req5, extrae hidden inputs de req5.text
+            hidden_inputs = extract_hidden_inputs(req5.text)
+
+            data6 = {**base_openid, **hidden_inputs,
+                    "cvf_phone_cc": amazon_cc,
+                    "cvf_phone_num": sms_phone,
+                    "cvf_action": "collect"}
 
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
             # Verificar si hubo error en el envío del número
@@ -740,10 +777,18 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
             
-            data7 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
-                    "verificationPageContactType": "sms", "verifyToken": verifyToken,
-                    "code": sms_code, "cvf_action": "code", "resendContactType": "sms"}
-            
+            # Después de req6, extrae hidden inputs (esto ya lo haces)
+            hidden_inputs = extract_hidden_inputs(req6.text)
+
+            # Construye data7: base_openid + hidden_inputs + campos obligatorios
+            data7 = {
+                **base_openid,
+                **hidden_inputs,
+                "verificationPageContactType": "sms",
+                "code": sms_code,
+                "cvf_action": "code",
+                "resendContactType": "sms"
+            }
             req7 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data7)
             
             if "entered already exists with another account" in req7.text:
