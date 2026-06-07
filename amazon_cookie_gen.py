@@ -685,7 +685,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             phone_info = get_phone_number_sync(country_code)
             if not phone_info:
                 raise Exception("No se pudo obtener número de teléfono")
-            sms_phone = phone_info['full']          # Número completo (con código país)
+            sms_phone = phone_info['local']          # Número completo (con código país)
             service_id = phone_info['service_id']
             service_name = phone_info['service_name']
             purchase_country = phone_info['purchase_country']
