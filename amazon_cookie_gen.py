@@ -616,7 +616,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                             headers={"Referer": req1.url, "Origin": "https://www.amazon.com"})
             anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
-
+            
             if "already an account" in req2.text:
                 email = None
                 logger.debug("Email ya registrado")
@@ -714,28 +714,40 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
             
-            # PASO 6: SMS - Obtener número usando la lógica unificada
+            # PASO 6: SMS - Obtener número usando la lógica unificada (barato + reintentos por país)
             phone_info = get_phone_number_sync(country_code)
             if not phone_info:
                 raise Exception("No se pudo obtener número de teléfono")
-
-            # Usar número completo con formato internacional
-            if phone_info['full'].startswith('+'):
-                sms_phone = phone_info['full']
-            else:
-                sms_phone = '+' + phone_info['full']
-
+            sms_phone = phone_info['local']          # Número completo (con código país)
             service_id = phone_info['service_id']
             service_name = phone_info['service_name']
-            logger.debug(f"SMS (formato completo): {sms_phone} (servicio: {service_name})")
+            purchase_country = phone_info['purchase_country']
+            logger.debug(f"SMS: {sms_phone} (servicio: {service_name}, país: {purchase_country})")
 
-            # Obtener hidden inputs de req5
+            # Ajustar el código de país para el parámetro cvf_phone_cc según el país de compra
+            # Amazon espera un código de país de 2 letras (por ejemplo, 'US', 'CA', 'MX'...)
+            # Mapeo de países de compra a código de país de Amazon (por si el número es de otro país)
+            country_code_map = {
+                'CM': 'CM',   # Cameroon no tiene dominio propio, usar US?
+                'ID': 'ID',
+                'MA': 'MA',
+                'KG': 'KG',
+                'CO': 'CO',
+                'MX': 'MX',
+                'BR': 'BR', # ño llega sms
+
+
+                # etc. Para 5sim pueden ser otros
+            }
+            amazon_cc = country_code_map.get(purchase_country, 'US')
+            logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
+
+            # Después de req5, extrae hidden inputs de req5.text
             hidden_inputs = extract_hidden_inputs(req5.text)
 
-            # Enviar sin cvf_phone_cc (vacío) y con número completo
             data6 = {**base_openid, **hidden_inputs,
-                    "cvf_phone_cc": "",           # ← importante: vacío
-                    "cvf_phone_num": sms_phone,   # ← número con + o sin él, pero completo
+                    "cvf_phone_cc": amazon_cc,
+                    "cvf_phone_num": sms_phone,
                     "cvf_action": "collect"}
 
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
@@ -937,7 +949,7 @@ wallet_urls = {
 # -------------------------------------------------------------------
 # HERO_COUNTRY_ORDER = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
 
-HERO_COUNTRY_ORDER = ['CM','ID', 'MA', 'KG', 'CO', 'MX', 'BR'] # Se deja Brasil al final porque NO LLEGA SMS
+HERO_COUNTRY_ORDER = ['CA', 'MX', 'US'] # Se deja solo US, CA y MX para Hero para pruebas (números no llegan con otros países)
 FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
 
 # -------------------------------------------------------------------
