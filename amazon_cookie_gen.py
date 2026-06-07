@@ -244,6 +244,22 @@ _MAIL_APIS = [
 ]
 
 
+def get_global_force_playwright():
+    try:
+        conn = psycopg2.connect(os.environ['DATABASE_URL'])
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM global_settings WHERE key = 'force_playwright'")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            return row[0].lower() == 'true'
+        return False
+    except Exception as e:
+        logger.error(f"Error leyendo global_force_playwright: {e}")
+        return False
+    
+
 def get_current_ip(sess):
     """Obtiene la IP actual"""
     try:
@@ -3501,75 +3517,80 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 # -------------------------------------------------------------------
 # FUNCIÓN PARA API
 # -------------------------------------------------------------------
-async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10):
+async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10, force_playwright=False):
     logger.debug(f"🚀 generate_cookie_api llamada con country={country}, add_address={add_address}, max_retries={max_retries}")
 
     try:
         if country not in base_urls:
             return {'success': False, 'error': f'País no soportado: {country}', 'country': country, 'screenshot': None}
 
-        # ----- INTENTAR PRIMERO CON MÉTODO RÁPIDO (curl_cffi) de forma SECUENCIAL -----
-        if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
-            logger.debug("🔧 Intentando método rápido (curl_cffi + Capsolver) de forma secuencial...")
-            loop = asyncio.get_running_loop()
-            max_attempts = 10   # número total de intentos (cada uno con IP diferente gracias a proxy rotativa)
-            for attempt in range(1, max_attempts + 1):
-                logger.debug(f"   Intento rápido #{attempt}/{max_attempts}")
-                try:
-                    # Ejecutar process en un hilo separado para no bloquear el event loop
-                    fast_result = await loop.run_in_executor(
-                        None,
-                        process,
-                        CAPSOLVER_API_KEY,
-                        HERO_SMS_API_KEY,
-                        None, None, None, None, None,
-                        PROXY_STRING,
-                        None,
-                        1   # max_attempts=1 para que cada llamada intente una sola vez
-                    )
-                    if fast_result:
-                        logger.debug("✅ Método rápido exitoso. Devolviendo cookie.")
-                        account_data = {
-                            'phone': fast_result['phone'],
-                            'password': fast_result['password'],
-                            'name': fast_result['name'],
-                            'address': 'No address added',
-                            'cookie_string': fast_result['cookies'],
-                            'cookie_dict': dict(x.split('=', 1) for x in fast_result['cookies'].split('; ') if '=' in x),
-                            'country': country,
-                            'purchase_country': country
-                        }
-                        return {'success': True, 'data': account_data, 'country': country, 'screenshot': None}
-                except Exception as e:
-                    logger.debug(f"   Intento rápido #{attempt} falló: {e}")
-                    # Si es el último intento, salimos del bucle (no seguir)
-                    if attempt == max_attempts:
-                        logger.debug("⚠️ Todos los intentos rápidos fallaron. Recurriendo a Playwright...")
-                    else:
-                        # Esperar un poco antes del siguiente intento (evitar saturar)
-                        await asyncio.sleep(2)
-            # Si llegamos aquí es porque todos los intentos fallaron
-            logger.debug("⚠️ Método rápido falló después de todos los intentos. Recurriendo a Playwright...")
+        if force_playwright:
+            logger.debug("⏩ Método rápido deshabilitado por parámetro force_playwright. Usando Playwright directamente.")
         else:
-            logger.debug("⚠️ Método rápido no disponible (faltan claves o proxy). Usando Playwright directamente.")
 
-        # ----- SI EL MÉTODO RÁPIDO FALLÓ O NO ESTÁ DISPONIBLE, USAR PLAYWRIGHT -----
-        account_data, error_msg, screenshot = await create_amazon_account(
-            country,
-            add_address_flag=add_address,
-            max_retries=max_retries,
-            max_internal_retries=max_internal_retries
-        )
+            # ----- INTENTAR PRIMERO CON MÉTODO RÁPIDO (curl_cffi) de forma SECUENCIAL -----
+            if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
+                logger.debug("🔧 Intentando método rápido (curl_cffi + Capsolver) de forma secuencial...")
+                loop = asyncio.get_running_loop()
+                max_attempts = 10   # número total de intentos (cada uno con IP diferente gracias a proxy rotativa)
+                for attempt in range(1, max_attempts + 1):
+                    logger.debug(f"   Intento rápido #{attempt}/{max_attempts}")
+                    try:
+                        # Ejecutar process en un hilo separado para no bloquear el event loop
+                        fast_result = await loop.run_in_executor(
+                            None,
+                            process,
+                            CAPSOLVER_API_KEY,
+                            HERO_SMS_API_KEY,
+                            None, None, None, None, None,
+                            PROXY_STRING,
+                            None,
+                            1   # max_attempts=1 para que cada llamada intente una sola vez
+                        )
+                        if fast_result:
+                            logger.debug("✅ Método rápido exitoso. Devolviendo cookie.")
+                            account_data = {
+                                'phone': fast_result['phone'],
+                                'password': fast_result['password'],
+                                'name': fast_result['name'],
+                                'address': 'No address added',
+                                'cookie_string': fast_result['cookies'],
+                                'cookie_dict': dict(x.split('=', 1) for x in fast_result['cookies'].split('; ') if '=' in x),
+                                'country': country,
+                                'purchase_country': country
+                            }
+                            return {'success': True, 'data': account_data, 'country': country, 'screenshot': None}
+                    except Exception as e:
+                        logger.debug(f"   Intento rápido #{attempt} falló: {e}")
+                        # Si es el último intento, salimos del bucle (no seguir)
+                        if attempt == max_attempts:
+                            logger.debug("⚠️ Todos los intentos rápidos fallaron. Recurriendo a Playwright...")
+                        else:
+                            # Esperar un poco antes del siguiente intento (evitar saturar)
+                            await asyncio.sleep(2)
+                # Si llegamos aquí es porque todos los intentos fallaron
+                logger.debug("⚠️ Método rápido falló después de todos los intentos. Recurriendo a Playwright...")
+            else:
+                logger.debug("⚠️ Método rápido no disponible (faltan claves o proxy). Usando Playwright directamente.")
 
-        if account_data:
-            return {'success': True, 'data': account_data, 'country': country, 'screenshot': screenshot}
-        else:
-            return {'success': False, 'error': error_msg, 'country': country, 'screenshot': screenshot}
+            # ----- SI EL MÉTODO RÁPIDO FALLÓ O NO ESTÁ DISPONIBLE, USAR PLAYWRIGHT -----
+            account_data, error_msg, screenshot = await create_amazon_account(
+                country,
+                add_address_flag=add_address,
+                max_retries=max_retries,
+                max_internal_retries=max_internal_retries,
+                force_playwright=force_playwright
+            )
+
+            if account_data:
+                return {'success': True, 'data': account_data, 'country': country, 'screenshot': screenshot}
+            else:
+                return {'success': False, 'error': error_msg, 'country': country, 'screenshot': screenshot}
 
     except Exception as e:
         logger.exception(f"💥 Excepción en generate_cookie_api: {e}")
         return {'success': False, 'error': str(e), 'country': country, 'screenshot': None}
-    
+        
 # -------------------------------------------------------------------
 # API FLASK
 # -------------------------------------------------------------------
@@ -3632,6 +3653,7 @@ def generate():
     add_address = data.get('add_address', True)
     max_retries = data.get('max_retries', None)   # Nuevo parámetro opcional
     max_internal_retries = data.get('max_internal_retries', 10)   # nuevo parámetro
+    force_playwright = data.get('force_playwright', False)
     if not country:
         return jsonify({'success': False, 'error': 'Falta el parámetro country'}), 400
 
@@ -3653,7 +3675,7 @@ def generate():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        result = loop.run_until_complete(generate_cookie_api(country, add_address, max_retries, max_internal_retries))
+        result = loop.run_until_complete(generate_cookie_api(country, add_address, max_retries, max_internal_retries, force_playwright))
         if result['success'] and user_token:
             success, new_credits = deduct_credits(user_token, 4) # Descontar 4 créditos por la generación de cookie (ajustable)
             if not success:
