@@ -735,6 +735,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 'CO': 'CO',
                 'MX': 'MX',
                 'BR': 'BR', # ño llega sms
+                'CA': 'CA'
 
 
                 # etc. Para 5sim pueden ser otros
