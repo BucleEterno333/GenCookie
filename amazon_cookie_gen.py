@@ -495,34 +495,30 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
 
 
 
-
-
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             activation_id=None, sms_phone=None, proxy=None, t=None, max_attempts=6, country_code='BR'):
     """
     Versión adaptada para ser llamada desde la API.
-    - max_attempts: número máximo de intentos (cada intento usa una IP diferente gracias a proxy rotativa)
-    - proxy: cadena con formato user:pass@host:port o host:port
+    - max_attempts: número máximo de intentos GLOBALES (cada uno usa IP diferente gracias a proxy rotativo)
+    - Cada intento global tiene un bucle interno para reintentar números de teléfono sin cambiar IP.
     """
-    import urllib.parse  # <-- agrega esto
-
+    import urllib.parse
     if t is None:
         t = time.time()
 
     for intento in range(1, max_attempts + 1):
         try:
             logger.debug(f"\n{'='*60}")
-            logger.debug(f"INTENTO #{intento}")
+            logger.debug(f"INTENTO GLOBAL #{intento}")
             logger.debug(f"{'='*60}")
 
-            # Usar la proxy recibida
             if proxy:
                 logger.debug(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
 
             info = gen_profile()
             assoc_handle = "anywhere_v2_us"
             arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
-            password = "dfbc1992"  # Puedes cambiarlo o generarlo aleatoriamente
+            password = "dfbc1992"  # puedes cambiarlo a aleatorio
 
             sess = curl_requests.Session(impersonate="chrome")
             sess.headers.update({
@@ -544,43 +540,33 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             current_ip = get_current_ip(sess)
             logger.debug(f"IP: {current_ip}")
 
-            # Crear email temporal (con paralelismo)
+            # ---------- 1. Crear email temporal ----------
             if not email:
                 mail_result = {}
                 mail_thread = threading.Thread(target=new_mail, args=(sess, mail_result))
                 mail_thread.start()
-                
-                # Mientras se crea el email, hacer el claim
                 sess.get(f"https://www.amazon.com/ax/claim?arb={arb}")
-                
-                # Esperar a que el email esté listo
                 mail_thread.join(timeout=10)
-                
                 if "error" in mail_result:
                     raise Exception(f"Error creando email: {mail_result['error']}")
-                
                 email = mail_result.get("email")
                 mail_token = mail_result.get("token")
                 mail_api = mail_result.get("api")
-                
                 if not email:
                     raise Exception("No se pudo obtener email")
-                
                 logger.debug(f"Email listo: {email} ({mail_api})")
 
-            # PASO 1: Cookies iniciales
+            # ---------- 2. Cookies iniciales y claim ----------
             logger.debug("* Visitando Amazon...")
             sess.get("https://www.amazon.com", timeout=30)
             time.sleep(random.uniform(2, 4))
             sess.get("https://www.amazon.com/ap/register", timeout=30)
             time.sleep(random.uniform(1, 3))
-            
-            # PASO 2: Claim
             sess.get(f"https://www.amazon.com/ax/claim?arb={arb}")
             time.sleep(random.uniform(1, 2))
-            
+
+            # ---------- 3. Primer POST (appActionToken) ----------
             data1 = {"arb": arb, "email": email, "claimCollectionLayoutType": "unifiedAuthClaimCollection"}
-            
             req1 = sess.post(
                 "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
                 "&openid.ns=http://specs.openid.net/auth/2.0"
@@ -591,19 +577,17 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 data=data1,
                 headers={"Referer": "https://www.amazon.com/ap/register", "Origin": "https://www.amazon.com"}
             )
-            
             if req1.status_code != 200 or "appActionToken" not in req1.text:
                 logger.debug(f"Bloqueo en req1 (Status: {req1.status_code})")
                 raise Exception("Proxy bloqueada")
-            
+
             appActionToken = find(req1.text, 'name="appActionToken" value="', '"')
             workflowState = find(req1.text, 'name="workflowState" value="', '"')
             openid_return_to = find(req1.text, 'name="openid.return_to" value="', '"')
             prevRID = find(req1.text, 'name="prevRID" value="', '"')
-            
-            # PASO 3: Registro
+
+            # ---------- 4. Registro (nombre, email, password) ----------
             time.sleep(random.uniform(2, 4))
-            
             data2 = {
                 "appActionToken": appActionToken, "appAction": "REGISTER",
                 "shouldShowPersistentLabels": "true", "openid.return_to": openid_return_to,
@@ -611,27 +595,31 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 "customerName": info["full_name"], "email": email,
                 "password": password, "showPasswordChecked": "true"
             }
-            
             req2 = sess.post("https://www.amazon.com/ap/register", data=data2,
                             headers={"Referer": req1.url, "Origin": "https://www.amazon.com"})
             anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
-            verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
-            
+            # Extraer verifyToken de forma robusta
+            verifyToken_match = re.search(r'name=["\']verifyToken["\']\s+value=["\']([^"\']+)', req2.text)
+            if not verifyToken_match:
+                verifyToken_match = re.search(r'data-verify-token=["\']([^"\']+)', req2.text)
+            if verifyToken_match:
+                verifyToken = verifyToken_match.group(1)
+            else:
+                raise Exception("No se encontró verifyToken en la respuesta")
+
             if "already an account" in req2.text:
-                email = None
                 logger.debug("Email ya registrado")
-                continue
-                
+                email = None
+                continue   # reinicia intento global (nuevo email, nueva IP)
             if "detected unusual activity" in req2.text:
                 logger.debug("Actividad inusual - Rotando proxy")
                 time.sleep(random.uniform(5, 10))
                 continue
-            
-            # PASO 4: WAF
+
+            # ---------- 5. WAF (si aparece) ----------
             if "data-context" in req2.text and "data-external-id" in req2.text:
                 logger.debug("* Resolviendo WAF...")
                 dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
-                
                 json3 = json.dumps({
                     "clientData": json.dumps({
                         "sessionId": sess.cookies.get("session-id", ""),
@@ -645,19 +633,15 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                     "aaExternalToken": None, "forceJsFlush": False,
                     "aamationToken": None,
                 }, separators=(",", ":"))
-                
                 req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
                 clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
                 aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
                 captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
                 jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
-                
                 if not jwt_client_id:
                     logger.debug("WAF falló")
                     continue
-                
-                logger.debug(f"WAF PASS: {jwt_client_id[:50]}...")
-                
+                logger.debug(f"WAF PASS")
                 data4 = {
                     "anti-csrftoken-a2z": anti_csrf,
                     "cvf_aamation_response_token": jwt_client_id,
@@ -676,150 +660,157 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                     "shouldShowPersistentLabels": "true",
                     "verifyToken": verifyToken
                 }
-                
                 time.sleep(random.uniform(2, 3))
                 req4 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data4,
                                 headers={"Content-Type": "application/x-www-form-urlencoded",
                                         "Referer": req2.url, "Origin": "https://www.amazon.com"})
-                
                 if "/ap/register" in req4.url or "/ap/signin" in req4.url:
                     logger.debug("WAF rechazado - Rotando proxy")
                     time.sleep(random.uniform(5, 10))
                     continue
-                
                 verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
-            
-            # PASO 5: OTP Email
+                # La página que sigue es la de verificación por email
+                req_after_waf = req4
+            else:
+                # No hubo WAF, la página actual es la de verificación por email
+                req_after_waf = req2
+
+            # ---------- 6. Verificar email (OTP) ----------
             base_openid = {
                 "forceMobileLayout": "1", "openid.assoc_handle": assoc_handle,
                 "openid.mode": "checkid_setup", "language": "en_US",
                 "openid.ns": "http://specs.openid.net/auth/2.0",
                 "shouldShowPersistentLabels": "true"
             }
-            
             otp_code = mail_code(sess, mail_token, mail_api)
             logger.debug(f"OTP: {otp_code}")
-            
-            # Después de req4, extrae todos los hidden inputs de la página
-            hidden_inputs = extract_hidden_inputs(req4.text)
 
-            # Construye data5 incluyendo todos los hidden inputs
+            hidden_inputs = extract_hidden_inputs(req_after_waf.text)
             data5 = {**base_openid, **hidden_inputs,
                     "autoReadStatus": "manual",
                     "verificationPageContactType": "email",
                     "action": "code",
                     "code": otp_code}
-                        
             req5 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data5)
             anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
-            
-            # PASO 6: SMS - Obtener número usando la lógica unificada (barato + reintentos por país)
-            phone_info = get_phone_number_sync(country_code)
-            if not phone_info:
-                raise Exception("No se pudo obtener número de teléfono")
-            sms_phone = phone_info['local']          # Número completo (con código país)
-            service_id = phone_info['service_id']
-            service_name = phone_info['service_name']
-            purchase_country = phone_info['purchase_country']
-            logger.debug(f"SMS: {sms_phone} (servicio: {service_name}, país: {purchase_country})")
 
-            # Ajustar el código de país para el parámetro cvf_phone_cc según el país de compra
-            # Amazon espera un código de país de 2 letras (por ejemplo, 'US', 'CA', 'MX'...)
-            # Mapeo de países de compra a código de país de Amazon (por si el número es de otro país)
-            country_code_map = {
-                'CM': 'CM',   # Cameroon no tiene dominio propio, usar US?
-                'ID': 'ID',
-                'MA': 'MA',
-                'KG': 'KG',
-                'CO': 'CO',
-                'MX': 'MX',
-                'BR': 'BR', # ño llega sms
-                'CA': 'CA'
+            # ---------- 7. BUCLE INTERNO: VERIFICACIÓN SMS (con reintentos de número) ----------
+            sms_success = False
+            max_inner_retries = 5   # número máximo de intentos con diferentes números (misma IP)
+            inner_attempt = 0
+            last_phone_error = None
 
+            while inner_attempt < max_inner_retries and not sms_success:
+                inner_attempt += 1
+                logger.debug(f"📞 Intento interno SMS #{inner_attempt}/{max_inner_retries} (misma IP)")
 
-                # etc. Para 5sim pueden ser otros
-            }
-            amazon_cc = country_code_map.get(purchase_country, 'US')
-            logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
+                # Obtener un número de teléfono (cada intento puede probar un país diferente)
+                phone_info = get_phone_number_sync(country_code)
+                if not phone_info:
+                    logger.warning("   No se pudo obtener número de teléfono, reintentando...")
+                    continue
+                sms_phone = phone_info['local']
+                service_id = phone_info['service_id']
+                service_name = phone_info['service_name']
+                purchase_country = phone_info['purchase_country']
+                logger.debug(f"   SMS número: {sms_phone} (servicio: {service_name}, país: {purchase_country})")
 
-            # Después de req5, extrae hidden inputs de req5.text
-            hidden_inputs = extract_hidden_inputs(req5.text)
+                amazon_cc = {'CA':'CA','US':'US','MX':'MX','BR':'BR','CM':'CM','ID':'ID','MA':'MA','KG':'KG','CO':'CO'}.get(purchase_country, 'US')
+                logger.debug(f"   Usando código de país para Amazon: {amazon_cc}")
 
-            data6 = {**base_openid, **hidden_inputs,
-                    "cvf_phone_cc": amazon_cc,
-                    "cvf_phone_num": sms_phone,
-                    "cvf_action": "collect"}
+                # Preparar y enviar el número
+                hidden_inputs = extract_hidden_inputs(req5.text)
+                data6 = {**base_openid, **hidden_inputs,
+                        "cvf_phone_cc": amazon_cc,
+                        "cvf_phone_num": sms_phone,
+                        "cvf_action": "collect"}
+                req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
 
-            req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
-            # Verificar si hubo error en el envío del número
-            if "El número de teléfono móvil no es válido" in req6.text or "invalid phone number" in req6.text.lower():
-                logger.warning("⚠️ Número inválido para Amazon, reintentando...")
-                continue
-            if "Lo sentimos" in req6.text:
-                logger.warning("⚠️ Página de error de Amazon, reintentando...")
-                continue
-            logger.debug("* Esperando SMS... (número enviado correctamente)")
-            if service_name == 'hero':
-                sms_code = get_hero_sms_code_sync(service_id)
-            elif service_name == '5sim':
-                sms_code = get_fivesim_code_sync(service_id)
-            else:
-                raise Exception(f"Servicio SMS desconocido: {service_name}")
+                if "El número de teléfono móvil no es válido" in req6.text or "invalid phone number" in req6.text.lower():
+                    logger.warning("   Número inválido para Amazon, probando otro...")
+                    continue
+                if "Lo sentimos" in req6.text:
+                    logger.warning("   Página de error de Amazon, reintentando...")
+                    continue
 
-            if not sms_code:
-                raise Exception("No se recibió código SMS")
+                # Esperar código SMS
+                if service_name == 'hero':
+                    sms_code = get_hero_sms_code_sync(service_id)
+                elif service_name == '5sim':
+                    sms_code = get_fivesim_code_sync(service_id)
+                else:
+                    sms_code = None
 
-            logger.debug(f"SMS Code: {sms_code}")
-            if service_name == 'hero':
-                set_status(hero_key, service_id, 6)
-            # Para 5sim no es necesario marcar, se libera automáticamente al recibir el código
-            
-            anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
-            verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
-            
-            # Después de req6, extrae hidden inputs (esto ya lo haces)
-            hidden_inputs = extract_hidden_inputs(req6.text)
+                if not sms_code:
+                    logger.warning("   No se recibió código SMS, reintentando...")
+                    continue
 
-            # Construye data7: base_openid + hidden_inputs + campos obligatorios
-            data7 = {
-                **base_openid,
-                **hidden_inputs,
-                "verificationPageContactType": "sms",
-                "code": sms_code,
-                "cvf_action": "code",
-                "resendContactType": "sms"
-            }
-            req7 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data7)
-            
-            if "entered already exists with another account" in req7.text:
-                logger.debug("Número ya registrado")
-                continue
-                
-            if "new_account=1" not in req7.url:
-                logger.debug("Cuenta no creada")
-                continue
-            
-            # PASO 7: Dirección
+                logger.debug(f"   Código SMS: {sms_code}")
+                if service_name == 'hero':
+                    set_status(hero_key, service_id, 6)
+
+                # Enviar código
+                anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
+                verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
+                hidden_inputs = extract_hidden_inputs(req6.text)
+                data7 = {
+                    **base_openid,
+                    **hidden_inputs,
+                    "verificationPageContactType": "sms",
+                    "code": sms_code,
+                    "cvf_action": "code",
+                    "resendContactType": "sms"
+                }
+                req7 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data7)
+
+                if "entered already exists with another account" in req7.text:
+                    logger.warning("   Número ya registrado, probando otro número...")
+                    # No rompemos el bucle interno, solo continuamos con otro número
+                    last_phone_error = "Número ya registrado"
+                    # Cancelar la activación actual para no desperdiciar saldo
+                    if service_name == 'hero':
+                        set_status(hero_key, service_id, 8)  # cancelar
+                    elif service_name == '5sim':
+                        # 5sim se cancela automáticamente si no se recibe código? mejor llamar a cancel
+                        try:
+                            loop = asyncio.new_event_loop()
+                            loop.run_until_complete(cancel_fivesim(service_id))
+                            loop.close()
+                        except:
+                            pass
+                    continue
+                elif "new_account=1" not in req7.url:
+                    logger.debug("   Cuenta no creada, error inesperado, reintentando con otro número...")
+                    continue
+                else:
+                    # ¡Éxito! Salimos del bucle interno
+                    sms_success = True
+                    req_success = req7
+                    break
+
+            if not sms_success:
+                raise Exception(f"No se pudo completar la verificación SMS después de {max_inner_retries} números: {last_phone_error}")
+
+            # ---------- 8. Añadir dirección ----------
             logger.debug("* Agregando dirección...")
-            
-            csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
-            customer_id = find(req7.text, 'name="address-ui-widgets-obfuscated-customerId" value="', '"')
-            wizard_id = find(req7.text, 'name="address-ui-widgets-address-wizard-interaction-id" value="', '"')
-            prev_token = find(req7.text, 'name="address-ui-widgets-previous-address-form-state-token" value="', '"')
-            widget_csrf = urllib.parse.quote(find(req7.text, 'name="address-ui-widgets-csrfToken" value="', '"'))
-            form_load = find(req7.text, 'name="address-ui-widgets-form-load-start-time" value="', '"')
-            
+            csrf_addr = urllib.parse.quote(find(req_success.text, "name='csrfToken' value='", "'"))
+            customer_id = find(req_success.text, 'name="address-ui-widgets-obfuscated-customerId" value="', '"')
+            wizard_id = find(req_success.text, 'name="address-ui-widgets-address-wizard-interaction-id" value="', '"')
+            prev_token = find(req_success.text, 'name="address-ui-widgets-previous-address-form-state-token" value="', '"')
+            widget_csrf = urllib.parse.quote(find(req_success.text, 'name="address-ui-widgets-csrfToken" value="', '"'))
+            form_load = find(req_success.text, 'name="address-ui-widgets-form-load-start-time" value="', '"')
+
             sess.headers.update({
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Origin": "https://www.amazon.com",
-                "Referer": req7.url,
+                "Referer": req_success.url,
                 "Sec-Fetch-Dest": "document",
                 "Sec-Fetch-Mode": "navigate",
                 "Sec-Fetch-Site": "same-origin",
                 "Sec-Fetch-User": "?1"
             })
-            
+
             data8 = (
                 f"csrfToken={csrf_addr}&addressID="
                 f"&address-ui-widgets-addressFormButtonText=save"
@@ -845,25 +836,23 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 f"&address-ui-widgets-previous-address-form-state-token={prev_token}"
                 f"&address-ui-widgets-saveOriginalOrSuggestedAddress=Submit+Query"
             )
-            
             sess.post("https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button", data=data8)
-            
+
             cookies = "; ".join(f"{k}={v.replace(chr(34), chr(39))}" for k, v in sess.cookies.items())
             elapsed = round(time.time() - t, 2)
-            
+
             logger.debug(f"\n{'='*60}")
-            logger.debug(f"CUEATA CREADA!")
+            logger.debug(f"✅ CUENTA CREADA!")
             logger.debug(f"{'='*60}")
             logger.debug(f"Email:    {email}")
             logger.debug(f"Password: {password}")
             logger.debug(f"Phone:    {sms_phone}")
             logger.debug(f"IP:       {current_ip}")
-            logger.debug(f"Tiempo:   {elapsed}s | Intentos: {intento}")
+            logger.debug(f"Tiempo:   {elapsed}s | Intentos globales: {intento}")
             logger.debug(f"{'='*60}")
-            logger.debug(f"COOKIES:")
-            logger.debug(f"{cookies}")
+            logger.debug(f"COOKIES:\n{cookies}")
             logger.debug(f"{'='*60}\n")
-            
+
             return {
                 "name": info["full_name"], "phone": sms_phone,
                 "password": password, "email": email,
@@ -872,20 +861,17 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 "time": elapsed, "intentos": intento
             }
 
-
         except Exception as error:
-            logger.debug(f"Error en intento {intento}: {error}")
-            logger.debug(f"Reintentando en 5s...")
+            logger.debug(f"Error en intento global {intento}: {error}")
+            logger.debug(f"Reintentando con nueva IP en 5s...")
             time.sleep(5)
+            # Reseteamos solo el email para que en el siguiente intento se cree uno nuevo
             email = None
             mail_token = None
             mail_api = None
             continue
 
-    raise Exception("Todos los intentos del método rápido fallaron")
-
-
-
+    raise Exception("Todos los intentos globales fallaron")
 # -------------------------------------------------------------------
 # MAPA DE PAÍSES A DOMINIOS Y URLS BASE
 # -------------------------------------------------------------------
