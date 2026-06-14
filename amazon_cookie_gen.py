@@ -11,6 +11,7 @@ Amazon Cookie Generator - Versión API REST optimizada para mínimo consumo de p
 """
 
 from asyncio.log import logger
+from curses.ascii import US
 import os
 import re
 import json
@@ -936,7 +937,7 @@ wallet_urls = {
 # -------------------------------------------------------------------
 # HERO_COUNTRY_ORDER = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
 
-HERO_COUNTRY_ORDER = ['CA', 'MX', 'US'] # Se deja solo US, CA y MX para Hero para pruebas (números no llegan con otros países)
+HERO_COUNTRY_ORDER = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX'] # Se deja solo US, CA y MX para Hero para pruebas (números no llegan con otros países)
 FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
 
 # -------------------------------------------------------------------
@@ -2202,6 +2203,8 @@ async def get_phone_number(account_country, force_service=None, force_country=No
     # Mapeo de códigos de país a números para Hero SMS
     #CAMBIAR ORDEN?
     hero_country_map = {
+        'CA': 36,    # Canada +1
+        'US': 187,    # USA +1
         'BR': 73,   # Brasil +55
         'CM': 41,   # Cameroon +237
         'MY': 7,    # Malaysia +60
