@@ -1762,7 +1762,7 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
             if points and len(points) == 5:
                 cells = coords_to_cells(points)
                 if len(cells) == 5:
-                    cells_tuple = Tuple(sorted(cells))
+                    cells_tuple = tuple(sorted(cells))
                     logger.debug(f"   Respuesta válida: celdas {cells_tuple}")
                     valid_responses.append((cells_tuple, points))
                     # Contar frecuencias
