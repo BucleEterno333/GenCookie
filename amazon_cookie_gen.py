@@ -737,9 +737,9 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
                 # Esperar código SMS
                 if service_name == 'hero':
-                    sms_code = get_hero_sms_code_sync(service_id)
+                    sms_code = get_hero_sms_code_sync(service_id, timeout=50)
                 elif service_name == '5sim':
-                    sms_code = get_fivesim_code_sync(service_id)
+                    sms_code = get_fivesim_code_sync(service_id, timeout=50)
                 else:
                     sms_code = None
 
