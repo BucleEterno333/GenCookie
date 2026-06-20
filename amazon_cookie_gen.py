@@ -3731,7 +3731,7 @@ CORS(app, origins=['https://astralchk.com'], methods=["GET", "POST", "OPTIONS"],
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', 'https://astralchk.com')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization, x-device-fingerprint')
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
     response.headers.add('Access-Control-Allow-Credentials', 'true')
     return response
