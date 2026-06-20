@@ -717,7 +717,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 purchase_country = phone_info['purchase_country']
                 logger.debug(f"   SMS número: {sms_phone} (servicio: {service_name}, país: {purchase_country})")
 
-                amazon_cc = {'CA':'CA','US':'US','MX':'MX','BR':'BR','CM':'CM','ID':'ID','MA':'MA','KG':'KG','CO':'CO'}.get(purchase_country, 'US')
+                amazon_cc = {'CA':'CA','US':'US','MX':'MX','BR':'BR','CM':'CM','ID':'ID','MA':'MA','KG':'KG','CO':'CO', 'KZ':'KZ'}.get(purchase_country, 'US')
                 logger.debug(f"   Usando código de país para Amazon: {amazon_cc}")
 
                 # Preparar y enviar el número
