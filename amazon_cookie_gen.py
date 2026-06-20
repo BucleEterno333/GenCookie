@@ -2533,7 +2533,7 @@ async def wait_for_canvas_change(page, previous_canvas_id=None, timeout=5):
     return None
 
 # --------------------------------------------------------------------
-# FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA (optimizada)
+# FUNCIÓN AUXILIAR PARA CAPTURAR PANTALLA (optimizadaa)
 # -------------------------------------------------------------------
 async def take_screenshot(page, step_name):
     try:
