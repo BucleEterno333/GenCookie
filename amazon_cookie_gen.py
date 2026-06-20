@@ -698,7 +698,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
             # ---------- 7. BUCLE INTERNO: VERIFICACIÓN SMS (con reintentos de número) ----------
             sms_success = False
-            max_inner_retries = 5   # número máximo de intentos con diferentes números (misma IP)
+            max_inner_retries = 10   # número máximo de intentos con diferentes números (misma IP)
             inner_attempt = 0
             last_phone_error = None
 
@@ -737,9 +737,9 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
                 # Esperar código SMS
                 if service_name == 'hero':
-                    sms_code = get_hero_sms_code_sync(service_id, timeout=50)
+                    sms_code = get_hero_sms_code_sync(service_id, timeout=60)
                 elif service_name == '5sim':
-                    sms_code = get_fivesim_code_sync(service_id, timeout=50)
+                    sms_code = get_fivesim_code_sync(service_id, timeout=60)
                 else:
                     sms_code = None
 
@@ -937,7 +937,7 @@ wallet_urls = {
 # -------------------------------------------------------------------
 # HERO_COUNTRY_ORDER = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
 
-HERO_COUNTRY_ORDER = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX'] # Se deja solo US, CA y MX para Hero para pruebas (números no llegan con otros países)
+HERO_COUNTRY_ORDER = ['CM', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX', 'BR'] # Se deja solo US, CA y MX para Hero para pruebas (números no llegan con otros países)
 FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
 
 # -------------------------------------------------------------------
