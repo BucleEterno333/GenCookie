@@ -3726,7 +3726,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
 # -------------------------------------------------------------------
 app = Flask(__name__)
 CORS(app, origins=['https://astralchk.com'], methods=["GET", "POST", "OPTIONS"],
-     allow_headers=["Content-Type", "Authorization"], supports_credentials=True)
+     allow_headers=["Content-Type", "Authorization", "x-device-fingerprint"], supports_credentials=True)
 
 @app.after_request
 def after_request(response):
