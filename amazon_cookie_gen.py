@@ -554,6 +554,19 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 }
                 req2 = sess.post("https://www.amazon.com/ap/register", data=data2,
                                 headers={"Referer": req1.url, "Origin": "https://www.amazon.com"})
+                verifyToken = None
+                verifyToken_match = re.search(r'name=["\']verifyToken["\']\s+value=["\']([^"\']+)', req2.text)
+                if verifyToken_match:
+                    verifyToken = verifyToken_match.group(1)
+                else:
+                    verifyToken_match = re.search(r'data-verify-token=["\']([^"\']+)', req2.text)
+                                    
+                if verifyToken_match:verifyToken = verifyToken_match.group(1)
+
+                if not verifyToken:
+                    # Si no hay verifyToken, puede ser que Amazon haya redirigido o mostrado error
+                    raise Exception("No se encontró verifyToken en la respuesta")
+
                 anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
                 # Extraer verifyToken de forma robusta
                 verifyToken_match = re.search(r'name=["\']verifyToken["\']\s+value=["\']([^"\']+)', req2.text)
@@ -568,6 +581,8 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                         raise Exception("AMAZON_ERROR_PAGE - Saltando a Playwright")
                     if "/ap/signin" in req2.url:
                         raise Exception("REDIRECTED_TO_LOGIN - Proxy bloqueado")
+
+
                     raise Exception("No se encontró verifyToken en la respuesta")
 
                 if "already an account" in req2.text:
@@ -2838,7 +2853,14 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         try:
                             await page.route('**/*', block_heavy_resources)
                             await page.goto(base_url, wait_until='domcontentloaded', timeout=60000)
-                            await page.wait_for_selector('a[data-nav-role="signin"]', timeout=15000)
+                            # Opción 1: por ID (más estable)
+                            await page.wait_for_selector('#nav-link-accountList', timeout=15000)
+
+                            # Opción 2: por texto (en español)
+                            await page.wait_for_selector('a:has-text("Hola, identifícate")', timeout=15000)
+
+                            # Opción 3: por href (contiene /ap/signin)
+                            await page.wait_for_selector('a[href*="/ap/signin"]', timeout=15000)
                             nav_success = True
                             break
                         except Exception as nav_err:
