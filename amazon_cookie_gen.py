@@ -3768,7 +3768,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
         if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
             logger.debug("🔧 Intentando método rápido (curl_cffi + Capsolver) de forma secuencial...")
             loop = asyncio.get_running_loop()
-            max_attempts = 10
+            max_attempts = 1
             for attempt in range(1, max_attempts + 1):
                 logger.debug(f"   Intento rápido #{attempt}/{max_attempts}")
                 try:
