@@ -562,6 +562,12 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 if verifyToken_match:
                     verifyToken = verifyToken_match.group(1)
                 else:
+
+                    # Después de req2
+                    if "Lo sentimos" in req2.text or "no podemos crear tu cuenta" in req2.text:
+                        raise Exception("AMAZON_ERROR_PAGE - Saltando a Playwright")
+                    if "/ap/signin" in req2.url:
+                        raise Exception("REDIRECTED_TO_LOGIN - Proxy bloqueado")
                     raise Exception("No se encontró verifyToken en la respuesta")
 
                 if "already an account" in req2.text:
