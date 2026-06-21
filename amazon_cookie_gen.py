@@ -2893,7 +2893,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
                     # ----- PASO 7: Navegar a la URL base (con reintentos y manejo de redirecciones) -----
                     base_url = base_urls[country_code]
-                    max_nav_retries = 3
+                    max_nav_retries = 1
                     nav_success = False
                     last_error = None
 
@@ -3707,25 +3707,35 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
             if not registration_success:
                 raise last_error
-
         except Exception as e:
+            
             logger.error(f"❌ Error en intento global {global_attempt}: {e}")
+
+            # Intentar tomar captura de pantalla (si hay página)
+            screenshot_b64 = None
+            if page:
+                try:
+                    screenshot_b64 = await take_screenshot(page, "error_final")
+                except Exception as ss_err:
+                    logger.debug(f"   No se pudo tomar captura: {ss_err}")
+
+            # Si es el último intento, devolver error con captura (si existe)
             if global_attempt == retries:
-                if page:
-                    last_screenshot = await take_screenshot(page, "error_final")
-                return None, str(e), last_screenshot
-            else:
-                logger.info(f"🔄 Reintentando después de 5 segundos (nueva IP)...")
-                if page:
-                    await page.close()
-                if context:
-                    await context.close()
-                if browser:
-                    await browser.close()
-                if playwright:
-                    await playwright.stop()
-                await asyncio.sleep(5)
-                continue
+                return None, str(e), screenshot_b64
+
+            # Si no, limpiar y reintentar
+            logger.info(f"🔄 Reintentando después de 5 segundos (nueva IP)...")
+            if page:
+                await page.close()
+            if context:
+                await context.close()
+            if browser:
+                await browser.close()
+            if playwright:
+                await playwright.stop()
+            await asyncio.sleep(5)
+            continue
+
         finally:
             logger.debug("🧹 Limpiando recursos...")
             if page:
@@ -3763,6 +3773,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                 return {'success': True, 'data': account_data, 'country': country, 'screenshot': screenshot}
             else:
                 return {'success': False, 'error': error_msg, 'country': country, 'screenshot': screenshot}
+
 
         # Si no se fuerza, intentar el método rápido (curl_cffi + Capsolver) y luego Playwright como fallback
         if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
