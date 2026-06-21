@@ -102,32 +102,7 @@ PROXY_LIST = []
 
 # 5 APIs de mail temporal con sus formatos específicos
 _MAIL_APIS = [
-    {
-        "name": "tmailor",
-        "base": "https://tmailor.com/api",
-        "create": lambda: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "newemail", "curentToken": "", "fbToken": None}
-        ),
-        "inbox": lambda token: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "listinbox", "accesstoken": token, "fbToken": None, "curentToken": token}
-        ),
-        "read": lambda token, msg_id: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "read", "accesstoken": token, "email_code": msg_id["id"], "email_token": msg_id["email_id"], "fbToken": None, "curentToken": token}
-        ),
-        "get_email": lambda data: data.get("email"),
-        "get_token": lambda data: data.get("accesstoken"),
-        "has_messages": lambda data: bool(data.get("data")),
-        "get_messages": lambda data: list(data.get("data", {}).values()),
-        "get_msg_id": lambda msg: {"id": msg["id"], "email_id": msg["email_id"]},
-        "get_body": lambda data: data.get("data", {}).get("body", ""),
-        "check_errors": lambda data: None,
-    },
+
     {
         "name": "mailtm",
         "base": "https://api.mail.tm",
