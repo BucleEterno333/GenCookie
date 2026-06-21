@@ -2617,7 +2617,7 @@ async def block_heavy_resources(route):
     else:
         await route.continue_()
 
-async def smart_goto(page, url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*90000):
+async def smart_goto(page, url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*5000):
     start = time.time()
     logger.debug(f"🌐 Navegando a {url} (wait_until={wait_until})")
     await page.route('**/*', block_resources)
@@ -2922,16 +2922,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             if 'amazon' not in current_url:
                                 logger.warning(f"   Redirección inesperada a {current_url}, reintentando...")
                                 continue
-                            
-                            # --- Buscar selector de login con múltiples estrategias ---
-                            login_selectors = [
-                                '#nav-link-accountList',
-                                'a[data-nav-role="signin"]',
-                                '#nav-link-yourAccount',
-                                'a[href*="/ap/signin"]',
-                                'span:has-text("Hola, identifícate")'
-                            ]
-                            
+
                             selector_found = False
                             for sel in login_selectors:
                                 try:
@@ -3003,9 +2994,54 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         logger.debug("   ℹ️ No se detectó página de bienvenida, continuando normal")
 
                     logger.debug("👤 Buscando enlace de inicio de sesión...")
-                    selector = 'a[data-nav-role="signin"]'
-                    if not await smart_click(page, selector, timeout=ACTION_TIMEOUT*1000, wait_for_navigation=True):
-                        raise Exception("No se encontró enlace de inicio de sesión")
+
+                    # 1. Desactivar bloqueo de recursos para esta sección
+                    await page.unroute('**/*')
+                    await page.wait_for_timeout(2000)  # Esperar a que los recursos se carguen
+
+                    # 2. Selectores probados y ordenados por prioridad
+                    login_selectors = [
+                        'a[data-nav-role="signin"]',
+                        '#nav-link-accountList',
+                        'a.nav-a.nav-a-2[href*="/ap/signin"]',
+                        'a:has-text("Hola, identifícate")',
+                        'a:has-text("Cuenta y Listas")'
+                    ]
+
+                    clicked = False
+                    for selector in login_selectors:
+                        try:
+                            # Esperar a que el elemento sea visible (más tiempo)
+                            element = await page.wait_for_selector(selector, state='visible', timeout=15000)
+                            if element:
+                                # Hacer clic con JavaScript para evitar problemas de superposición
+                                await page.evaluate(f'document.querySelector("{selector}").click()')
+                                logger.debug(f"✅ Clic en '{selector}' mediante JavaScript")
+                                clicked = True
+                                break
+                        except Exception as e:
+                            logger.debug(f"   Selector {selector} falló: {e}")
+                            continue
+
+                    if not clicked:
+                        # Si todos fallan, intentar hacer clic en el primer elemento por su texto
+                        try:
+                            await page.click('text="Hola, identifícate"')
+                            logger.debug("✅ Clic en 'Hola, identifícate' por texto")
+                            clicked = True
+                        except:
+                            pass
+
+                    if not clicked:
+                        # Último recurso: navegar directamente a la URL de login
+                        await page.goto('https://www.amazon.com.mx/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.com.mx%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_mx&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0')
+                        await page.wait_for_load_state('domcontentloaded', timeout=30000)
+                        logger.debug("✅ Navegación directa a login")
+                        clicked = True
+
+                    if not clicked:
+                        raise Exception("No se pudo acceder a la página de inicio de sesión")
+
                     last_screenshot = await take_screenshot(page, "after_login_click")
 
                     # ----- PASO 9: Ingresar número de teléfono -----
@@ -3708,7 +3744,6 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             if not registration_success:
                 raise last_error
         except Exception as e:
-            
             logger.error(f"❌ Error en intento global {global_attempt}: {e}")
 
             # Intentar tomar captura de pantalla (si hay página)
