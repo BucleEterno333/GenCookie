@@ -443,7 +443,7 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
 
 
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
-            activation_id=None, sms_phone=None, proxy=None, t=None, max_attempts=6, country_code='BR'):
+            activation_id=None, sms_phone=None, proxy=None, t=None, max_attempts=1, country_code='BR'):
     """
     Versión adaptada para ser llamada desde la API.
     - max_attempts: número máximo de intentos GLOBALES (cada uno usa IP diferente gracias a proxy rotativo)
@@ -566,6 +566,17 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 if not verifyToken:
                     # Si no hay verifyToken, puede ser que Amazon haya redirigido o mostrado error
                     raise Exception("No se encontró verifyToken en la respuesta")
+
+
+                if "already an account" in req2.text:
+                    email = None
+                    print("Email ya registrado")
+                    continue
+                    
+                if "detected unusual activity" in req2.text:
+                    print("Actividad inusual - Rotando proxy")
+                    continue
+
 
                 anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
                 # Extraer verifyToken de forma robusta
