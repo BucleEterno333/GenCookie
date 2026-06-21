@@ -554,19 +554,20 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 }
                 req2 = sess.post("https://www.amazon.com/ap/register", data=data2,
                                 headers={"Referer": req1.url, "Origin": "https://www.amazon.com"})
+
+                # ---------- EXTRACCIÓN DE verifyToken SIEMPRE ----------
                 verifyToken = None
                 verifyToken_match = re.search(r'name=["\']verifyToken["\']\s+value=["\']([^"\']+)', req2.text)
                 if verifyToken_match:
                     verifyToken = verifyToken_match.group(1)
                 else:
                     verifyToken_match = re.search(r'data-verify-token=["\']([^"\']+)', req2.text)
-                                    
-                if verifyToken_match:verifyToken = verifyToken_match.group(1)
+                    if verifyToken_match:
+                        verifyToken = verifyToken_match.group(1)
 
                 if not verifyToken:
-                    # Si no hay verifyToken, puede ser que Amazon haya redirigido o mostrado error
                     raise Exception("No se encontró verifyToken en la respuesta")
-
+                # ------------------------------------------------------
 
                 if "already an account" in req2.text:
                     email = None
@@ -577,33 +578,69 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                     print("Actividad inusual - Rotando proxy")
                     continue
 
+                # PASO 4: WAF (si aparece)
+                if "data-context" in req2.text and "data-external-id" in req2.text:
+                    print("* Resolviendo WAF...")
+                    # YA NO extraemos verifyToken aquí, ya lo tenemos
+                    dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
+                    anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+                    
+                    json3 = json.dumps({
+                        "clientData": json.dumps({
+                            "sessionId": sess.cookies.get("session-id", ""),
+                            "marketplaceId": "ATVPDKIKX0DER",
+                            "clientUseCase": "/ap/register"
+                        }, separators=(",", ":")),
+                        "challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1",
+                        "locale": "en-US", "externalId": dataExternalId,
+                        "enableHeaderFooter": False, "enableBypassMechanism": False,
+                        "enableModalView": False, "eventTrigger": None,
+                        "aaExternalToken": None, "forceJsFlush": False,
+                        "aamationToken": None,
+                    }, separators=(",", ":"))
+                    
+                    req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
+                    clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
+                    aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
+                    captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
+                    jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
+                    
+                    if not jwt_client_id:
+                        print("WAF falló")
+                        continue
+                    
+                    print(f"WAF PASS")
+                    
+                    data4 = {
+                        "anti-csrftoken-a2z": anti_csrf,
+                        "cvf_aamation_response_token": jwt_client_id,
+                        "cvf_captcha_captcha_action": "verifyAamationChallenge",
+                        "cvf_aamation_error_code": "",
+                        "clientContext": sess.cookies.get("ubid-main"),
+                        "openid.pape.max_auth_age": "900",
+                        "openid.return_to": "https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                        "forceMobileLayout": "1",
+                        "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
+                        "openid.assoc_handle": assoc_handle,
+                        "openid.mode": "checkid_setup",
+                        "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
+                        "pageId": assoc_handle,
+                        "openid.ns": "http://specs.openid.net/auth/2.0",
+                        "shouldShowPersistentLabels": "true",
+                        "verifyToken": verifyToken
+                    }
+                    
+                    req4 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data4,
+                                    headers={"Content-Type": "application/x-www-form-urlencoded",
+                                            "Referer": req2.url, "Origin": "https://www.amazon.com"})
+                    
+                    # Si req4 devuelve un nuevo verifyToken, actualizarlo
+                    nuevo_verify = re.search(r'name=["\']verifyToken["\']\s+value=["\']([^"\']+)', req4.text)
+                    if nuevo_verify:
+                        verifyToken = nuevo_verify.group(1)
+                    # Si no, mantener el que ya tenemos
 
-                anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
-                # Extraer verifyToken de forma robusta
-                verifyToken_match = re.search(r'name=["\']verifyToken["\']\s+value=["\']([^"\']+)', req2.text)
-                if not verifyToken_match:
-                    verifyToken_match = re.search(r'data-verify-token=["\']([^"\']+)', req2.text)
-                if verifyToken_match:
-                    verifyToken = verifyToken_match.group(1)
-                else:
-
-                    # Después de req2
-                    if "Lo sentimos" in req2.text or "no podemos crear tu cuenta" in req2.text:
-                        raise Exception("AMAZON_ERROR_PAGE - Saltando a Playwright")
-                    if "/ap/signin" in req2.url:
-                        raise Exception("REDIRECTED_TO_LOGIN - Proxy bloqueado")
-
-
-                    raise Exception("No se encontró verifyToken en la respuesta")
-
-                if "already an account" in req2.text:
-                    logger.debug("Email ya registrado, probando otro...")
-                    continue   # va al siguiente intento de email
-                if "detected unusual activity" in req2.text:
-                    logger.debug("Actividad inusual - Rotando proxy")
-                    time.sleep(random.uniform(5, 10))
-                    # Si detecta actividad inusual, salimos del bucle de email y del intento global
-                    raise Exception("AMAZON_UNUSUAL_ACTIVITY")
+                # El resto del código (PASO 5, etc.) sigue igual, usando verifyToken
 
                 # ---------- 5. WAF (si aparece) ----------
                 if "data-context" in req2.text and "data-external-id" in req2.text:
@@ -2580,7 +2617,7 @@ async def block_heavy_resources(route):
     else:
         await route.continue_()
 
-async def smart_goto(page, url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000):
+async def smart_goto(page, url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*90000):
     start = time.time()
     logger.debug(f"🌐 Navegando a {url} (wait_until={wait_until})")
     await page.route('**/*', block_resources)
@@ -2854,40 +2891,89 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                 try:
 
 
-                    
-                    # ----- PASO 7: Navegar a la URL base con reintentos -----
+                    # ----- PASO 7: Navegar a la URL base (con reintentos y manejo de redirecciones) -----
                     base_url = base_urls[country_code]
                     max_nav_retries = 3
                     nav_success = False
                     last_error = None
+
                     for nav_attempt in range(1, max_nav_retries + 1):
                         try:
-                            await page.route('**/*', block_heavy_resources)
-                            await page.goto(base_url, wait_until='domcontentloaded', timeout=60000)
-                            # Opción 1: por ID (más estable)
-                            await page.wait_for_selector('#nav-link-accountList', timeout=15000)
-
-                            # Opción 2: por texto (en español)
-                            await page.wait_for_selector('a:has-text("Hola, identifícate")', timeout=15000)
-
-                            # Opción 3: por href (contiene /ap/signin)
-                            await page.wait_for_selector('a[href*="/ap/signin"]', timeout=15000)
-                            nav_success = True
-                            break
+                            # --- Desactivar bloqueo de recursos durante la carga inicial ---
+                            # (no bloquear nada para que la página cargue completamente)
+                            await page.unroute('**/*')  # eliminar rutas anteriores
+                            
+                            logger.debug(f"   Intentando cargar {base_url} (intento {nav_attempt})")
+                            
+                            # Navegar con timeout ampliado y esperar a que la red se calme
+                            await page.goto(base_url, wait_until='networkidle', timeout=90000)
+                            
+                            # Esperar un poco para que el DOM se estabilice
+                            await page.wait_for_timeout(3000)
+                            
+                            # --- Verificar si hay captcha o redirección ---
+                            await handle_captcha_if_present(page, "initial_load")
+                            
+                            # --- Obtener la URL actual (puede ser redirigida) ---
+                            current_url = page.url
+                            logger.debug(f"   URL actual después de navegación: {current_url}")
+                            
+                            # Si la URL no contiene 'amazon', puede ser redirección externa (raro)
+                            if 'amazon' not in current_url:
+                                logger.warning(f"   Redirección inesperada a {current_url}, reintentando...")
+                                continue
+                            
+                            # --- Buscar selector de login con múltiples estrategias ---
+                            login_selectors = [
+                                '#nav-link-accountList',
+                                'a[data-nav-role="signin"]',
+                                '#nav-link-yourAccount',
+                                'a[href*="/ap/signin"]',
+                                'span:has-text("Hola, identifícate")'
+                            ]
+                            
+                            selector_found = False
+                            for sel in login_selectors:
+                                try:
+                                    await page.wait_for_selector(sel, state='visible', timeout=10000)
+                                    logger.debug(f"   ✅ Selector encontrado: {sel}")
+                                    selector_found = True
+                                    break
+                                except:
+                                    continue
+                            
+                            if selector_found:
+                                nav_success = True
+                                break
+                            else:
+                                # --- Si no se encuentra, tomar captura y analizar contenido ---
+                                await take_screenshot(page, "no_login_selector")
+                                content = await page.content()
+                                if "Lo sentimos" in content or "no podemos crear tu cuenta" in content:
+                                    logger.warning("   Página de error de Amazon detectada (Lo sentimos)")
+                                    raise Exception("AMAZON_ERROR_PAGE")
+                                elif "detected unusual activity" in content or "actividad inusual" in content:
+                                    logger.warning("   Página de actividad inusual detectada")
+                                    raise Exception("AMAZON_UNUSUAL_ACTIVITY")
+                                else:
+                                    logger.warning("   No se encontró selector de login, reintentando...")
+                                    continue
+                                    
                         except Exception as nav_err:
                             last_error = nav_err
                             logger.warning(f"Navegación intento {nav_attempt} falló: {nav_err}")
                             if nav_attempt == max_nav_retries:
                                 raise
-                            await asyncio.sleep(5)
-                            # Recargar la página (si ya existe) o crear una nueva
+                            # Esperar más tiempo entre reintentos
+                            await asyncio.sleep(10)
+                            # Crear una nueva página para reiniciar el estado
                             await page.close()
                             page = await context.new_page()
-                            await page.route('**/*', block_heavy_resources)
+
                     if not nav_success:
                         raise Exception(f"No se pudo cargar la página después de {max_nav_retries} intentos: {last_error}")
-                    
-                    await page.unroute('**/*', block_heavy_resources)
+
+                    # --- Aplicar bloqueo de recursos solo después de que la página cargó ---
                     await page.route('**/*', block_resources)
 
                     # ----- PASO 7.5: Manejar posible página de bienvenida "Continuar a Compras" -----
