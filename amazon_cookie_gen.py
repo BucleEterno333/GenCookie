@@ -218,6 +218,26 @@ _MAIL_APIS = [
 ]
 
 
+# Orden de países para Hero SMS (barato a caro, según tu preferencia)
+HERO_COUNTRY_ORDER = ['CA', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX', 'BR', 'CM']
+
+FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
+
+# Mapeo de código de país ISO a número que espera Hero SMS
+hero_country_map = {
+    'CA': 36,    # Canadá +1
+    'US': 187,   # USA +1
+    'BR': 73,    # Brasil +55
+    'CM': 41,    # Camerún +237
+    'MY': 7,     # Malasia +60
+    'KZ': 2,     # Kazajistán +7
+    'ID': 6,     # Indonesia +62
+    'MA': 37,    # Marruecos +212
+    'KG': 11,    # Kirguistán +996
+    'CO': 33,    # Colombia +57
+    'MX': 54,    # México +52
+}
+
 def extract_hidden_inputs(html):
     """Extrae todos los inputs ocultos de un formulario HTML."""
     soup = BeautifulSoup(html, 'html.parser')
@@ -1010,14 +1030,6 @@ wallet_urls = {
     'AU': "https://www.amazon.com.au/cpe/yourpayments/wallet?ref_=ya_mb_mpo",
     'IN': "https://www.amazon.in/cpe/yourpayments/wallet?ref_=ya_mb_mpo"
 }
-
-# -------------------------------------------------------------------
-# ÓRDENES DE PAÍSES PARA SMS (usados en get_phone_number y en verificación SMS)
-# -------------------------------------------------------------------
-# HERO_COUNTRY_ORDER = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
-
-HERO_COUNTRY_ORDER = ['CA', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX', 'BR', 'CM'] # Se deja solo US, CA y MX para Hero para pruebas (números no llegan con otros países)
-FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
 
 # -------------------------------------------------------------------
 # LOGGING
