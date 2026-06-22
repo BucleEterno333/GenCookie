@@ -507,29 +507,20 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
 
 
 
-
-
-
-
-
-
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
-            activation_id=None, sms_phone=None, proxy=None, t=None,
-            max_attempts=10, country_code='CA'):
+            activation_id=None, sms_phone=None, proxy=None, t=None, country_code='BR'):
     """
-    Versión rápida (curl_cffi) sin bucles internos de email/SMS.
-    - max_attempts no se usa; el bucle es infinito hasta éxito o excepción.
-    - Utiliza PROXY_LIST global si está definido, de lo contrario usa el proxy pasado.
-    - Espera que existan get_number, get_code, set_status, etc.
+    Versión rápida (curl_cffi) que usa la lógica de números con países ordenados por precio.
+    - country_code: código de país para la compra (ej. 'MX', 'US', 'BR')
+    - Se fuerza el uso de Hero SMS (por compatibilidad con set_status/get_code)
+    - Bucle infinito hasta éxito (reintenta con nuevo email/número si falla)
     """
     if t is None:
         t = time.time()
     
     intento = 0
     
-
-    for intento in range(1, max_attempts + 1):
-
+    while True:
         intento += 1
         
         try:
@@ -537,7 +528,6 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             logger.debug(f"INTENTO #{intento}")
             logger.debug(f"{'='*60}")
             
-            # Si existe PROXY_LIST y no hay proxy o es el primer intento, elegir uno
             if PROXY_LIST:
                 if intento > 1 or not proxy:
                     proxy = random.choice(PROXY_LIST).strip()
@@ -548,8 +538,8 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
             password = "dfbc1992"
             
-            sess = requests.Session()
-            sess.impersonate = "chrome"
+            # --- SESIÓN CURL_CFFI ---
+            sess = requests.Session(impersonate="chrome")
             sess.headers.update({
                 "User-Agent": info["user_agent"],
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -566,7 +556,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             if proxy:
                 sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
             
-            # Crear email en paralelo
+            # ---------- EMAIL EN PARALELO ----------
             mail_result = {}
             mail_thread = threading.Thread(target=new_mail, args=(sess, mail_result))
             mail_thread.start()
@@ -586,7 +576,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             logger.debug(f"Email listo: {email} ({mail_api})")
             
-            # Primer POST
+            # ---------- PRIMER POST ----------
             data1 = {"arb": arb, "email": email, "claimCollectionLayoutType": "unifiedAuthClaimCollection"}
             req1 = sess.post(
                 "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
@@ -608,7 +598,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             openid_return_to = find(req1.text, 'name="openid.return_to" value="', '"')
             prevRID = find(req1.text, 'name="prevRID" value="', '"')
             
-            # Registro
+            # ---------- REGISTRO ----------
             data2 = {
                 "appActionToken": appActionToken, "appAction": "REGISTER",
                 "shouldShowPersistentLabels": "true", "openid.return_to": openid_return_to,
@@ -629,7 +619,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 logger.debug("Actividad inusual - Rotando proxy")
                 continue
             
-            # WAF (si aparece)
+            # ---------- WAF ----------
             if "data-context" in req2.text and "data-external-id" in req2.text:
                 logger.debug("* Resolviendo WAF...")
                 verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
@@ -660,7 +650,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                     logger.debug("WAF falló")
                     continue
                 
-                logger.debug(f"WAF PASS")
+                logger.debug("WAF PASS")
                 
                 data4 = {
                     "anti-csrftoken-a2z": anti_csrf,
@@ -686,15 +676,8 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                                         "Referer": req2.url, "Origin": "https://www.amazon.com"})
                 
                 verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
-            else:
-                # Sin WAF, extraer verifyToken de req2
-                verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
-                anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
             
-            if not verifyToken:
-                raise Exception("No se encontró verifyToken en la respuesta")
-            
-            # OTP Email
+            # ---------- OTP EMAIL ----------
             base_openid = {
                 "forceMobileLayout": "1", "openid.assoc_handle": assoc_handle,
                 "openid.mode": "checkid_setup", "language": "en_US",
@@ -713,32 +696,33 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
             
-            # SMS
-            phone_info = get_phone_number_sync(country_code)
+            # ---------- SMS (usando lógica de países) ----------
+            # Forzamos servicio 'hero' porque las funciones set_status/get_code son de Hero
+            phone_info = get_phone_number_sync(country_code, force_service='hero')
             if not phone_info:
-                raise Exception("No se pudo obtener número de teléfono")
-            sms_phone = phone_info['local']
-            activation_id = phone_info['service_id']
-            service_name = phone_info['service_name']  # si lo necesitas, puedes ignorarlo
+                raise Exception("No se pudo obtener número de teléfono de Hero")
+            
+            sms_phone = phone_info['local']          # número local (sin prefijo)
+            activation_id = phone_info['service_id']  # ID de activación en Hero
             purchase_country = phone_info['purchase_country']
             logger.debug(f"SMS: {sms_phone} (país: {purchase_country})")
-
-            # Mapeo de país de compra a código de Amazon (para cvf_phone_cc)
+            
+            # Mapeo de país de compra a código de país de Amazon (cvf_phone_cc)
             amazon_cc = {
                 'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
                 'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO'
             }.get(purchase_country, 'US')
             logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
-
+            
             data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
                     "verifyToken": verifyToken, "cvf_phone_cc": amazon_cc,
                     "cvf_phone_num": sms_phone, "cvf_action": "collect"}
             
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
             logger.debug("* Esperando SMS...")
-            sms_code = get_code(hero_key, activation_id)
+            sms_code = get_code(hero_key, activation_id)  # Hero get_code
             logger.debug(f"SMS Code: {sms_code}")
-            set_status(hero_key, activation_id, 6)
+            set_status(hero_key, activation_id, 6)        # Hero set_status
             
             anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
@@ -757,7 +741,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 logger.debug("Cuenta no creada")
                 continue
             
-            # Dirección
+            # ---------- DIRECCIÓN ----------
             logger.debug("* Agregando dirección...")
             
             csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
@@ -836,6 +820,10 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             mail_token = None
             mail_api = None
             continue
+
+
+
+
 
 
 
