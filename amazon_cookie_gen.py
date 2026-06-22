@@ -101,69 +101,32 @@ PROXY_LIST = []
 
 # 5 APIs de mail temporal con sus formatos específicos
 _MAIL_APIS = [
-
     {
-        "name": "tempail",
-        "base": "https://tempail.com/api",
+        "name": "tmailor",
+        "base": "https://tmailor.com/api",
         "create": lambda: (
-            "GET",
-            "https://tempail.com/api/v1/new",
-            None,
-            None
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "newemail", "curentToken": "", "fbToken": None}
         ),
         "inbox": lambda token: (
-            "GET",
-            f"https://tempail.com/api/v1/inbox/{token}",
-            None,
-            None
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "listinbox", "accesstoken": token, "fbToken": None, "curentToken": token}
         ),
         "read": lambda token, msg_id: (
-            "GET",
-            f"https://tempail.com/api/v1/message/{token}/{msg_id['id']}",
-            None,
-            None
+            "POST",
+            "https://tmailor.com/api",
+            {"action": "read", "accesstoken": token, "email_code": msg_id["id"], "email_token": msg_id["email_id"], "fbToken": None, "curentToken": token}
         ),
         "get_email": lambda data: data.get("email"),
-        "get_token": lambda data: data.get("token") or data.get("id"),
-        "has_messages": lambda data: bool(data.get("messages")),
-        "get_messages": lambda data: data.get("messages", []),
-        "get_msg_id": lambda msg: {"id": msg.get("id")},
-        "get_body": lambda data: data.get("body") or data.get("html", ""),
+        "get_token": lambda data: data.get("accesstoken"),
+        "has_messages": lambda data: bool(data.get("data")),
+        "get_messages": lambda data: list(data.get("data", {}).values()),
+        "get_msg_id": lambda msg: {"id": msg["id"], "email_id": msg["email_id"]},
+        "get_body": lambda data: data.get("data", {}).get("body", ""),
         "check_errors": lambda data: None,
     },
-
-
-
-    {
-        "name": "tempmail_lol",
-        "base": "https://api.tempmail.lol",
-        "create": lambda: (
-            "GET",
-            "https://api.tempmail.lol/generate",
-            None,
-            None
-        ),
-        "inbox": lambda token: (
-            "GET",
-            f"https://api.tempmail.lol/auth/{token}",
-            None,
-            None
-        ),
-        "read": lambda token, msg_id: (
-            "GET",
-            f"https://api.tempmail.lol/auth/{token}/email/{msg_id['id']}",
-            None,
-            None
-        ),
-        "get_email": lambda data: data.get("address"),
-        "get_token": lambda data: data.get("token"),
-        "has_messages": lambda data: bool(data.get("email") or data.get("messages")),
-        "get_messages": lambda data: data.get("email") or data.get("messages") or [],
-        "get_msg_id": lambda msg: {"id": msg.get("id", msg.get("uid", 0))},
-        "get_body": lambda data: data.get("body") or data.get("html", ""),
-        "check_errors": lambda data: None,
-    },
-
     {
         "name": "mailtm",
         "base": "https://api.mail.tm",
@@ -192,9 +155,8 @@ _MAIL_APIS = [
         "get_msg_id": lambda msg: {"id": msg["id"]},
         "get_body": lambda data: data.get("text") or data.get("body", ""),
         "check_errors": lambda data: None,
-        "pre_create": lambda sess: None,  # mail.tm necesita cuenta primero
+        "pre_create": lambda sess: None,
     },
-
     {
         "name": "10minutemail",
         "base": "https://10minutemail.com",
@@ -254,6 +216,7 @@ _MAIL_APIS = [
         "check_errors": lambda data: None,
     },
 ]
+
 
 def extract_hidden_inputs(html):
     """Extrae todos los inputs ocultos de un formulario HTML."""
@@ -411,7 +374,8 @@ def new_mail(sess, result_container):
                 headers = extra[0] if extra else {}
                 
                 res = _api_request(sess, method, url, data, headers)
-                
+                logger.debug(f"API {api['name']} - create status: {res.status_code}, body: {res.text[:200]}")
+
                 if res.status_code not in [200, 201]:
                     continue
                 
@@ -453,6 +417,8 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
             headers = extra[0] if extra else {}
             
             res = _api_request(sess, method, url, data, headers)
+            logger.debug(f"API {api_name} - inbox status: {res.status_code}, body: {res.text[:200]}")  # <--- LÍNEA NUEVA
+
             resp_data = res.json()
             
             if not api["has_messages"](resp_data):
@@ -471,6 +437,7 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
             headers = extra[0] if extra else {}
             
             res2 = _api_request(sess, method, url, data, headers)
+            logger.debug(f"API {api_name} - read status: {res2.status_code}, body: {res2.text[:200]}")  # <--- NUEVO
             body = str(api["get_body"](res2.json()))
             
             # Buscar OTP
