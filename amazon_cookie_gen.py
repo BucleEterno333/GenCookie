@@ -3846,7 +3846,6 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                         None, None, None, None, None,  # email, mail_token, mail_api, activation_id, sms_phone
                         PROXY_STRING,               # proxy
                         None,                       # t
-                        10,                          # max_attempts (puedes usar el valor que quieras)
                         country                     # country_code
                     )
                     if fast_result:
