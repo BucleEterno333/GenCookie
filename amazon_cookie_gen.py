@@ -519,46 +519,88 @@ from playwright.async_api import async_playwright
 import asyncio
 from playwright.sync_api import sync_playwright  # o async, pero usaremos sync para simplicidad
 
+import traceback
+from playwright.sync_api import sync_playwright
+
 def is_phone_registered_sync(phone_number: str) -> bool:
     """
     Verifica si un número ya está registrado en Amazon (versión síncrona).
     Retorna True si está registrado, False si es nuevo.
     """
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            viewport={'width': 1280, 'height': 720},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
-        )
-        page = context.new_page()
-        
-        # Ir a login
-        page.goto("https://www.amazon.com/ap/signin")
-        
-        # Llenar el campo de email con el número (con prefijo internacional)
-        page.fill('#ap_email', phone_number)
-        page.click('#continue')
-        
-        # Esperar a que la página se estabilice (puede haber redirección)
-        page.wait_for_timeout(3000)
-        
-        # Detectar estado
-        if page.query_selector('#ap_password'):
-            # Apareció campo de contraseña -> usuario existe
-            browser.close()
-            return True
-        if page.query_selector('#ap_customer_name'):
-            # Apareció formulario de registro -> usuario nuevo
-            browser.close()
-            return False
-        content = page.content()
-        if "No hemos podido encontrar una cuenta" in content or "We cannot find an account" in content:
-            # No existe cuenta
-            browser.close()
-            return False
-        # Si hay captcha o algo inesperado, asumir que NO está registrado (para no perder oportunidad)
-        browser.close()
+    logger.debug(f"📞 Verificando número {phone_number}...")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.error("❌ Playwright no instalado. No se puede verificar.")
         return False
+
+    # Configurar proxy si existe
+    proxy_config = None
+    if PROXY_HOST_PORT:
+        proxy_config = {'server': f'http://{PROXY_HOST_PORT}'}
+        if PROXY_AUTH:
+            user, pwd = PROXY_AUTH.split(':', 1)
+            proxy_config['username'] = user
+            proxy_config['password'] = pwd
+        logger.debug(f"   🌐 Usando proxy: {PROXY_HOST_PORT}")
+
+    try:
+        with sync_playwright() as p:
+            logger.debug("   🎬 Iniciando Playwright...")
+            launch_options = {
+                'headless': True,
+                'args': [
+                    '--disable-web-security',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu'
+                ]
+            }
+            if proxy_config:
+                launch_options['proxy'] = proxy_config
+
+            browser = p.chromium.launch(**launch_options)
+            context = browser.new_context(
+                viewport={'width': 1280, 'height': 720},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
+            )
+            page = context.new_page()
+            logger.debug("   🌐 Navegando a Amazon login...")
+
+            # Ir a login
+            page.goto("https://www.amazon.com/ap/signin", timeout=30000)
+            page.fill('#ap_email', phone_number)
+            page.click('#continue')
+            page.wait_for_timeout(3000)
+
+            # Detectar estado
+            if page.query_selector('#ap_password'):
+                browser.close()
+                logger.debug(f"   ✅ Número {phone_number} YA REGISTRADO")
+                return True
+            if page.query_selector('#ap_customer_name'):
+                browser.close()
+                logger.debug(f"   ✅ Número {phone_number} NUEVO (disponible)")
+                return False
+
+            content = page.content()
+            if "No hemos podido encontrar una cuenta" in content or "We cannot find an account" in content:
+                browser.close()
+                logger.debug(f"   ✅ Número {phone_number} NUEVO (no existe)")
+                return False
+
+            # Si hay captcha o algo inesperado, asumir que NO está registrado (para no perder oportunidad)
+            logger.warning(f"   ⚠️ Estado desconocido para {phone_number}, asumiendo nuevo")
+            browser.close()
+            return False
+
+    except Exception as e:
+        logger.error(f"❌ Error en is_phone_registered_sync para {phone_number}: {e}")
+        logger.error(traceback.format_exc())
+        return False  # Asumir nuevo para no bloquear
+    
 
 
 async def is_phone_registered(phone_number, country_code='US'):
@@ -614,7 +656,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
     if t is None:
         t = time.time()
     
-    max_intentos = 100
+    max_intentos = 50
     
     for intento in range(1, max_intentos + 1):
         try:
@@ -651,24 +693,37 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             # Ahora verificar cuáles están registrados (en paralelo también)
             available_number = None
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                future_to_number = {
-                    executor.submit(is_phone_registered_sync, f"+{phone}"): (act_id, phone, country)
-                    for act_id, phone, country in numbers
-                }
-                for future in concurrent.futures.as_completed(future_to_number):
-                    act_id, phone, country = future_to_number[future]
+            logger.debug("🔄 Iniciando verificación de números...")
+
+            # Primero intentar secuencialmente (más fiable)
+            for act_id, phone, country in numbers:
+                logger.debug(f"   Verificando {phone} (país {country})...")
+                try:
+                    if not is_phone_registered_sync(f"+{phone}"):
+                        available_number = (act_id, phone, country)
+                        logger.debug(f"   ✅ Número {phone} disponible!")
+                        break
+                    else:
+                        logger.debug(f"   ❌ Número {phone} ya registrado, cancelando...")
+                        set_status(hero_key, act_id, 8)
+                except Exception as e:
+                    logger.error(f"   ❌ Error verificando {phone}: {e}")
+                    # No cancelar este número, podría ser válido, pero lo marcamos como no disponible
+                    continue
+
+            # Si no se encontró disponible, usar el primer número como fallback (o reintentar)
+            if not available_number:
+                logger.warning("⚠️ No se encontró número disponible, usando el primero como fallback (o reintentar)")
+                # Cancelar todos
+                for act_id, phone, country in numbers:
                     try:
-                        registered = future.result()
-                        if not registered:
-                            # Este número está disponible
-                            available_number = (act_id, phone, country)
-                            # Cancelar el resto de futuros? No es fácil, pero podemos romper el bucle
-                            # y luego cancelar manualmente los demás.
-                            break
-                    except Exception as e:
-                        print(f"Error verificando {phone}: {e}")
-            
+                        set_status(hero_key, act_id, 8)
+                    except:
+                        pass
+                # Reintentar el bucle externo
+                logger.debug("Todos los números estaban registrados, reintentando...")
+                continue
+                        
             # Si encontramos uno disponible, usarlo
             if available_number:
                 activation_id, sms_phone, purchase_country = available_number
