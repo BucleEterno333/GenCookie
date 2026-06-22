@@ -67,7 +67,6 @@ API_KEY = os.getenv('API_KEY', '')
 FIVESIM_API_KEY = os.getenv('FIVESIM_API_KEY', '')
 SERVICE_API_KEY = os.getenv('SERVICE_API_KEY', '')
 API_BASE_URL = os.getenv('API_BASE_URL', '')
-PROXY_LIST = ('')   
 # ----- Timeouts configurables (en segundos) -----
 WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10'))          # Espera general para elementos
 NAVIGATION_TIMEOUT = int(os.getenv('NAVIGATION_TIMEOUT', '60'))  # Espera de navegación
@@ -441,6 +440,17 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
     raise Exception(f"Mail OTP timeout en {api['name']}")
 
 
+
+
+
+
+
+
+
+
+
+
+
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             activation_id=None, sms_phone=None, proxy=None, t=None):
     """
@@ -458,15 +468,15 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
         intento += 1
         
         try:
-            print(f"\n{'='*60}")
-            print(f"INTENTO #{intento}")
-            print(f"{'='*60}")
+            logger.debug(f"\n{'='*60}")
+            logger.debug(f"INTENTO #{intento}")
+            logger.debug(f"{'='*60}")
             
             # Si existe PROXY_LIST y no hay proxy o es el primer intento, elegir uno
             if PROXY_LIST:
                 if intento > 1 or not proxy:
                     proxy = random.choice(PROXY_LIST).strip()
-                print(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
+                logger.debug(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
             
             info = gen_profile()
             assoc_handle = "anywhere_v2_us"
@@ -508,7 +518,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             if not email:
                 raise Exception("No se pudo obtener email")
             
-            print(f"Email listo: {email} ({mail_api})")
+            logger.debug(f"Email listo: {email} ({mail_api})")
             
             # Primer POST
             data1 = {"arb": arb, "email": email, "claimCollectionLayoutType": "unifiedAuthClaimCollection"}
@@ -524,7 +534,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             )
             
             if req1.status_code != 200 or "appActionToken" not in req1.text:
-                print(f"Bloqueo en req1 (Status: {req1.status_code})")
+                logger.debug(f"Bloqueo en req1 (Status: {req1.status_code})")
                 raise Exception("Proxy bloqueada")
             
             appActionToken = find(req1.text, 'name="appActionToken" value="', '"')
@@ -546,16 +556,16 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             if "already an account" in req2.text:
                 email = None
-                print("Email ya registrado")
+                logger.debug("Email ya registrado")
                 continue
                 
             if "detected unusual activity" in req2.text:
-                print("Actividad inusual - Rotando proxy")
+                logger.debug("Actividad inusual - Rotando proxy")
                 continue
             
             # WAF (si aparece)
             if "data-context" in req2.text and "data-external-id" in req2.text:
-                print("* Resolviendo WAF...")
+                logger.debug("* Resolviendo WAF...")
                 verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
                 dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
                 anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
@@ -581,10 +591,10 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
                 
                 if not jwt_client_id:
-                    print("WAF falló")
+                    logger.debug("WAF falló")
                     continue
                 
-                print(f"WAF PASS")
+                logger.debug(f"WAF PASS")
                 
                 data4 = {
                     "anti-csrftoken-a2z": anti_csrf,
@@ -615,6 +625,9 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
                 anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
             
+            if not verifyToken:
+                raise Exception("No se encontró verifyToken en la respuesta")
+            
             # OTP Email
             base_openid = {
                 "forceMobileLayout": "1", "openid.assoc_handle": assoc_handle,
@@ -624,7 +637,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             }
             
             otp_code = mail_code(sess, mail_token, mail_api)
-            print(f"OTP: {otp_code}")
+            logger.debug(f"OTP: {otp_code}")
             
             data5 = {**base_openid, "autoReadStatus": "manual",
                     "verificationPageContactType": "email", "action": "code",
@@ -636,16 +649,16 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             # SMS
             activation_id, sms_phone = get_number(hero_key)
-            print(f"SMS: {sms_phone}")
+            logger.debug(f"SMS: {sms_phone}")
             
             data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
                     "verifyToken": verifyToken, "cvf_phone_cc": "CA",
                     "cvf_phone_num": sms_phone, "cvf_action": "collect"}
             
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
-            print("* Esperando SMS...")
+            logger.debug("* Esperando SMS...")
             sms_code = get_code(hero_key, activation_id)
-            print(f"SMS Code: {sms_code}")
+            logger.debug(f"SMS Code: {sms_code}")
             set_status(hero_key, activation_id, 6)
             
             anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
@@ -658,15 +671,15 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             req7 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data7)
             
             if "entered already exists with another account" in req7.text:
-                print("Número ya registrado")
+                logger.debug("Número ya registrado")
                 continue
                 
             if "new_account=1" not in req7.url:
-                print("Cuenta no creada")
+                logger.debug("Cuenta no creada")
                 continue
             
             # Dirección
-            print("* Agregando dirección...")
+            logger.debug("* Agregando dirección...")
             
             csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
             customer_id = find(req7.text, 'name="address-ui-widgets-obfuscated-customerId" value="', '"')
@@ -716,17 +729,17 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             cookies = "; ".join(f"{k}={v.replace(chr(34), chr(39))}" for k, v in sess.cookies.items())
             elapsed = round(time.time() - t, 2)
             
-            print(f"\n{'='*60}")
-            print(f"CUENTA CREADA!")
-            print(f"{'='*60}")
-            print(f"Email:    {email}")
-            print(f"Password: {password}")
-            print(f"Phone:    {sms_phone}")
-            print(f"Tiempo:   {elapsed}s | Intentos: {intento}")
-            print(f"{'='*60}")
-            print(f"COOKIES:")
-            print(f"{cookies}")
-            print(f"{'='*60}\n")
+            logger.debug(f"\n{'='*60}")
+            logger.debug(f"CUENTA CREADA!")
+            logger.debug(f"{'='*60}")
+            logger.debug(f"Email:    {email}")
+            logger.debug(f"Password: {password}")
+            logger.debug(f"Phone:    {sms_phone}")
+            logger.debug(f"Tiempo:   {elapsed}s | Intentos: {intento}")
+            logger.debug(f"{'='*60}")
+            logger.debug(f"COOKIES:")
+            logger.debug(f"{cookies}")
+            logger.debug(f"{'='*60}\n")
             
             return {
                 "name": info["full_name"], "phone": sms_phone,
@@ -737,13 +750,15 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             }
             
         except Exception as error:
-            print(f"Error: {error}")
-            print(f"Reintentando...")
+            logger.debug(f"Error: {error}")
+            logger.debug(f"Reintentando...")
             time.sleep(0.1)
             email = None
             mail_token = None
             mail_api = None
             continue
+
+
 
 # -------------------------------------------------------------------
 # MAPA DE PAÍSES A DOMINIOS Y URLS BASE
