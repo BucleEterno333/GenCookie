@@ -845,7 +845,7 @@ wallet_urls = {
 # -------------------------------------------------------------------
 # HERO_COUNTRY_ORDER = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
 
-HERO_COUNTRY_ORDER = ['CM', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX', 'BR'] # Se deja solo US, CA y MX para Hero para pruebas (números no llegan con otros países)
+HERO_COUNTRY_ORDER = ['KZ', 'ID', 'MA', 'KG', 'CO', 'MX', 'BR', 'CM'] # Se deja solo US, CA y MX para Hero para pruebas (números no llegan con otros países)
 FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
 
 # -------------------------------------------------------------------
