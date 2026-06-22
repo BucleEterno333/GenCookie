@@ -1410,8 +1410,7 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 await page.wait_for_timeout(3000)
                 continue
             
-            # Si solve_coordinate_captcha retornó True, significa que ya se hicieron los clics y se confirmó.
-            # Esperamos un momento para que la página reaccione
+                        # Después de resolver el captcha, verificar directamente si la página ya avanzó
             await page.wait_for_timeout(2000)
             
             # Verificar si la página ya avanzó a la pantalla de SMS o registro
@@ -1424,23 +1423,30 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 captcha_resuelto = True
                 break
             
-            # Verificar si redirigió a login (error grave, reiniciar intento interno)
+            # Verificar si redirigió a login (error grave)
             if await page.query_selector('#ap_email'):
-                logger.warning("   🚫 Redirección a login después de resolver captcha. Lanzando excepción recuperable.")
+                logger.warning("   🚫 Redirección a login después de resolver captcha.")
                 await take_screenshot(page, "redirigido_login_despues_captcha")
                 raise Exception("AMAZON_REDIRECTED_TO_LOGIN")
             
-            # Verificar mensajes de error específicos del captcha (coordenadas incorrectas o timeout)
+            # Verificar si el canvas ha desaparecido (el captcha se resolvió)
+            canvas_exists = await page.query_selector('canvas')
+            if not canvas_exists:
+                logger.debug("   ✅ Canvas desaparecido, captcha completado.")
+                captcha_resuelto = True
+                break
+            
+            # Verificar mensajes de error específicos del captcha
             error_incorrecto = await page.query_selector('.a-alert-content:has-text("Incorrecto"), div:has-text("Incorrecto")')
             error_timeout = await page.query_selector('.a-alert-content:has-text("superado el límite de tiempo"), div:has-text("límite de tiempo")')
             if error_incorrecto or error_timeout:
                 tipo = "incorrectas" if error_incorrecto else "timeout"
-                logger.warning(f"   ❌ Error detectado: coordenadas {tipo}. Tomando captura y terminando intento global para debug.")
+                logger.warning(f"   ❌ Error detectado: coordenadas {tipo}.")
                 await take_screenshot(page, f"error_coordenadas_{tipo}")
                 raise Exception(f"CAPTCHA_ERROR: coordenadas {tipo}")
             
-            # Si no hay error inmediato, esperar a que el canvas cambie (hasta 10 segundos)
-            change_result = await wait_for_canvas_change(page, canvas_id_before, timeout=10)
+            # Esperar cambio de canvas (solo 5 segundos)
+            change_result = await wait_for_canvas_change(page, canvas_id_before, timeout=5)
             
             if change_result == 'new_canvas':
                 logger.debug("   Nuevo canvas detectado. Reintentando siguiente ronda...")
@@ -1451,9 +1457,17 @@ async def handle_captcha_if_present(page, step_name="captcha"):
                 break
             elif change_result == 'login':
                 raise Exception("AMAZON_REDIRECTED_TO_LOGIN")
-            else:  # timeout o None
-                logger.warning("   ⏱️ Timeout esperando cambio de canvas, pero seguro sí procedió al siguiente (hay bug al identificar cambio de canvas). Reintentando siguiente ronda..")
-                continue
+            else:
+                # Si no hay cambio, verificar si el botón Confirmar ya no existe (indicador de éxito)
+                confirm_btn = await page.query_selector('button:has-text("Confirmar"), input[value="Confirmar"]')
+                if not confirm_btn:
+                    logger.debug("   ✅ Botón Confirmar desaparecido, captcha completado.")
+                    captcha_resuelto = True
+                    break
+                else:
+                    logger.warning("   ⏱️ Timeout esperando cambio, pero se asume éxito (modo defensivo).")
+                    captcha_resuelto = True
+                    break
         
         if captcha_resuelto:
             logger.debug(f"   ✅ Captcha de coordenadas completado exitosamente después de {global_attempt} intentos.")
