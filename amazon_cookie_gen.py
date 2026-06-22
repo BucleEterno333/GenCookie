@@ -324,16 +324,41 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
     raise Exception("WAF Failed After 5 Attempts")
 
 
-def get_number(api_key: str) -> Tuple[str, str]:
-    """Obtiene número SMS"""
-    r = requests.get(f"{_SMS_API}?api_key={api_key}&action=getNumber&service=am&country=36").text
-    if not r.startswith("ACCESS_NUMBER"):
-        raise Exception(f"SMS getNumber failed -> {r}")
-    _, activation_id, phone = r.split(":")
-    phone = phone.strip()
-    phone = phone.lstrip("1") if phone.startswith("1") and len(phone) == 11 else phone
-    return activation_id, phone
+def get_number(api_key: str, country_code: str = None) -> Tuple[str, str, str]:
+    """
+    Obtiene número SMS probando países en el orden de HERO_COUNTRY_ORDER.
+    Si country_code se especifica, lo prueba primero.
+    Retorna (activation_id, phone, country_used) o lanza excepción.
+    """
+    # Asegúrate de tener definido HERO_COUNTRY_ORDER y hero_country_map al inicio del archivo
+    if country_code:
+        countries_to_try = [country_code] + [c for c in HERO_COUNTRY_ORDER if c != country_code]
+    else:
+        countries_to_try = HERO_COUNTRY_ORDER
 
+    for iso_code in countries_to_try:
+        hero_country_num = hero_country_map.get(iso_code)
+        if not hero_country_num:
+            logger.debug(f"  ⚠️ País {iso_code} no mapeado en Hero SMS, saltando...")
+            continue
+
+        url = f"{_SMS_API}?api_key={api_key}&action=getNumber&service=am&country={hero_country_num}"
+        logger.debug(f"  📞 Intentando país {iso_code} (código {hero_country_num})...")
+        try:
+            r = requests.get(url, timeout=30).text
+            if r.startswith("ACCESS_NUMBER"):
+                _, activation_id, phone = r.split(":")
+                phone = phone.strip()
+                # Quitar prefijo +1 si es número de EE.UU./Canadá (11 dígitos)
+                phone = phone.lstrip("1") if phone.startswith("1") and len(phone) == 11 else phone
+                logger.debug(f"  ✅ Número obtenido: {phone} (país {iso_code})")
+                return activation_id, phone, iso_code
+            else:
+                logger.debug(f"  ❌ Falló para {iso_code}: {r[:80]}")
+        except Exception as e:
+            logger.debug(f"  ❌ Error en {iso_code}: {e}")
+        time.sleep(1)
+    raise Exception("No se pudo obtener número en ningún país de la lista")
 
 def get_code(api_key: str, activation_id: str, timeout: int = 120) -> str:
     """Espera código SMS"""
@@ -468,7 +493,99 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
     
     raise Exception(f"Mail OTP timeout en {api['name']}")
 
+from playwright.async_api import async_playwright
 
+
+import asyncio
+from playwright.sync_api import sync_playwright  # o async, pero usaremos sync para simplicidad
+
+def is_phone_registered_sync(phone_number: str) -> bool:
+    """
+    Verifica si un número ya está registrado en Amazon (versión síncrona).
+    Retorna True si está registrado, False si es nuevo.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={'width': 1280, 'height': 720},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
+        )
+        page = context.new_page()
+        
+        # Ir a login
+        page.goto("https://www.amazon.com/ap/signin")
+        
+        # Llenar el campo de email con el número (con prefijo internacional)
+        page.fill('#ap_email', phone_number)
+        page.click('#continue')
+        
+        # Esperar a que la página se estabilice (puede haber redirección)
+        page.wait_for_timeout(3000)
+        
+        # Detectar estado
+        if page.query_selector('#ap_password'):
+            # Apareció campo de contraseña -> usuario existe
+            browser.close()
+            return True
+        if page.query_selector('#ap_customer_name'):
+            # Apareció formulario de registro -> usuario nuevo
+            browser.close()
+            return False
+        content = page.content()
+        if "No hemos podido encontrar una cuenta" in content or "We cannot find an account" in content:
+            # No existe cuenta
+            browser.close()
+            return False
+        # Si hay captcha o algo inesperado, asumir que NO está registrado (para no perder oportunidad)
+        browser.close()
+        return False
+
+
+async def is_phone_registered(phone_number, country_code='US'):
+    """
+    Verifica si un número de teléfono ya está registrado en Amazon.
+    Retorna True si está registrado, False si es nuevo.
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            viewport={'width': 1280, 'height': 720},
+            user_agent=random.choice(USER_AGENTS)
+        )
+        page = await context.new_page()
+        
+        # Ir a la página de login
+        await page.goto("https://www.amazon.com/ap/signin")
+        
+        # Llenar el campo de email con el número (con prefijo internacional)
+        await page.fill('#ap_email', phone_number)
+        await page.click('#continue')
+        
+        # Esperar a que la página se estabilice
+        await page.wait_for_timeout(3000)
+        
+        # Detectar si estamos en la página de registro (nuevo usuario)
+        # o en la página de contraseña (usuario existente)
+        content = await page.content()
+        
+        # Caso 1: si aparece el campo de contraseña, ya está registrado
+        if await page.query_selector('#ap_password'):
+            await browser.close()
+            return True
+        
+        # Caso 2: si aparece el formulario de registro, es nuevo
+        if await page.query_selector('#ap_customer_name'):
+            await browser.close()
+            return False
+        
+        # Caso 3: si aparece mensaje "No hemos podido encontrar una cuenta", no está registrado
+        if "No hemos podido encontrar una cuenta" in content or "We cannot find an account" in content:
+            await browser.close()
+            return False
+        
+        # Caso 4: si hay captcha o algo inesperado, asumimos que no está registrado (o reintentamos)
+        await browser.close()
+        return False  # Por defecto, nuevo
 
 
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
@@ -494,7 +611,74 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             assoc_handle = "anywhere_v2_us"
             arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
             password = "dfbc1992"
+
+
+
+            # Obtener 5 números en paralelo (usando ThreadPoolExecutor)
+            numbers = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                # Lanzar 5 tareas de get_number
+                future_to_attempt = {executor.submit(get_number, hero_key): i for i in range(5)}
+                for future in concurrent.futures.as_completed(future_to_attempt):
+                    try:
+                        act_id, phone, country = future.result()
+                        numbers.append((act_id, phone, country))
+                    except Exception as e:
+                        print(f"Error obteniendo número: {e}")
             
+            if not numbers:
+                raise Exception("No se pudo obtener ningún número")
+            
+            # Ahora verificar cuáles están registrados (en paralelo también)
+            available_number = None
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_number = {
+                    executor.submit(is_phone_registered_sync, f"+{phone}"): (act_id, phone, country)
+                    for act_id, phone, country in numbers
+                }
+                for future in concurrent.futures.as_completed(future_to_number):
+                    act_id, phone, country = future_to_number[future]
+                    try:
+                        registered = future.result()
+                        if not registered:
+                            # Este número está disponible
+                            available_number = (act_id, phone, country)
+                            # Cancelar el resto de futuros? No es fácil, pero podemos romper el bucle
+                            # y luego cancelar manualmente los demás.
+                            break
+                    except Exception as e:
+                        print(f"Error verificando {phone}: {e}")
+            
+            # Si encontramos uno disponible, usarlo
+            if available_number:
+                activation_id, sms_phone, purchase_country = available_number
+                print(f"✅ Número disponible: {sms_phone} (país {purchase_country})")
+                # Cancelar los otros números (los que no se van a usar)
+                for act_id, phone, country in numbers:
+                    if (act_id, phone, country) != available_number:
+                        try:
+                            set_status(hero_key, act_id, 8)  # cancelar y reembolsar
+                            print(f"  Cancelando número {phone} (no usado)")
+                        except:
+                            pass
+            else:
+                # Ninguno disponible, cancelar todos y reintentar
+                for act_id, phone, country in numbers:
+                    try:
+                        set_status(hero_key, act_id, 8)
+                        print(f"  Cancelando número {phone} (todos registrados)")
+                    except:
+                        pass
+                print("Todos los números estaban registrados, reintentando...")
+                continue
+            
+            
+            amazon_cc = {
+                'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
+                'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
+            }.get(purchase_country, 'US')
+            logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
+
             # --- CORRECCIÓN: Usar curl_requests con impersonate ---
             sess = curl_requests.Session()
             sess.impersonate = "chrome"
@@ -653,22 +837,6 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             req5 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data5)
             anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
-            
-            # ---------- SMS (usando lógica de países) ----------
-            phone_info = get_phone_number_sync(country_code, force_service='hero')
-            if not phone_info:
-                raise Exception("No se pudo obtener número de teléfono de Hero")
-            
-            sms_phone = phone_info['local']
-            activation_id = phone_info['service_id']
-            purchase_country = phone_info['purchase_country']
-            logger.debug(f"SMS: {sms_phone} (país: {purchase_country})")
-            
-            amazon_cc = {
-                'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
-                'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
-            }.get(purchase_country, 'US')
-            logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
             
             data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
                     "verifyToken": verifyToken, "cvf_phone_cc": amazon_cc,
