@@ -642,23 +642,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
                 # El resto del código (PASO 5, etc.) sigue igual, usando verifyToken
 
-                # ---------- 5. WAF (si aparece) ----------
-                if "data-context" in req2.text and "data-external-id" in req2.text:
-                    logger.debug("* Resolviendo WAF...")
-                    dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
-                    json3 = json.dumps({
-                        "clientData": json.dumps({
-                            "sessionId": sess.cookies.get("session-id", ""),
-                            "marketplaceId": "ATVPDKIKX0DER",
-                            "clientUseCase": "/ap/register"
-                        }, separators=(",", ":")),
-                        "challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1",
-                        "locale": "en-US", "externalId": dataExternalId,
-                        "enableHeaderFooter": False, "enableBypassMechanism": False,
-                        "enableModalView": False, "eventTrigger": None,
-                        "aaExternalToken": None, "forceJsFlush": False,
-                        "aamationToken": None,
-                    }, separators=(",", ":"))
+
                     req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
                     clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
                     aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
@@ -997,6 +981,37 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------------------
 # FUNCIONES AUXILIARES
 # -------------------------------------------------------------------
+
+
+async def close_overlays(page):
+    """Intenta cerrar modales o overlays comunes de Amazon (cookies, etc.)"""
+    # Lista de botones comunes para cerrar
+    close_buttons = [
+        'button:has-text("Aceptar")',
+        'button:has-text("Aceptar cookies")',
+        'button:has-text("Continuar")',
+        'button:has-text("Cerrar")',
+        'button[aria-label="Cerrar"]',
+        'button[aria-label="Close"]',
+        'button:has-text("Entendido")',
+        'button:has-text("OK")'
+    ]
+    for selector in close_buttons:
+        try:
+            # Esperar hasta 2 segundos para que aparezca
+            element = await page.wait_for_selector(selector, timeout=2000)
+            if element:
+                await element.click()
+                await page.wait_for_timeout(500)
+        except:
+            pass
+    # También intentar presionar Escape para cerrar modales
+    try:
+        await page.keyboard.press('Escape')
+        await page.wait_for_timeout(500)
+    except:
+        pass
+
 
 # Almacén de sesiones exitosas (proxy + timestamp)
 # Estructura: { "session_id": {"last_used": timestamp, "success_count": int} }
@@ -2617,10 +2632,9 @@ async def block_heavy_resources(route):
     else:
         await route.continue_()
 
-async def smart_goto(page, url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*5000):
+async def smart_goto(page, url, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000):
     start = time.time()
     logger.debug(f"🌐 Navegando a {url} (wait_until={wait_until})")
-    await page.route('**/*', block_resources)
     await page.goto(url, wait_until=wait_until, timeout=timeout)
     elapsed = time.time() - start
     logger.debug(f"   ✅ Navegación completada en {elapsed:.2f}s")
@@ -2886,43 +2900,75 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     # Cerrar página actual y abrir una nueva en el mismo contexto
                     await page.close()
                     page = await context.new_page()
-                    await page.route('**/*', block_resources)
 
                 try:
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
                     # ----- PASO 7: Navegar a la URL base (con reintentos y manejo de redirecciones) -----
                     base_url = base_urls[country_code]
-                    max_nav_retries = 1
+                    max_nav_retries = 3
                     nav_success = False
                     last_error = None
 
+                    # Definir selectores de login aquí (con más variedad)
+                    login_selectors = [
+                        '#nav-link-accountList',           # El más estable
+                        'a[data-nav-role="signin"]',
+                        'a.nav-a.nav-a-2[href*="/ap/signin"]',
+                        'a:has-text("Hola, identifícate")',
+                        'a:has-text("Cuenta y Listas")',
+                        'a[href*="/ap/signin"]'            # Cualquier enlace que contenga /ap/signin
+                    ]
+
                     for nav_attempt in range(1, max_nav_retries + 1):
                         try:
-                            # --- Desactivar bloqueo de recursos durante la carga inicial ---
-                            # (no bloquear nada para que la página cargue completamente)
-                            await page.unroute('**/*')  # eliminar rutas anteriores
-                            
+                            # --- No bloquear recursos durante la navegación ---
                             logger.debug(f"   Intentando cargar {base_url} (intento {nav_attempt})")
                             
-                            # Navegar con timeout ampliado y esperar a que la red se calme
-                            await page.goto(base_url, wait_until='networkidle', timeout=90000)
+                            # Asegurarse de que no haya rutas bloqueando
+                            await page.unroute('**/*')
                             
-                            # Esperar un poco para que el DOM se estabilice
+                            # Navegar sin bloqueo de recursos, esperar a que el DOM esté listo
+                            await page.goto(base_url, wait_until='domcontentloaded', timeout=60000)
+                            
+                            # Esperar un poco para que el DOM se estabilice y se ejecuten scripts iniciales
                             await page.wait_for_timeout(3000)
                             
-                            # --- Verificar si hay captcha o redirección ---
+                            # Verificar si hay captcha o redirección
                             await handle_captcha_if_present(page, "initial_load")
                             
-                            # --- Obtener la URL actual (puede ser redirigida) ---
+                            # Obtener la URL actual
                             current_url = page.url
                             logger.debug(f"   URL actual después de navegación: {current_url}")
                             
-                            # Si la URL no contiene 'amazon', puede ser redirección externa (raro)
                             if 'amazon' not in current_url:
                                 logger.warning(f"   Redirección inesperada a {current_url}, reintentando...")
                                 continue
-
+                            
+                            # Intentar cerrar cualquier modal o overlay (ej. cookies)
+                            await close_overlays(page)
+                            
+                            # Buscar el selector de login
                             selector_found = False
                             for sel in login_selectors:
                                 try:
@@ -2937,16 +2983,15 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                 nav_success = True
                                 break
                             else:
-                                # --- Si no se encuentra, tomar captura y analizar contenido ---
+                                # Si no se encuentra, tomar captura y analizar contenido
                                 await take_screenshot(page, "no_login_selector")
                                 content = await page.content()
                                 if "Lo sentimos" in content or "no podemos crear tu cuenta" in content:
-                                    logger.warning("   Página de error de Amazon detectada (Lo sentimos)")
                                     raise Exception("AMAZON_ERROR_PAGE")
                                 elif "detected unusual activity" in content or "actividad inusual" in content:
-                                    logger.warning("   Página de actividad inusual detectada")
                                     raise Exception("AMAZON_UNUSUAL_ACTIVITY")
                                 else:
+                                    # Puede que la página esté cargando lentamente o haya un captcha invisible
                                     logger.warning("   No se encontró selector de login, reintentando...")
                                     continue
                                     
@@ -2955,28 +3000,28 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             logger.warning(f"Navegación intento {nav_attempt} falló: {nav_err}")
                             if nav_attempt == max_nav_retries:
                                 raise
-                            # Esperar más tiempo entre reintentos
                             await asyncio.sleep(10)
-                            # Crear una nueva página para reiniciar el estado
+                            # Cerrar página y crear una nueva para reiniciar estado
                             await page.close()
                             page = await context.new_page()
 
                     if not nav_success:
                         raise Exception(f"No se pudo cargar la página después de {max_nav_retries} intentos: {last_error}")
 
-                    # --- Aplicar bloqueo de recursos solo después de que la página cargó ---
+                    # --- Aplicar bloqueo de recursos solo después de la navegación exitosa ---
                     await page.route('**/*', block_resources)
 
-                    # ----- PASO 7.5: Manejar posible página de bienvenida "Continuar a Compras" -----
-                    logger.debug("🛒 [PASO 7.5] Verificando página de bienvenida o redirección...")
+
+
+                    
+
+                    # ----- PASO 7.5: Manejar página de bienvenida y hacer clic en login -----
+                    logger.debug("🛒 [PASO 7.5] Verificando página de bienvenida...")
                     continue_shopping_selectors = [
                         'input[value="Continuar a Compras"]',
                         'button:has-text("Continuar a Compras")',
-                        'a:has-text("Continuar a Compras")',
                         'input[value="Continue to Shopping"]',
-                        'button:has-text("Continue to Shopping")',
-                        'input[value="Seguir comprando"]',
-                        'button:has-text("Seguir comprando")'
+                        'button:has-text("Continue to Shopping")'
                     ]
                     for selector in continue_shopping_selectors:
                         try:
@@ -2984,65 +3029,97 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             if btn:
                                 logger.debug(f"   ✅ Botón de continuar encontrado: {selector}")
                                 await btn.click()
-                                await page.wait_for_load_state('domcontentloaded', timeout=NAVIGATION_TIMEOUT*1000)
-                                logger.debug("   ✅ Continuar a compras clickeado")
+                                await page.wait_for_load_state('domcontentloaded', timeout=30000)
                                 await page.wait_for_timeout(2000)
                                 break
                         except:
                             continue
-                    else:
-                        logger.debug("   ℹ️ No se detectó página de bienvenida, continuando normal")
 
-                    logger.debug("👤 Buscando enlace de inicio de sesión...")
-
-                    # 1. Desactivar bloqueo de recursos para esta sección
-                    await page.unroute('**/*')
-                    await page.wait_for_timeout(2000)  # Esperar a que los recursos se carguen
-
-                    # 2. Selectores probados y ordenados por prioridad
-                    login_selectors = [
-                        'a[data-nav-role="signin"]',
-                        '#nav-link-accountList',
-                        'a.nav-a.nav-a-2[href*="/ap/signin"]',
-                        'a:has-text("Hola, identifícate")',
-                        'a:has-text("Cuenta y Listas")'
-                    ]
-
+                    logger.debug("👤 Haciendo clic en inicio de sesión...")
                     clicked = False
-                    for selector in login_selectors:
-                        try:
-                            # Esperar a que el elemento sea visible (más tiempo)
-                            element = await page.wait_for_selector(selector, state='visible', timeout=15000)
-                            if element:
-                                # Hacer clic con JavaScript para evitar problemas de superposición
-                                await page.evaluate(f'document.querySelector("{selector}").click()')
-                                logger.debug(f"✅ Clic en '{selector}' mediante JavaScript")
-                                clicked = True
-                                break
-                        except Exception as e:
-                            logger.debug(f"   Selector {selector} falló: {e}")
-                            continue
+                    # Intentar con el selector más fiable
+                    try:
+                        await page.click('#nav-link-accountList', timeout=15000)
+                        logger.debug("✅ Clic en #nav-link-accountList")
+                        clicked = True
+                    except:
+                        pass
 
                     if not clicked:
-                        # Si todos fallan, intentar hacer clic en el primer elemento por su texto
+                        # Fallback: buscar por texto
                         try:
                             await page.click('text="Hola, identifícate"')
-                            logger.debug("✅ Clic en 'Hola, identifícate' por texto")
+                            logger.debug("✅ Clic en 'Hola, identifícate'")
                             clicked = True
                         except:
                             pass
 
                     if not clicked:
-                        # Último recurso: navegar directamente a la URL de login
-                        await page.goto('https://www.amazon.com.mx/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.com.mx%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_mx&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0')
-                        await page.wait_for_load_state('domcontentloaded', timeout=30000)
+                        # Último recurso: navegar directamente a login
+                        login_url = f"{base_urls[country_code]}/ap/signin?openid.return_to={base_urls[country_code]}%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_{country_code.lower()}&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
+                        await page.goto(login_url, wait_until='domcontentloaded', timeout=30000)
                         logger.debug("✅ Navegación directa a login")
                         clicked = True
 
                     if not clicked:
                         raise Exception("No se pudo acceder a la página de inicio de sesión")
 
+                    await page.wait_for_timeout(2000)
                     last_screenshot = await take_screenshot(page, "after_login_click")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
                     # ----- PASO 9: Ingresar número de teléfono -----
                     logger.debug("📱 Ingresando número de teléfono...")
