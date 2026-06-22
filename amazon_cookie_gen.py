@@ -555,33 +555,13 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 req2 = sess.post("https://www.amazon.com/ap/register", data=data2,
                                 headers={"Referer": req1.url, "Origin": "https://www.amazon.com"})
 
-                # ---------- EXTRACCIÓN DE verifyToken SIEMPRE ----------
+                # ---------- EXTRACCIÓN DE verifyToken (con soporte para WAF) ----------
                 verifyToken = None
-                verifyToken_match = re.search(r'name=["\']verifyToken["\']\s+value=["\']([^"\']+)', req2.text)
-                if verifyToken_match:
-                    verifyToken = verifyToken_match.group(1)
-                else:
-                    verifyToken_match = re.search(r'data-verify-token=["\']([^"\']+)', req2.text)
-                    if verifyToken_match:
-                        verifyToken = verifyToken_match.group(1)
 
-                if not verifyToken:
-                    raise Exception("No se encontró verifyToken en la respuesta")
-                # ------------------------------------------------------
-
-                if "already an account" in req2.text:
-                    email = None
-                    print("Email ya registrado")
-                    continue
-                    
-                if "detected unusual activity" in req2.text:
-                    print("Actividad inusual - Rotando proxy")
-                    continue
-
-                # PASO 4: WAF (si aparece)
+                # Verificar si hay WAF
                 if "data-context" in req2.text and "data-external-id" in req2.text:
+                    # Hay WAF: resolverlo y obtener verifyToken de req4
                     print("* Resolviendo WAF...")
-                    # YA NO extraemos verifyToken aquí, ya lo tenemos
                     dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
                     anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
                     
@@ -627,63 +607,49 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                         "pageId": assoc_handle,
                         "openid.ns": "http://specs.openid.net/auth/2.0",
                         "shouldShowPersistentLabels": "true",
-                        "verifyToken": verifyToken
+                        "verifyToken": verifyToken   # <--- este aún es None, se actualizará luego
                     }
                     
                     req4 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data4,
                                     headers={"Content-Type": "application/x-www-form-urlencoded",
                                             "Referer": req2.url, "Origin": "https://www.amazon.com"})
                     
-                    # Si req4 devuelve un nuevo verifyToken, actualizarlo
-                    nuevo_verify = re.search(r'name=["\']verifyToken["\']\s+value=["\']([^"\']+)', req4.text)
-                    if nuevo_verify:
-                        verifyToken = nuevo_verify.group(1)
-                    # Si no, mantener el que ya tenemos
-
-                # El resto del código (PASO 5, etc.) sigue igual, usando verifyToken
-
-
-                    req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
-                    clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
-                    aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
-                    captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
-                    jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
-                    if not jwt_client_id:
-                        logger.debug("WAF falló")
-                        continue   # reintentar con otro email (o podría lanzar excepción)
-                    logger.debug(f"WAF PASS")
-                    data4 = {
-                        "anti-csrftoken-a2z": anti_csrf,
-                        "cvf_aamation_response_token": jwt_client_id,
-                        "cvf_captcha_captcha_action": "verifyAamationChallenge",
-                        "cvf_aamation_error_code": "",
-                        "clientContext": sess.cookies.get("ubid-main"),
-                        "openid.pape.max_auth_age": "900",
-                        "openid.return_to": "https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
-                        "forceMobileLayout": "1",
-                        "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
-                        "openid.assoc_handle": assoc_handle,
-                        "openid.mode": "checkid_setup",
-                        "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
-                        "pageId": assoc_handle,
-                        "openid.ns": "http://specs.openid.net/auth/2.0",
-                        "shouldShowPersistentLabels": "true",
-                        "verifyToken": verifyToken
-                    }
-                    time.sleep(random.uniform(2, 3))
-                    req4 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data4,
-                                    headers={"Content-Type": "application/x-www-form-urlencoded",
-                                            "Referer": req2.url, "Origin": "https://www.amazon.com"})
-                    if "/ap/register" in req4.url or "/ap/signin" in req4.url:
-                        logger.debug("WAF rechazado - Rotando proxy")
-                        time.sleep(random.uniform(5, 10))
-                        continue
+                    # Extraer verifyToken de req4
                     verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
-                    # La página que sigue es la de verificación por email
-                    req_after_waf = req4
+                    # También se puede extraer anti_csrf de req4
+                    anti_csrf = find(req4.text, "name='anti-csrftoken-a2z' value='", "'")
+                    
                 else:
-                    # No hubo WAF, la página actual es la de verificación por email
+                    # No hay WAF: extraer verifyToken de req2
+                    verifyToken_match = re.search(r'name=["\']verifyToken["\']\s+value=["\']([^"\']+)', req2.text)
+                    if verifyToken_match:
+                        verifyToken = verifyToken_match.group(1)
+                    else:
+                        verifyToken_match = re.search(r'data-verify-token=["\']([^"\']+)', req2.text)
+                        if verifyToken_match:
+                            verifyToken = verifyToken_match.group(1)
+                    
+                    # También extraer anti_csrf de req2 si no se hizo
+                    anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+
+                if not verifyToken:
+                    raise Exception("No se encontró verifyToken en la respuesta")
+
+                if "already an account" in req2.text:
+                    email = None
+                    print("Email ya registrado")
+                    continue
+                    
+                if "detected unusual activity" in req2.text:
+                    print("Actividad inusual - Rotando proxy")
+                    continue
+
+              # Definir req_after_waf para el paso de OTP
+                if "data-context" in req2.text and "data-external-id" in req2.text:
+                    req_after_waf = req4   # req4 viene del bloque de extracción
+                else:
                     req_after_waf = req2
+
 
                 # ---------- 6. Verificar email (OTP) ----------
                 base_openid = {
