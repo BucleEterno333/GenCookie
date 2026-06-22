@@ -7,3 +7,4 @@ nest_asyncio>=1.5.0
 flask>=2.3.0
 flask-cors>=4.0.0
 gunicorn>=21.2.0
+curl_cffi>=0.5.10
