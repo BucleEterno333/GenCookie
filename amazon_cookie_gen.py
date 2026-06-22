@@ -666,7 +666,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             amazon_cc = {
                 'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
-                'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO'
+                'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
             }.get(purchase_country, 'US')
             logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
             
@@ -691,6 +691,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             if "entered already exists with another account" in req7.text:
                 logger.debug("Número ya registrado")
+                set_status(hero_key, activation_id, 8) 
                 continue
                 
             if "new_account=1" not in req7.url:
@@ -770,6 +771,8 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
         except Exception as error:
             logger.debug(f"Error: {error}")
+            if activation_id:
+                set_status(hero_key, activation_id, 8)   # cancelar para no cobrar
             logger.debug(f"Reintentando... (intento {intento}/{max_intentos})")
             time.sleep(0.1)
             email = None
@@ -845,7 +848,7 @@ wallet_urls = {
 # -------------------------------------------------------------------
 # HERO_COUNTRY_ORDER = ['CM', 'BR', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX']
 
-HERO_COUNTRY_ORDER = ['KZ', 'ID', 'MA', 'KG', 'CO', 'MX', 'BR', 'CM'] # Se deja solo US, CA y MX para Hero para pruebas (números no llegan con otros países)
+HERO_COUNTRY_ORDER = ['CA', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX', 'BR', 'CM'] # Se deja solo US, CA y MX para Hero para pruebas (números no llegan con otros países)
 FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
 
 # -------------------------------------------------------------------
@@ -3060,6 +3063,8 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                 page_content = await page.content()
                                 if "número de teléfono ya está en uso" in page_content or "already in use" in page_content:
                                     logger.debug("   Mensaje de número ya registrado detectado en la página.")
+                                    if service_id:
+                                        await cancel_hero_sms(service_id)
                                 else:
                                     # Si no hay indicador claro, asumimos que no es necesario cambiar (salimos)
                                     logger.debug("   No se detectó número ya registrado, saliendo sin cambios.")
