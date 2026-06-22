@@ -2336,21 +2336,7 @@ async def get_phone_number(account_country, force_service=None, force_country=No
         'MA': 4,
     }
 
-    # Mapeo de códigos de país a números para Hero SMS
-    #CAMBIAR ORDEN?
-    hero_country_map = {
-        'CA': 36,    # Canada +1
-        'US': 187,    # USA +1
-        'BR': 73,   # Brasil +55
-        'CM': 41,   # Cameroon +237
-        'MY': 7,    # Malaysia +60
-        'KZ': 2,    # Kazakhstan +7
-        'ID': 6,    # Indonesia +62
-        'MA': 37,   # Morocco +212
-        'KG': 11,   # Kyrgyzstan +996
-        'CO': 33,   # Colombia +57
-        'MX': 54,   # México +52
-    }
+
 
     # Orden de países por precio (barato a caro) para Hero
     hero_order = HERO_COUNTRY_ORDER 
