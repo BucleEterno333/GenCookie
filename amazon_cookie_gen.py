@@ -452,7 +452,8 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
 
 
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
-            activation_id=None, sms_phone=None, proxy=None, t=None):
+            activation_id=None, sms_phone=None, proxy=None, t=None,
+            max_attempts=10, country_code='CA'):
     """
     Versión rápida (curl_cffi) sin bucles internos de email/SMS.
     - max_attempts no se usa; el bucle es infinito hasta éxito o excepción.
@@ -464,7 +465,9 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
     
     intento = 0
     
-    while True:
+
+    for intento in range(1, max_attempts + 1):
+
         intento += 1
         
         try:
@@ -648,11 +651,24 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
             
             # SMS
-            activation_id, sms_phone = get_number(hero_key)
-            logger.debug(f"SMS: {sms_phone}")
-            
+            phone_info = get_phone_number_sync(country_code)
+            if not phone_info:
+                raise Exception("No se pudo obtener número de teléfono")
+            sms_phone = phone_info['local']
+            activation_id = phone_info['service_id']
+            service_name = phone_info['service_name']  # si lo necesitas, puedes ignorarlo
+            purchase_country = phone_info['purchase_country']
+            logger.debug(f"SMS: {sms_phone} (país: {purchase_country})")
+
+            # Mapeo de país de compra a código de Amazon (para cvf_phone_cc)
+            amazon_cc = {
+                'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
+                'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO'
+            }.get(purchase_country, 'US')
+            logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
+
             data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
-                    "verifyToken": verifyToken, "cvf_phone_cc": "CA",
+                    "verifyToken": verifyToken, "cvf_phone_cc": amazon_cc,
                     "cvf_phone_num": sms_phone, "cvf_action": "collect"}
             
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
@@ -3753,17 +3769,20 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
         if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
             logger.debug("🔧 Intentando método rápido (curl_cffi + Capsolver) de forma secuencial...")
             loop = asyncio.get_running_loop()
-            max_attempts = 1
+            max_attempts = 10
             for attempt in range(1, max_attempts + 1):
                 logger.debug(f"   Intento rápido #{attempt}/{max_attempts}")
                 try:
                     fast_result = await loop.run_in_executor(
                         None,
                         process,
-                        CAPSOLVER_API_KEY, HERO_SMS_API_KEY,
-                        None, None, None, None, None,
-                        PROXY_STRING, None, 1,
-                        country      
+                        CAPSOLVER_API_KEY,          # capsolver_key
+                        HERO_SMS_API_KEY,           # hero_key
+                        None, None, None, None, None,  # email, mail_token, mail_api, activation_id, sms_phone
+                        PROXY_STRING,               # proxy
+                        None,                       # t
+                        10,                          # max_attempts (puedes usar el valor que quieras)
+                        country                     # country_code
                     )
                     if fast_result:
                         logger.debug("✅ Método rápido exitoso.")
