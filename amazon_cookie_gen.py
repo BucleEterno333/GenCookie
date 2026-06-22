@@ -486,7 +486,8 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
             password = "dfbc1992"
             
-            sess = requests.Session(impersonate="chrome")
+            sess = requests.Session()
+            sess.impersonate = "chrome"
             sess.headers.update({
                 "User-Agent": info["user_agent"],
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
