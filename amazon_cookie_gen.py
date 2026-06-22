@@ -504,25 +504,15 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
 
 
 
-
-
-
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             activation_id=None, sms_phone=None, proxy=None, t=None, country_code='BR'):
-    """
-    Versión rápida (curl_cffi) que usa la lógica de números con países ordenados por precio.
-    - country_code: código de país para la compra (ej. 'MX', 'US', 'BR')
-    - Se fuerza el uso de Hero SMS (por compatibilidad con set_status/get_code)
-    - Bucle infinito hasta éxito (reintenta con nuevo email/número si falla)
-    """
+    
     if t is None:
         t = time.time()
     
-    intento = 0
+    max_intentos = 100
     
-    while True:
-        intento += 1
-        
+    for intento in range(1, max_intentos + 1):
         try:
             logger.debug(f"\n{'='*60}")
             logger.debug(f"INTENTO #{intento}")
@@ -538,8 +528,9 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
             password = "dfbc1992"
             
-            # --- SESIÓN CURL_CFFI ---
-            sess = requests.Session(impersonate="chrome")
+            # --- CORRECCIÓN: Usar curl_requests con impersonate ---
+            sess = curl_requests.Session()
+            sess.impersonate = "chrome"
             sess.headers.update({
                 "User-Agent": info["user_agent"],
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -697,17 +688,15 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
             
             # ---------- SMS (usando lógica de países) ----------
-            # Forzamos servicio 'hero' porque las funciones set_status/get_code son de Hero
             phone_info = get_phone_number_sync(country_code, force_service='hero')
             if not phone_info:
                 raise Exception("No se pudo obtener número de teléfono de Hero")
             
-            sms_phone = phone_info['local']          # número local (sin prefijo)
-            activation_id = phone_info['service_id']  # ID de activación en Hero
+            sms_phone = phone_info['local']
+            activation_id = phone_info['service_id']
             purchase_country = phone_info['purchase_country']
             logger.debug(f"SMS: {sms_phone} (país: {purchase_country})")
             
-            # Mapeo de país de compra a código de país de Amazon (cvf_phone_cc)
             amazon_cc = {
                 'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
                 'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO'
@@ -720,9 +709,9 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
             logger.debug("* Esperando SMS...")
-            sms_code = get_code(hero_key, activation_id)  # Hero get_code
+            sms_code = get_code(hero_key, activation_id)
             logger.debug(f"SMS Code: {sms_code}")
-            set_status(hero_key, activation_id, 6)        # Hero set_status
+            set_status(hero_key, activation_id, 6)
             
             anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
@@ -814,16 +803,14 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
         except Exception as error:
             logger.debug(f"Error: {error}")
-            logger.debug(f"Reintentando...")
+            logger.debug(f"Reintentando... (intento {intento}/{max_intentos})")
             time.sleep(0.1)
             email = None
             mail_token = None
             mail_api = None
             continue
-
-
-
-
+    
+    raise Exception(f"Se agotaron los {max_intentos} intentos")
 
 
 
