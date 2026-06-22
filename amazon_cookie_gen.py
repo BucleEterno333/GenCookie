@@ -571,6 +571,8 @@ def is_phone_registered_sync(phone_number: str) -> bool:
 
             # Ir a login
             page.goto("https://www.amazon.com/ap/signin", timeout=30000)
+            # Esperar que el campo esté visible antes de llenar
+            page.wait_for_selector('#ap_email', state='visible', timeout=10000)
             page.fill('#ap_email', phone_number)
             page.click('#continue')
             page.wait_for_timeout(3000)
@@ -648,6 +650,50 @@ async def is_phone_registered(phone_number, country_code='US'):
         # Caso 4: si hay captcha o algo inesperado, asumimos que no está registrado (o reintentamos)
         await browser.close()
         return False  # Por defecto, nuevo
+
+
+
+
+def safe_request(sess, method, url, data=None, json_data=None, headers=None, max_retries=3, backoff=2):
+    """
+    Realiza una petición HTTP con reintentos en caso de errores SSL/red.
+    """
+    if headers is None:
+        headers = {}
+    last_exception = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            if method.upper() == 'GET':
+                response = sess.get(url, headers=headers, timeout=30)
+            elif method.upper() == 'POST':
+                if json_data is not None:
+                    response = sess.post(url, json=json_data, headers=headers, timeout=30)
+                else:
+                    response = sess.post(url, data=data, headers=headers, timeout=30)
+            else:
+                raise ValueError(f"Método no soportado: {method}")
+
+            # Si la respuesta es exitosa, devolverla
+            if response.status_code in [200, 201, 302, 303]:
+                return response
+            else:
+                logger.warning(f"Intento {attempt}: status {response.status_code} - {response.text[:100]}")
+                # Si es error 4xx/5xx que no sea transitorio, lanzar excepción para no reintentar
+                if response.status_code in [400, 401, 403, 404, 405, 406, 410]:
+                    raise Exception(f"Error HTTP {response.status_code}: {response.text[:200]}")
+
+        except Exception as e:
+            last_exception = e
+            logger.warning(f"Intento {attempt} falló: {e}")
+            if attempt < max_retries:
+                wait = backoff ** attempt
+                logger.debug(f"Reintentando en {wait}s...")
+                time.sleep(wait)
+            else:
+                raise Exception(f"Fallo después de {max_retries} intentos: {last_exception}")
+
+    raise Exception("No se pudo completar la petición")
 
 
 def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
@@ -794,17 +840,34 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             logger.debug(f"Email listo: {email} ({mail_api})")
             
             # ---------- PRIMER POST ----------
+            # ---------- PRIMER POST (con reintentos SSL) ----------
             data1 = {"arb": arb, "email": email, "claimCollectionLayoutType": "unifiedAuthClaimCollection"}
-            req1 = sess.post(
-                "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
-                "&openid.ns=http://specs.openid.net/auth/2.0"
-                "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
-                "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
-                "&openid.assoc_handle=anywhere_v2_us"
-                "&openid.return_to=https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
-                data=data1,
-                headers={"Referer": "https://www.amazon.com/ap/register", "Origin": "https://www.amazon.com"}
-            )
+            max_retries_req = 3
+            req1 = None
+            for req_attempt in range(1, max_retries_req + 1):
+                try:
+                    req1 = safe_request(
+                        sess,
+                        "POST",
+                        "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
+                        "&openid.ns=http://specs.openid.net/auth/2.0"
+                        "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
+                        "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
+                        "&openid.assoc_handle=anywhere_v2_us"
+                        "&openid.return_to=https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                        data=data1,
+                        headers={"Referer": "https://www.amazon.com/ap/register", "Origin": "https://www.amazon.com"},
+                        max_retries=3
+                    )
+                    break
+                except Exception as e:
+                    logger.debug(f"  req1 intento {req_attempt}/{max_retries_req} falló: {e}")
+                    if req_attempt == max_retries_req:
+                        raise
+                    time.sleep(2)
+
+            if req1 is None or req1.status_code != 200 or "appActionToken" not in req1.text:
+                raise Exception("req1 falló después de reintentos")
             
             if req1.status_code != 200 or "appActionToken" not in req1.text:
                 logger.debug(f"Bloqueo en req1 (Status: {req1.status_code})")
@@ -824,8 +887,14 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 "password": password, "showPasswordChecked": "true"
             }
             
-            req2 = sess.post("https://www.amazon.com/ap/register", data=data2,
-                            headers={"Referer": req1.url, "Origin": "https://www.amazon.com"})
+            req2 = safe_request(
+                sess,
+                "POST",
+                "https://www.amazon.com/ap/register",
+                data=data2,
+                headers={"Referer": req1.url, "Origin": "https://www.amazon.com"},
+                max_retries=3
+            )
             
             if "already an account" in req2.text:
                 email = None
@@ -888,9 +957,15 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                     "verifyToken": verifyToken
                 }
                 
-                req4 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data4,
-                                headers={"Content-Type": "application/x-www-form-urlencoded",
-                                        "Referer": req2.url, "Origin": "https://www.amazon.com"})
+                req4 = safe_request(
+                    sess,
+                    "POST",
+                    "https://www.amazon.com/ap/cvf/verify",
+                    data=data4,
+                    headers={"Content-Type": "application/x-www-form-urlencoded",
+                            "Referer": req2.url, "Origin": "https://www.amazon.com"},
+                    max_retries=3
+                )
                 
                 verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
             
