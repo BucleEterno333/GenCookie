@@ -604,23 +604,17 @@ def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> Opt
 
             # 4. Esperar a que la página procese
             page.wait_for_timeout(3000)
-
-            # 5. Detectar estado
-            if page.query_selector('#ap_password'):
-                logger.debug(f"   ✅ Número {phone_number} YA REGISTRADO")
-                browser.close()
-                return True
-
-            if page.query_selector('#ap_customer_name'):
+            content = page.content()
+            # 🆕 Primero, detectar por texto exacto (más rápido y fiable)
+            if "Parece que eres nuevo en Amazon." in content:
                 logger.debug(f"   ✅ Número {phone_number} NUEVO (disponible)")
                 browser.close()
                 return False
 
-            content = page.content()
-            if "No hemos podido encontrar una cuenta" in content or "We cannot find an account" in content:
-                logger.debug(f"   ✅ Número {phone_number} NUEVO (no existe)")
+            if "¿Ya tienes una cuenta?" in content or "Para iniciar sesión, ingresa tu contraseña." in content:
+                logger.debug(f"   ✅ Número {phone_number} YA REGISTRADO")
                 browser.close()
-                return False
+                return True
 
             # Caso desconocido: asumir nuevo
             logger.warning(f"   ⚠️ Estado desconocido, asumiendo nuevo")
