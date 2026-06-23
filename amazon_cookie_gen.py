@@ -822,7 +822,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             available_number = None
             logger.debug("🔄 Iniciando verificación de números...")
 
-            for act_id, phone, country in numbsers:
+            for act_id, phone, country in numbers:
                 logger.debug(f"   Verificando {phone} (país {country})...")
                 try:
                     result = is_phone_registered_sync(f"+{phone}", country_code)
