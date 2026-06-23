@@ -365,11 +365,14 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
         keys = [keys]
 
     for key in keys:
+        logger.debug(f"🔑 Probando con key: {key[:4]}...")
+        
         if country_code:
             countries_to_try = [country_code] + [c for c in HERO_COUNTRY_ORDER if c != country_code]
         else:
             countries_to_try = HERO_COUNTRY_ORDER
 
+        key_banned = False
         for iso_code in countries_to_try:
             hero_country_num = hero_country_map.get(iso_code)
             if not hero_country_num:
@@ -380,9 +383,11 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
             try:
                 r = requests.get(url, timeout=30).text
 
+                # 🔴 DETECTAR BANNED
                 if _is_banned_response(r):
-                    logger.warning(f"⚠️ Key {key[:4]} baneada, pasando a la siguiente...")
-                    break   # sale del bucle de países para probar la siguiente key
+                    logger.warning(f"⚠️ Key {key[:4]} BANEADA, pasando a la siguiente key...")
+                    key_banned = True
+                    break  # Sale del bucle de países, pasa a la siguiente key
 
                 if r.startswith("ACCESS_NUMBER"):
                     _, activation_id, phone = r.split(":")
@@ -394,11 +399,14 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
                     logger.debug(f"  ❌ Falló para {iso_code}: {r[:80]}")
             except Exception as e:
                 logger.debug(f"  ❌ Error en {iso_code}: {e}")
-        # Si se agotaron los países con esta key, pasa a la siguiente key
+        
+        # Si la key fue baneada o se agotaron los países, pasar a la siguiente key
+        if key_banned:
+            continue
+        # Si no se encontró número con esta key (sin banned), también pasa a la siguiente
+        # (pero si no hubo banned, y no se encontró número, probablemente no hay números disponibles)
 
-    raise Exception("No se pudo obtener número con ninguna key")
-
-
+    raise Exception("No se pudo obtener número con ninguna key (todas baneadas o sin saldo)")
 def get_code(keys, activation_id: str, timeout: int = 120) -> str:
     if isinstance(keys, str):
         keys = [keys]
