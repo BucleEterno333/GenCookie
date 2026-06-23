@@ -527,19 +527,22 @@ from playwright.sync_api import sync_playwright
 def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> Optional[bool]:
     """
     Verifica si un número ya está registrado en Amazon.
-    Retorna:
-      True  -> registrado
-      False -> nuevo (disponible)
-      None  -> error, no se pudo determinar (se debe tratar como no disponible)
+    Versión simple: va a amazon.com.mx, hace clic en 'Cuenta y Listas' (nav-link-accountList),
+    llena el email, y detecta si aparece campo de contraseña o de registro.
+    Retorna: True=registrado, False=nuevo, None=error
     """
-    logger.debug(f"📞 Verificando número {phone_number} en {country_code}...")
+    logger.debug(f"📞 Verificando número {phone_number}...")
+    
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         logger.error("❌ Playwright no instalado")
         return None
 
-    base_url = base_urls.get(country_code, 'https://www.amazon.com.mx')
+    # Siempre usar amazon.com.mx para la verificación
+    base_url = "https://www.amazon.com.mx"
+
+    # Configurar proxy si existe
     proxy_config = None
     if PROXY_HOST_PORT:
         proxy_config = {'server': f'http://{PROXY_HOST_PORT}'}
@@ -569,99 +572,40 @@ def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> Opt
             )
             page = context.new_page()
 
-            # Navegar a la página principal (con reintento)
-            max_retries = 2
-            for attempt in range(max_retries):
-                try:
-                    logger.debug(f"   🌐 Navegando a {base_url} (intento {attempt+1})...")
-                    page.goto(base_url, wait_until='domcontentloaded', timeout=45000)
-                    break
-                except Exception as e:
-                    logger.warning(f"   ⚠️ Navegación falló: {e}")
-                    if attempt == max_retries - 1:
-                        raise
-                    page.wait_for_timeout(2000)
-
+            # 1. Ir a amazon.com.mx
+            logger.debug(f"   🌐 Navegando a {base_url}...")
+            page.goto(base_url, wait_until='domcontentloaded', timeout=30000)
             page.wait_for_timeout(2000)
 
-            # Cerrar overlays
-            close_buttons = [
-                'button:has-text("Aceptar")',
-                'button:has-text("Aceptar cookies")',
-                'button:has-text("Continuar")',
-                'button:has-text("Cerrar")',
-                'button[aria-label="Cerrar"]',
-                'button[aria-label="Close"]'
-            ]
-            for selector in close_buttons:
-                try:
-                    element = page.wait_for_selector(selector, timeout=2000)
-                    if element:
-                        element.click()
-                        page.wait_for_timeout(500)
-                except:
-                    pass
+            # 2. Hacer clic en "Cuenta y Listas" (selector fijo)
+            logger.debug("   👤 Haciendo clic en #nav-link-accountList...")
+            try:
+                page.click('#nav-link-accountList', timeout=10000)
+                page.wait_for_timeout(2000)
+            except Exception as e:
+                logger.warning(f"   ⚠️ No se pudo hacer clic en #nav-link-accountList: {e}")
+                browser.close()
+                return None
 
-            # Hacer clic en login
-            login_selectors = [
-                '#nav-link-accountList',
-                'a[data-nav-role="signin"]',
-                'a.nav-a.nav-a-2[href*="/ap/signin"]',
-                'a:has-text("Hola, identifícate")',
-                'a:has-text("Cuenta y Listas")',
-                'a[href*="/ap/signin"]'
-            ]
-            clicked = False
-            for selector in login_selectors:
-                try:
-                    page.wait_for_selector(selector, state='visible', timeout=10000)
-                    page.click(selector)
-                    logger.debug(f"   👤 Clic en selector: {selector}")
-                    clicked = True
-                    break
-                except:
-                    continue
-
-            if not clicked:
-                login_url = f"{base_url}/ap/signin?openid.return_to={base_url}%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_{country_code.lower()}&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
-                page.goto(login_url, wait_until='domcontentloaded', timeout=30000)
-                logger.debug("   ⚠️ Navegación directa a login")
-            else:
-                page.wait_for_timeout(3000)
-
-            # Ingresar número
+            # 3. Llenar el campo de email
             logger.debug(f"   📱 Ingresando número: {phone_number}")
-            email_selectors = [
-                '#ap_email_login',
-                '#ap_email',
-                'input[name="email"]',
-                'input[type="email"]'
-            ]
-            email_field = None
-            for selector in email_selectors:
-                try:
-                    email_field = page.wait_for_selector(selector, state='visible', timeout=5000)
-                    if email_field:
-                        break
-                except:
-                    continue
-            if not email_field:
-                raise Exception("No se encontró campo de email")
+            try:
+                # Esperar el campo de email (#ap_email_login)
+                email_field = page.wait_for_selector('#ap_email, #ap_email_login', state='visible', timeout=10000)
+                if not email_field:
+                    raise Exception("No se encontró campo de email")
+                email_field.fill(phone_number)
+                page.wait_for_timeout(1000)
+                page.click('#continue', timeout=5000)
+            except Exception as e:
+                logger.warning(f"   ⚠️ Error al llenar email: {e}")
+                browser.close()
+                return None
 
-            email_field.fill(phone_number)
-            page.wait_for_timeout(1000)
-            continue_button_selectors = ['#continue', 'button[type="submit"]', 'input[value="Continuar"]', 'input[value="Continue"]']
-            for btn_sel in continue_button_selectors:
-                try:
-                    page.click(btn_sel, timeout=3000)
-                    break
-                except:
-                    continue
-
-            # Esperar resultado
+            # 4. Esperar a que la página procese
             page.wait_for_timeout(3000)
 
-            # Detectar estado
+            # 5. Detectar estado
             if page.query_selector('#ap_password'):
                 logger.debug(f"   ✅ Número {phone_number} YA REGISTRADO")
                 browser.close()
@@ -678,14 +622,14 @@ def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> Opt
                 browser.close()
                 return False
 
-            logger.warning(f"   ⚠️ Estado desconocido para {phone_number}, asumiendo nuevo")
+            # Caso desconocido: asumir nuevo
+            logger.warning(f"   ⚠️ Estado desconocido, asumiendo nuevo")
             browser.close()
             return False
 
     except Exception as e:
-        logger.error(f"❌ Error en is_phone_registered_sync para {phone_number}: {e}")
-        return None  # <--- Importante: retornar None en caso de error
-
+        logger.error(f"❌ Error en is_phone_registered_sync: {e}")
+        return None
 async def is_phone_registered(phone_number, country_code='US'):
     """
     Verifica si un número de teléfono ya está registrado en Amazon.
