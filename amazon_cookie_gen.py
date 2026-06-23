@@ -597,13 +597,14 @@ def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> Opt
                 email_field.fill(phone_number)
                 page.wait_for_timeout(1000)
                 page.click('#continue', timeout=5000)
+
             except Exception as e:
                 logger.warning(f"   ⚠️ Error al llenar email: {e}")
                 browser.close()
                 return None
 
             # 4. Esperar a que la página procese
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(6000)
             content = page.content()
             # 🆕 Primero, detectar por texto exacto (más rápido y fiable)
             if "Parece que eres nuevo en Amazon." in content:
@@ -611,15 +612,15 @@ def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> Opt
                 browser.close()
                 return False
 
-            if "¿Ya tienes una cuenta?" in content or "Para iniciar sesión, ingresa tu contraseña." in content:
+            if "¿Ya tienes una cuenta?" in content or "Para iniciar sesión, ingresa tu contraseña." in content or "contraseña" in content:
                 logger.debug(f"   ✅ Número {phone_number} YA REGISTRADO")
                 browser.close()
                 return True
 
             # Caso desconocido: asumir nuevo
-            logger.warning(f"   ⚠️ Estado desconocido, asumiendo nuevo")
+            logger.warning(f"   ⚠️ Estado desconocido, asumiendo usado")
             browser.close()
-            return False
+            return True
 
     except Exception as e:
         logger.error(f"❌ Error en is_phone_registered_sync: {e}")
