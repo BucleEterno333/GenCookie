@@ -630,7 +630,7 @@ def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> Opt
             # 2. Hacer clic en "Cuenta y Listas" (selector fijo)
             logger.debug("   👤 Haciendo clic en #nav-link-accountList...")
             try:
-                page.click('#nav-link-accountList', timeout=10000)
+                page.click('#nav-link-accountList', timeout=15000)
                 page.wait_for_timeout(2000)
             except Exception as e:
                 logger.warning(f"   ⚠️ No se pudo hacer clic en #nav-link-accountList: {e}")
@@ -1160,7 +1160,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
         except Exception as error:
             logger.debug(f"Error: {error}")
             if activation_id:
-                set_status(hero_key, activation_id, 8)   # cancelar para no cobrar
+                set_status(hero_keys, activation_id, 8)   # cancelar para no cobrar
             logger.debug(f"Reintentando... (intento {intento}/{max_intentos})")
             time.sleep(0.1)
             email = None
