@@ -803,52 +803,61 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
 
 
-            # Obtener 5 números en paralelo (usando ThreadPoolExecutor)
+            # Obtener 2 números en paralelo
             numbers = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                # Lanzar 5 tareas de get_number
-                future_to_attempt = {executor.submit(get_number, hero_key): i for i in range(5)}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_to_attempt = {executor.submit(get_number, hero_key): i for i in range(2)}
                 for future in concurrent.futures.as_completed(future_to_attempt):
                     try:
                         act_id, phone, country = future.result()
                         numbers.append((act_id, phone, country))
                     except Exception as e:
                         logger.debug(f"Error obteniendo número: {e}")
-            
+
             if not numbers:
                 raise Exception("No se pudo obtener ningún número")
-            
-            # Verificar números secuencialmente
+
+            # Verificar en paralelo
             available_number = None
             logger.debug("🔄 Iniciando verificación de números...")
 
-            for act_id, phone, country in numbers:
-                logger.debug(f"   Verificando {phone} (país {country})...")
-                try:
-                    result = is_phone_registered_sync(f"+{phone}", country_code)
-                    if result is None:
-                        # Error en la verificación: no sabemos si está registrado, lo marcamos como no disponible y cancelamos
-                        logger.warning(f"   ⚠️ Error al verificar {phone}, cancelando número...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_to_number = {
+                    executor.submit(is_phone_registered_sync, f"+{phone}", country_code): (act_id, phone, country)
+                    for act_id, phone, country in numbers
+                }
+                for future in concurrent.futures.as_completed(future_to_number):
+                    act_id, phone, country = future_to_number[future]
+                    try:
+                        result = future.result(timeout=60)  # timeout por si se cuelga
+                        if result is None:
+                            logger.warning(f"   ⚠️ Error al verificar {phone}, cancelando...")
+                            set_status(hero_key, act_id, 8)
+                        elif result is True:
+                            logger.debug(f"   ❌ Número {phone} ya registrado, cancelando...")
+                            set_status(hero_key, act_id, 8)
+                        else:
+                            # Número disponible
+                            available_number = (act_id, phone, country)
+                            logger.debug(f"   ✅ Número {phone} disponible!")
+                            # Cancelar los otros futuros? No podemos fácilmente, pero al salir del bucle
+                            # los demás se seguirán ejecutando, pero los cancelaremos después.
+                            break
+                    except Exception as e:
+                        logger.error(f"   ❌ Excepción verificando {phone}: {e}")
                         set_status(hero_key, act_id, 8)
-                        continue
-                    elif result is True:
-                        # Está registrado: cancelar
-                        logger.debug(f"   ❌ Número {phone} ya registrado, cancelando...")
-                        set_status(hero_key, act_id, 8)
-                        continue
-                    else:
-                        # result is False -> número disponible
-                        available_number = (act_id, phone, country)
-                        logger.debug(f"   ✅ Número {phone} disponible!")
-                        break
-                except Exception as e:
-                    logger.error(f"   ❌ Excepción verificando {phone}: {e}")
-                    set_status(hero_key, act_id, 8)  # cancelar por seguridad
-                    continue
 
-            # Si no se encontró disponible, cancelar todos los restantes y reintentar
-            if not available_number:
-                logger.warning("⚠️ No se encontró número disponible, cancelando todos y reintentando...")
+            # Si encontramos disponible, cancelar los que no se usaron
+            if available_number:
+                for act_id, phone, country in numbers:
+                    if (act_id, phone, country) != available_number:
+                        try:
+                            set_status(hero_key, act_id, 8)
+                            logger.debug(f"  Cancelando número {phone} (no usado)")
+                        except:
+                            pass
+            else:
+                # Ninguno disponible, cancelar todos y reintentar
                 for act_id, phone, country in numbers:
                     try:
                         set_status(hero_key, act_id, 8)
@@ -856,7 +865,6 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                         pass
                 logger.debug("Todos los números fueron cancelados (registrados o errores), reintentando...")
                 continue
-
             # Si no se encontró disponible, usar el primer número como fallback (o reintentar)
             if not available_number:
                 logger.warning("⚠️ No se encontró número disponible, usando el primero como fallback (o reintentar)")
