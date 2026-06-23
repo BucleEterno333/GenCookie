@@ -744,7 +744,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
 
             # Obtener 2 números en paralelo
             numbers = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future_to_attempt = {executor.submit(get_number, hero_key): i for i in range(2)}
                 for future in concurrent.futures.as_completed(future_to_attempt):
                     try:
