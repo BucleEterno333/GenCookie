@@ -805,421 +805,346 @@ def safe_request(sess, method, url, data=None, json_data=None, headers=None, max
 
     raise Exception("No se pudo completar la petición")
 
-
 def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None,
             activation_id=None, sms_phone=None, proxy=None, t=None, country_code='BR'):
     
     if t is None:
         t = time.time()
     
-    max_intentos = 50
+    max_intentos = 50      # Intentos externos (cambia de proxy si hay lista)
+    max_num_intentos = 5   # Intentos internos con el mismo proxy (número de números a probar)
     
     for intento in range(1, max_intentos + 1):
-        try:
-            logger.debug(f"\n{'='*60}")
-            logger.debug(f"INTENTO #{intento}")
-            logger.debug(f"{'='*60}")
-            
-            if PROXY_LIST:
-                if intento > 1 or not proxy:
-                    proxy = random.choice(PROXY_LIST).strip()
-                logger.debug(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
-            
-            info = gen_profile()
-            assoc_handle = "anywhere_v2_us"
-            arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
-            password = "dfbc1992"
+        # ---------- CONFIGURAR PROXY ----------
+        if PROXY_LIST:
+            if intento > 1 or not proxy:
+                proxy = random.choice(PROXY_LIST).strip()
+            logger.debug(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
+        
+        # ---------- BUCLE INTERNO PARA REINTENTAR NÚMEROS ----------
+        for num_attempt in range(1, max_num_intentos + 1):
+            try:
+                logger.debug(f"\n{'='*60}")
+                logger.debug(f"INTENTO EXTERNO #{intento} - INTENTO NÚMERO #{num_attempt}")
+                logger.debug(f"{'='*60}")
+                
+                info = gen_profile()
+                assoc_handle = "anywhere_v2_us"
+                arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
+                password = "dfbc1992"
 
-
-            # ---------- OBTENER 2 NÚMEROS EN PARALELO ----------
-            numbers = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                future_to_attempt = {executor.submit(get_number, hero_keys): i for i in range(2)}
-                for future in concurrent.futures.as_completed(future_to_attempt):
-                    try:
-                        act_id, phone, country = future.result()
-                        numbers.append((act_id, phone, country))
-                    except Exception as e:
-                        logger.debug(f"Error obteniendo número: {e}")
-
-            if not numbers:
-                raise Exception("No se pudo obtener ningún número")
-
-            # ---------- VERIFICAR NÚMEROS (CON REINTENTOS Y PRIORIDAD CA) ----------
-            available_number = None
-            logger.debug("🔄 Iniciando verificación de números...")
-
-            # 1. Clasificar números: CA primero, luego los demás
-            ca_numbers = []
-            other_numbers = []
-            for act_id, phone, country in numbers:
-                if country == 'CA':
-                    ca_numbers.append((act_id, phone, country))
-                else:
-                    other_numbers.append((act_id, phone, country))
-
-            # 2. Verificar CA primero
-            for act_id, phone, country in ca_numbers:
-                logger.debug(f"   Verificando {phone} (CA) con reintentos...")
-                result = verify_with_retry(f"+{phone}", country_code, retries=3)
-                if result is False:  # Nuevo
-                    available_number = (act_id, phone, country)
-                    logger.debug(f"   ✅ Número {phone} (CA) disponible!")
-                    break
-                else:
-                    logger.debug(f"   ❌ Número {phone} (CA) no disponible o error, cancelando...")
-                    set_status(hero_keys, act_id, 8)
-
-            # 3. Si no se encontró CA disponible, probar otros países
-            if not available_number:
-                for act_id, phone, country in other_numbers:
-                    logger.debug(f"   Verificando {phone} ({country}) con reintentos...")
-                    result = verify_with_retry(f"+{phone}", country_code, retries=3)
-                    if result is False:  # Nuevo
-                        available_number = (act_id, phone, country)
-                        logger.debug(f"   ✅ Número {phone} ({country}) disponible!")
-                        break
-                    else:
-                        logger.debug(f"   ❌ Número {phone} ({country}) no disponible o error, cancelando...")
-                        set_status(hero_keys, act_id, 8)
-
-            # 4. Si no hay disponible, cancelar todos y reintentar
-            if not available_number:
-                for act_id, phone, country in numbers:
-                    try:
-                        set_status(hero_keys, act_id, 8)
-                    except:
-                        pass
-                logger.debug("Todos los números fueron cancelados (registrados o errores), reintentando...")
-                continue
-
-            # 5. Cancelar números no usados
-            for act_id, phone, country in numbers:
-                if (act_id, phone, country) != available_number:
-                    try:
-                        set_status(hero_keys, act_id, 8)
-                        logger.debug(f"  Cancelando número {phone} (no usado)")
-                    except:
-                        pass
-
-            # Usar el número disponible
-            activation_id, sms_phone, purchase_country = available_number
-            logger.debug(f"✅ Número disponible: {sms_phone} (país {purchase_country})")
-            amazon_cc = {
-                'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
-                'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
-            }.get(purchase_country, 'US')
-            logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
-
-            # --- CORRECCIÓN: Usar curl_requests con impersonate ---
-            sess = curl_requests.Session()
-            sess.impersonate = "chrome"
-            sess.headers.update({
-                "User-Agent": info["user_agent"],
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "sec-ch-ua": '"Chromium";v="147", "Not?A_Brand";v="99"',
-                "sec-ch-ua-mobile": "?1",
-                "sec-ch-ua-platform": '"Android"',
-                "DNT": "1",
-            })
-            
-            if proxy:
-                sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
-            
-            # ---------- EMAIL EN PARALELO ----------
-            mail_result = {}
-            mail_thread = threading.Thread(target=new_mail, args=(sess, mail_result))
-            mail_thread.start()
-            
-            sess.get(f"https://www.amazon.com/ax/claim?arb={arb}")
-            mail_thread.join(timeout=10)
-            
-            if "error" in mail_result:
-                raise Exception(f"Error creando email: {mail_result['error']}")
-            
-            email = mail_result.get("email")
-            mail_token = mail_result.get("token")
-            mail_api = mail_result.get("api")
-            
-            if not email:
-                raise Exception("No se pudo obtener email")
-            
-            logger.debug(f"Email listo: {email} ({mail_api})")
-            
-            # ---------- PRIMER POST ----------
-            # ---------- PRIMER POST (con reintentos SSL) ----------
-            data1 = {"arb": arb, "email": email, "claimCollectionLayoutType": "unifiedAuthClaimCollection"}
-            max_retries_req = 3
-            req1 = None
-            for req_attempt in range(1, max_retries_req + 1):
+                # ---------- OBTENER NÚMERO ----------
                 try:
-                    req1 = safe_request(
-                        sess,
-                        "POST",
-                        "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
-                        "&openid.ns=http://specs.openid.net/auth/2.0"
-                        "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
-                        "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
-                        "&openid.assoc_handle=anywhere_v2_us"
-                        "&openid.return_to=https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
-                        data=data1,
-                        headers={"Referer": "https://www.amazon.com/ap/register", "Origin": "https://www.amazon.com"},
-                        max_retries=3
-                    )
-                    break
+                    activation_id, sms_phone, purchase_country = get_number(hero_keys)
+                    logger.debug(f"📞 Número obtenido: {sms_phone} (país {purchase_country})")
                 except Exception as e:
-                    logger.debug(f"  req1 intento {req_attempt}/{max_retries_req} falló: {e}")
-                    if req_attempt == max_retries_req:
-                        raise
+                    logger.warning(f"⚠️ No se pudo obtener número: {e}")
                     time.sleep(2)
+                    continue  # Siguiente número
 
-            if req1 is None or req1.status_code != 200 or "appActionToken" not in req1.text:
-                raise Exception("req1 falló después de reintentos")
-            
-            if req1.status_code != 200 or "appActionToken" not in req1.text:
-                logger.debug(f"Bloqueo en req1 (Status: {req1.status_code})")
-                raise Exception("Proxy bloqueada")
-            
-            appActionToken = find(req1.text, 'name="appActionToken" value="', '"')
-            workflowState = find(req1.text, 'name="workflowState" value="', '"')
-            openid_return_to = find(req1.text, 'name="openid.return_to" value="', '"')
-            prevRID = find(req1.text, 'name="prevRID" value="', '"')
-            
-            # ---------- REGISTRO ----------
-            data2 = {
-                "appActionToken": appActionToken, "appAction": "REGISTER",
-                "shouldShowPersistentLabels": "true", "openid.return_to": openid_return_to,
-                "prevRID": prevRID, "workflowState": workflowState,
-                "customerName": info["full_name"], "email": email,
-                "password": password, "showPasswordChecked": "true"
-            }
-            
-            req2 = safe_request(
-                sess,
-                "POST",
-                "https://www.amazon.com/ap/register",
-                data=data2,
-                headers={"Referer": req1.url, "Origin": "https://www.amazon.com"},
-                max_retries=3
-            )
-            
-            if "already an account" in req2.text:
-                email = None
-                logger.debug("Email ya registrado")
-                continue
+                amazon_cc = {
+                    'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
+                    'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
+                }.get(purchase_country, 'US')
+                logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
+
+                # ---------- CREAR SESIÓN ----------
+                sess = curl_requests.Session()
+                sess.impersonate = "chrome"
+                sess.headers.update({
+                    "User-Agent": info["user_agent"],
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Connection": "keep-alive",
+                    "Upgrade-Insecure-Requests": "1",
+                    "sec-ch-ua": '"Chromium";v="147", "Not?A_Brand";v="99"',
+                    "sec-ch-ua-mobile": "?1",
+                    "sec-ch-ua-platform": '"Android"',
+                    "DNT": "1",
+                })
                 
-            if "detected unusual activity" in req2.text:
-                logger.debug("Actividad inusual - Rotando proxy")
-                continue
-            
-            # ---------- WAF ----------
-            verifyToken = None  # <--- DEFINIR ANTES
-            if "data-context" in req2.text and "data-external-id" in req2.text:
-                logger.debug("* Resolviendo WAF...")
-                verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
-                dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
-                anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+                if proxy:
+                    sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
                 
-                json3 = json.dumps({
-                    "clientData": json.dumps({
-                        "sessionId": sess.cookies.get("session-id", ""),
-                        "marketplaceId": "ATVPDKIKX0DER",
-                        "clientUseCase": "/ap/register"
-                    }, separators=(",", ":")),
-                    "challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1",
-                    "locale": "en-US", "externalId": dataExternalId,
-                    "enableHeaderFooter": False, "enableBypassMechanism": False,
-                    "enableModalView": False, "eventTrigger": None,
-                    "aaExternalToken": None, "forceJsFlush": False,
-                    "aamationToken": None,
-                }, separators=(",", ":"))
+                # ---------- EMAIL EN PARALELO ----------
+                mail_result = {}
+                mail_thread = threading.Thread(target=new_mail, args=(sess, mail_result))
+                mail_thread.start()
                 
-                req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
-                clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
-                aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
-                captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
-                jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
+                sess.get(f"https://www.amazon.com/ax/claim?arb={arb}")
+                mail_thread.join(timeout=10)
                 
-                if not jwt_client_id:
-                    logger.debug("WAF falló")
-                    continue
+                if "error" in mail_result:
+                    raise Exception(f"Error creando email: {mail_result['error']}")
                 
-                logger.debug("WAF PASS")
+                email = mail_result.get("email")
+                mail_token = mail_result.get("token")
+                mail_api = mail_result.get("api")
                 
-                data4 = {
-                    "anti-csrftoken-a2z": anti_csrf,
-                    "cvf_aamation_response_token": jwt_client_id,
-                    "cvf_captcha_captcha_action": "verifyAamationChallenge",
-                    "cvf_aamation_error_code": "",
-                    "clientContext": sess.cookies.get("ubid-main"),
-                    "openid.pape.max_auth_age": "900",
-                    "openid.return_to": "https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
-                    "forceMobileLayout": "1",
-                    "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
-                    "openid.assoc_handle": assoc_handle,
-                    "openid.mode": "checkid_setup",
-                    "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
-                    "pageId": assoc_handle,
-                    "openid.ns": "http://specs.openid.net/auth/2.0",
-                    "shouldShowPersistentLabels": "true",
-                    "verifyToken": verifyToken
-                }
+                if not email:
+                    raise Exception("No se pudo obtener email")
                 
-                req4 = safe_request(
+                logger.debug(f"Email listo: {email} ({mail_api})")
+                
+                # ---------- PRIMER POST ----------
+                data1 = {"arb": arb, "email": email, "claimCollectionLayoutType": "unifiedAuthClaimCollection"}
+                req1 = safe_request(
                     sess,
                     "POST",
-                    "https://www.amazon.com/ap/cvf/verify",
-                    data=data4,
-                    headers={"Content-Type": "application/x-www-form-urlencoded",
-                            "Referer": req2.url, "Origin": "https://www.amazon.com"},
+                    "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
+                    "&openid.ns=http://specs.openid.net/auth/2.0"
+                    "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
+                    "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
+                    "&openid.assoc_handle=anywhere_v2_us"
+                    "&openid.return_to=https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                    data=data1,
+                    headers={"Referer": "https://www.amazon.com/ap/register", "Origin": "https://www.amazon.com"},
                     max_retries=3
                 )
                 
-                verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
-                # Después del bloque WAF
-
-                if not verifyToken:
-                    # Si no hay WAF, intentar obtener verifyToken de req2 (puede estar en otro lugar)
-                    verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
-                    if not verifyToken:
-                        raise Exception("No se pudo obtener verifyToken")
-                    
-            # ---------- OTP EMAIL ----------
-            base_openid = {
-                "forceMobileLayout": "1", "openid.assoc_handle": assoc_handle,
-                "openid.mode": "checkid_setup", "language": "en_US",
-                "openid.ns": "http://specs.openid.net/auth/2.0",
-                "shouldShowPersistentLabels": "true"
-            }
-            
-            otp_code = mail_code(sess, mail_token, mail_api)
-            logger.debug(f"OTP: {otp_code}")
-            
-            data5 = {**base_openid, "autoReadStatus": "manual",
-                    "verificationPageContactType": "email", "action": "code",
-                    "verifyToken": verifyToken, "code": otp_code}
-            
-            req5 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data5)
-            anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
-            verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
-            
-            data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
-                    "verifyToken": verifyToken, "cvf_phone_cc": amazon_cc,
-                    "cvf_phone_num": sms_phone, "cvf_action": "collect"}
-            
-            req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
-            logger.debug("* Esperando SMS...")
-            sms_code = get_code(hero_keys, activation_id)
-            logger.debug(f"SMS Code: {sms_code}")
-            set_status(hero_keys, activation_id, 6)
-            
-            anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
-            verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
-            
-            data7 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
-                    "verificationPageContactType": "sms", "verifyToken": verifyToken,
-                    "code": sms_code, "cvf_action": "code", "resendContactType": "sms"}
-            
-            req7 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data7)
-            
-            if "entered already exists with another account" in req7.text:
-                logger.debug("Número ya registrado")
-                set_status(hero_keys, activation_id, 8) 
-                continue
+                if req1 is None or req1.status_code != 200 or "appActionToken" not in req1.text:
+                    raise Exception("req1 falló")
                 
-            if "new_account=1" not in req7.url:
-                logger.debug("Cuenta no creada")
-                continue
-            
-            # ---------- DIRECCIÓN ----------
-            logger.debug("* Agregando dirección...")
-            
-            csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
-            customer_id = find(req7.text, 'name="address-ui-widgets-obfuscated-customerId" value="', '"')
-            wizard_id = find(req7.text, 'name="address-ui-widgets-address-wizard-interaction-id" value="', '"')
-            prev_token = find(req7.text, 'name="address-ui-widgets-previous-address-form-state-token" value="', '"')
-            widget_csrf = urllib.parse.quote(find(req7.text, 'name="address-ui-widgets-csrfToken" value="', '"'))
-            form_load = find(req7.text, 'name="address-ui-widgets-form-load-start-time" value="', '"')
-            
-            sess.headers.update({
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Origin": "https://www.amazon.com",
-                "Referer": req7.url,
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-User": "?1"
-            })
-            
-            data8 = (
-                f"csrfToken={csrf_addr}&addressID="
-                f"&address-ui-widgets-addressFormButtonText=save"
-                f"&address-ui-widgets-addressFormHideHeading=true"
-                f"&address-ui-widgets-addressFormHideSubmitButton=false"
-                f"&address-ui-widgets-enableAddressDetails=true"
-                f"&address-ui-widgets-enableAddressWizardForm=true"
-                f"&address-ui-widgets-address-wizard-interaction-id={wizard_id}"
-                f"&address-ui-widgets-obfuscated-customerId={customer_id}"
-                f"&address-ui-widgets-csrfToken={widget_csrf}"
-                f"&address-ui-widgets-form-load-start-time={form_load}"
-                f"&address-ui-widgets-isAddressSuggestionsView=true"
-                f"&address-ui-widgets-suggested-address-selection=original-address-"
-                f"&original-address-address-ui-widgets-enterAddressFullName={urllib.parse.quote(info['full_name'])}"
-                f"&original-address-address-ui-widgets-enterAddressLine1={urllib.parse.quote(info['street'])}"
-                f"&original-address-address-ui-widgets-enterAddressLine2="
-                f"&original-address-address-ui-widgets-enterAddressCity={urllib.parse.quote(info['city'])}"
-                f"&original-address-address-ui-widgets-enterAddressStateOrRegion={info['state']}"
-                f"&original-address-address-ui-widgets-enterAddressPostalCode={info['zip']}"
-                f"&original-address-address-ui-widgets-countryCode=US"
-                f"&original-address-address-ui-widgets-enterAddressPhoneNumber={info['phone']}"
-                f"&address-ui-widgets-use-as-my-default=true"
-                f"&address-ui-widgets-previous-address-form-state-token={prev_token}"
-                f"&address-ui-widgets-saveOriginalOrSuggestedAddress=Submit+Query"
-            )
-            
-            sess.post("https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button", data=data8)
-            
-            cookies = "; ".join(f"{k}={v.replace(chr(34), chr(39))}" for k, v in sess.cookies.items())
-            elapsed = round(time.time() - t, 2)
-            
-            logger.debug(f"\n{'='*60}")
-            logger.debug(f"CUENTA CREADA!")
-            logger.debug(f"{'='*60}")
-            logger.debug(f"Email:    {email}")
-            logger.debug(f"Password: {password}")
-            logger.debug(f"Phone:    {sms_phone}")
-            logger.debug(f"Tiempo:   {elapsed}s | Intentos: {intento}")
-            logger.debug(f"{'='*60}")
-            logger.debug(f"COOKIES:")
-            logger.debug(f"{cookies}")
-            logger.debug(f"{'='*60}\n")
-            
-            return {
-                "name": info["full_name"], "phone": sms_phone,
-                "password": password, "email": email,
-                "cookies": cookies, "status": "Cuenta generada!",
-                "response": cookies, "ip": get_current_ip(sess),
-                "time": elapsed, "intentos": intento
-            }
-            
-        except Exception as error:
-            logger.debug(f"Error: {error}")
-            if activation_id:
-                set_status(hero_keys, activation_id, 8)   # cancelar para no cobrar
-            logger.debug(f"Reintentando... (intento {intento}/{max_intentos})")
-            time.sleep(0.1)
-            email = None
-            mail_token = None
-            mail_api = None
-            continue
+                appActionToken = find(req1.text, 'name="appActionToken" value="', '"')
+                workflowState = find(req1.text, 'name="workflowState" value="', '"')
+                openid_return_to = find(req1.text, 'name="openid.return_to" value="', '"')
+                prevRID = find(req1.text, 'name="prevRID" value="', '"')
+                
+                # ---------- REGISTRO ----------
+                data2 = {
+                    "appActionToken": appActionToken, "appAction": "REGISTER",
+                    "shouldShowPersistentLabels": "true", "openid.return_to": openid_return_to,
+                    "prevRID": prevRID, "workflowState": workflowState,
+                    "customerName": info["full_name"], "email": email,
+                    "password": password, "showPasswordChecked": "true"
+                }
+                
+                req2 = safe_request(
+                    sess,
+                    "POST",
+                    "https://www.amazon.com/ap/register",
+                    data=data2,
+                    headers={"Referer": req1.url, "Origin": "https://www.amazon.com"},
+                    max_retries=3
+                )
+                
+                if "already an account" in req2.text:
+                    logger.debug("Email ya registrado")
+                    set_status(hero_keys, activation_id, 8)
+                    continue  # Siguiente número (con nuevo email)
+                    
+                if "detected unusual activity" in req2.text:
+                    logger.debug("Actividad inusual - Rotando proxy en siguiente intento externo")
+                    set_status(hero_keys, activation_id, 8)
+                    break  # Sale del bucle interno, va al siguiente proxy
+                
+                # ---------- WAF ----------
+                verifyToken = None
+                if "data-context" in req2.text and "data-external-id" in req2.text:
+                    logger.debug("* Resolviendo WAF...")
+                    verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                    dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
+                    anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+                    
+                    json3 = json.dumps({
+                        "clientData": json.dumps({
+                            "sessionId": sess.cookies.get("session-id", ""),
+                            "marketplaceId": "ATVPDKIKX0DER",
+                            "clientUseCase": "/ap/register"
+                        }, separators=(",", ":")),
+                        "challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1",
+                        "locale": "en-US", "externalId": dataExternalId,
+                        "enableHeaderFooter": False, "enableBypassMechanism": False,
+                        "enableModalView": False, "eventTrigger": None,
+                        "aaExternalToken": None, "forceJsFlush": False,
+                        "aamationToken": None,
+                    }, separators=(",", ":"))
+                    
+                    req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
+                    clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
+                    aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
+                    captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
+                    jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
+                    
+                    if not jwt_client_id:
+                        logger.debug("WAF falló")
+                        set_status(hero_keys, activation_id, 8)
+                        continue  # Siguiente número
+                    
+                    logger.debug("WAF PASS")
+                    
+                    data4 = {
+                        "anti-csrftoken-a2z": anti_csrf,
+                        "cvf_aamation_response_token": jwt_client_id,
+                        "cvf_captcha_captcha_action": "verifyAamationChallenge",
+                        "cvf_aamation_error_code": "",
+                        "clientContext": sess.cookies.get("ubid-main"),
+                        "openid.pape.max_auth_age": "900",
+                        "openid.return_to": "https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                        "forceMobileLayout": "1",
+                        "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
+                        "openid.assoc_handle": assoc_handle,
+                        "openid.mode": "checkid_setup",
+                        "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
+                        "pageId": assoc_handle,
+                        "openid.ns": "http://specs.openid.net/auth/2.0",
+                        "shouldShowPersistentLabels": "true",
+                        "verifyToken": verifyToken
+                    }
+                    
+                    req4 = safe_request(
+                        sess,
+                        "POST",
+                        "https://www.amazon.com/ap/cvf/verify",
+                        data=data4,
+                        headers={"Content-Type": "application/x-www-form-urlencoded",
+                                "Referer": req2.url, "Origin": "https://www.amazon.com"},
+                        max_retries=3
+                    )
+                    
+                    verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
+                    if not verifyToken:
+                        verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                        if not verifyToken:
+                            raise Exception("No se pudo obtener verifyToken")
+                
+                # ---------- OTP EMAIL ----------
+                base_openid = {
+                    "forceMobileLayout": "1", "openid.assoc_handle": assoc_handle,
+                    "openid.mode": "checkid_setup", "language": "en_US",
+                    "openid.ns": "http://specs.openid.net/auth/2.0",
+                    "shouldShowPersistentLabels": "true"
+                }
+                
+                otp_code = mail_code(sess, mail_token, mail_api)
+                logger.debug(f"OTP: {otp_code}")
+                
+                data5 = {**base_openid, "autoReadStatus": "manual",
+                        "verificationPageContactType": "email", "action": "code",
+                        "verifyToken": verifyToken, "code": otp_code}
+                
+                req5 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data5)
+                anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
+                verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
+                
+                data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
+                        "verifyToken": verifyToken, "cvf_phone_cc": amazon_cc,
+                        "cvf_phone_num": sms_phone, "cvf_action": "collect"}
+                
+                req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
+                logger.debug("* Esperando SMS...")
+                sms_code = get_code(hero_keys, activation_id)
+                logger.debug(f"SMS Code: {sms_code}")
+                set_status(hero_keys, activation_id, 6)
+                
+                anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
+                verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
+                
+                data7 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
+                        "verificationPageContactType": "sms", "verifyToken": verifyToken,
+                        "code": sms_code, "cvf_action": "code", "resendContactType": "sms"}
+                
+                req7 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data7)
+                
+                if "entered already exists with another account" in req7.text:
+                    logger.debug("Número ya registrado")
+                    set_status(hero_keys, activation_id, 8)
+                    continue  # 🔁 Reinicia el bucle interno con otro número (sin cambiar proxy)
+                    
+                if "new_account=1" not in req7.url:
+                    logger.debug("Cuenta no creada")
+                    set_status(hero_keys, activation_id, 8)
+                    continue  # 🔁 Otro número
+                
+                # ---------- DIRECCIÓN ----------
+                logger.debug("* Agregando dirección...")
+                
+                csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
+                customer_id = find(req7.text, 'name="address-ui-widgets-obfuscated-customerId" value="', '"')
+                wizard_id = find(req7.text, 'name="address-ui-widgets-address-wizard-interaction-id" value="', '"')
+                prev_token = find(req7.text, 'name="address-ui-widgets-previous-address-form-state-token" value="', '"')
+                widget_csrf = urllib.parse.quote(find(req7.text, 'name="address-ui-widgets-csrfToken" value="', '"'))
+                form_load = find(req7.text, 'name="address-ui-widgets-form-load-start-time" value="', '"')
+                
+                sess.headers.update({
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://www.amazon.com",
+                    "Referer": req7.url,
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1"
+                })
+                
+                data8 = (
+                    f"csrfToken={csrf_addr}&addressID="
+                    f"&address-ui-widgets-addressFormButtonText=save"
+                    f"&address-ui-widgets-addressFormHideHeading=true"
+                    f"&address-ui-widgets-addressFormHideSubmitButton=false"
+                    f"&address-ui-widgets-enableAddressDetails=true"
+                    f"&address-ui-widgets-enableAddressWizardForm=true"
+                    f"&address-ui-widgets-address-wizard-interaction-id={wizard_id}"
+                    f"&address-ui-widgets-obfuscated-customerId={customer_id}"
+                    f"&address-ui-widgets-csrfToken={widget_csrf}"
+                    f"&address-ui-widgets-form-load-start-time={form_load}"
+                    f"&address-ui-widgets-isAddressSuggestionsView=true"
+                    f"&address-ui-widgets-suggested-address-selection=original-address-"
+                    f"&original-address-address-ui-widgets-enterAddressFullName={urllib.parse.quote(info['full_name'])}"
+                    f"&original-address-address-ui-widgets-enterAddressLine1={urllib.parse.quote(info['street'])}"
+                    f"&original-address-address-ui-widgets-enterAddressLine2="
+                    f"&original-address-address-ui-widgets-enterAddressCity={urllib.parse.quote(info['city'])}"
+                    f"&original-address-address-ui-widgets-enterAddressStateOrRegion={info['state']}"
+                    f"&original-address-address-ui-widgets-enterAddressPostalCode={info['zip']}"
+                    f"&original-address-address-ui-widgets-countryCode=US"
+                    f"&original-address-address-ui-widgets-enterAddressPhoneNumber={info['phone']}"
+                    f"&address-ui-widgets-use-as-my-default=true"
+                    f"&address-ui-widgets-previous-address-form-state-token={prev_token}"
+                    f"&address-ui-widgets-saveOriginalOrSuggestedAddress=Submit+Query"
+                )
+                
+                sess.post("https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button", data=data8)
+                
+                cookies = "; ".join(f"{k}={v.replace(chr(34), chr(39))}" for k, v in sess.cookies.items())
+                elapsed = round(time.time() - t, 2)
+                
+                logger.debug(f"\n{'='*60}")
+                logger.debug(f"CUENTA CREADA!")
+                logger.debug(f"{'='*60}")
+                logger.debug(f"Email:    {email}")
+                logger.debug(f"Password: {password}")
+                logger.debug(f"Phone:    {sms_phone}")
+                logger.debug(f"Tiempo:   {elapsed}s | Intentos Ext: {intento} | NumIntent: {num_attempt}")
+                logger.debug(f"{'='*60}")
+                logger.debug(f"COOKIES:")
+                logger.debug(f"{cookies}")
+                logger.debug(f"{'='*60}\n")
+                
+                return {
+                    "name": info["full_name"], "phone": sms_phone,
+                    "password": password, "email": email,
+                    "cookies": cookies, "status": "Cuenta generada!",
+                    "response": cookies, "ip": get_current_ip(sess),
+                    "time": elapsed, "intentos": intento,
+                    "num_attempts": num_attempt
+                }
+                
+            except Exception as error:
+                logger.debug(f"Error en intento interno #{num_attempt}: {error}")
+                if activation_id:
+                    set_status(hero_keys, activation_id, 8)
+                # Si es error de proxy (actividad inusual), salimos del bucle interno
+                if "AMAZON_BLOCKED_ACCOUNT" in str(error) or "detected unusual activity" in str(error):
+                    logger.debug("🚫 Actividad inusual, cambiando de proxy en el siguiente intento externo")
+                    break
+                else:
+                    # Otro error, intentar con otro número
+                    continue
+        
+        # Si llegamos aquí, se agotaron los intentos internos para este proxy
+        logger.debug(f"Se agotaron {max_num_intentos} números para el proxy actual, cambiando de proxy...")
     
-    raise Exception(f"Se agotaron los {max_intentos} intentos")
-
-
+    raise Exception(f"Se agotaron los {max_intentos} intentos externos")
 
 # -------------------------------------------------------------------
 # MAPA DE PAÍSES A DOMINIOS Y URLS BASE
