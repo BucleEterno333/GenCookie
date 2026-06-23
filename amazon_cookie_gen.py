@@ -242,6 +242,22 @@ hero_country_map = {
     'MX': 54,    # México +52
 }
 
+
+def verify_with_retry(phone, country_code, retries=3):
+    """
+    Verifica un número con reintentos en caso de error.
+    Retorna True (registrado), False (disponible) o None (fallo total).
+    """
+    for attempt in range(1, retries + 1):
+        result = is_phone_registered_sync(phone, country_code)
+        if result is not None:
+            return result  # Éxito: True o False
+        logger.warning(f"   ⚠️ Intento {attempt}/{retries} falló para {phone}, reintentando en 2s...")
+        time.sleep(2)
+    return None  # Fallo total
+
+
+
 def _is_banned_response(text: str) -> bool:
     """Detecta si la respuesta de Hero SMS es un BANNED."""
     try:
@@ -355,6 +371,9 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
             return jwt_client_id
     raise Exception("WAF Failed After 5 Attempts")
 
+
+
+
 def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
     """
     Obtiene número SMS probando países en orden y keys en orden.
@@ -403,11 +422,10 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
         # Si la key fue baneada o se agotaron los países, pasar a la siguiente key
         if key_banned:
             continue
-        # Si no se encontró número con esta key (sin banned), también pasa a la siguiente
-        # (pero si no hubo banned, y no se encontró número, probablemente no hay números disponibles)
 
     raise Exception("No se pudo obtener número con ninguna key (todas baneadas o sin saldo)")
-def get_code(keys, activation_id: str, timeout: int = 120) -> str:
+
+def get_code(keys, activation_id: str, timeout: int = 125) -> str:
     if isinstance(keys, str):
         keys = [keys]
 
@@ -424,6 +442,9 @@ def get_code(keys, activation_id: str, timeout: int = 120) -> str:
                     return r.split(":")[1].strip()
                 if r == "STATUS_CANCEL":
                     raise Exception("SMS activation canceled")
+                if "NO_BALANCE" in r:
+                    logger.warning(f"⚠️ Key {key[:4]} sin saldo, probando siguiente...")
+                    break
             except Exception as e:
                 logger.debug(f"Error en get_code con key {key[:4]}: {e}")
             time.sleep(5)
@@ -573,12 +594,10 @@ import traceback
 from playwright.sync_api import sync_playwright
 
 
-
 def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> Optional[bool]:
     """
     Verifica si un número ya está registrado en Amazon.
-    Versión simple: va a amazon.com.mx, hace clic en 'Cuenta y Listas' (nav-link-accountList),
-    llena el email, y detecta si aparece campo de contraseña o de registro.
+    Versión mejorada con reintentos, detección por texto y manejo de errores.
     Retorna: True=registrado, False=nuevo, None=error
     """
     logger.debug(f"📞 Verificando número {phone_number}...")
@@ -589,10 +608,7 @@ def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> Opt
         logger.error("❌ Playwright no instalado")
         return None
 
-    # Siempre usar amazon.com.mx para la verificación
     base_url = "https://www.amazon.com.mx"
-
-    # Configurar proxy si existe
     proxy_config = None
     if PROXY_HOST_PORT:
         proxy_config = {'server': f'http://{PROXY_HOST_PORT}'}
@@ -601,80 +617,104 @@ def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> Opt
             proxy_config['username'] = user
             proxy_config['password'] = pwd
 
-    try:
-        with sync_playwright() as p:
-            launch_opts = {
-                'headless': True,
-                'args': [
-                    '--no-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-web-security'
-                ]
-            }
-            if proxy_config:
-                launch_opts['proxy'] = proxy_config
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with sync_playwright() as p:
+                launch_opts = {
+                    'headless': True,
+                    'args': [
+                        '--no-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-web-security'
+                    ]
+                }
+                if proxy_config:
+                    launch_opts['proxy'] = proxy_config
 
-            browser = p.chromium.launch(**launch_opts)
-            context = browser.new_context(
-                viewport={'width': 1280, 'height': 720},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
-            )
-            page = context.new_page()
+                browser = p.chromium.launch(**launch_opts)
+                context = browser.new_context(
+                    viewport={'width': 1280, 'height': 720},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
+                )
+                page = context.new_page()
 
-            # 1. Ir a amazon.com.mx
-            logger.debug(f"   🌐 Navegando a {base_url}...")
-            page.goto(base_url, wait_until='domcontentloaded', timeout=30000)
-            page.wait_for_timeout(2000)
-
-            # 2. Hacer clic en "Cuenta y Listas" (selector fijo)
-            logger.debug("   👤 Haciendo clic en #nav-link-accountList...")
-            try:
-                page.click('#nav-link-accountList', timeout=15000)
+                # 1. Ir a amazon.com.mx
+                logger.debug(f"   🌐 Navegando a {base_url}...")
+                page.goto(base_url, wait_until='domcontentloaded', timeout=30000)
                 page.wait_for_timeout(2000)
-            except Exception as e:
-                logger.warning(f"   ⚠️ No se pudo hacer clic en #nav-link-accountList: {e}")
-                browser.close()
-                return None
 
-            # 3. Llenar el campo de email
-            logger.debug(f"   📱 Ingresando número: {phone_number}")
-            try:
-                # Esperar el campo de email (#ap_email_login)
-                email_field = page.wait_for_selector('#ap_email, #ap_email_login', state='visible', timeout=10000)
-                if not email_field:
-                    raise Exception("No se encontró campo de email")
-                email_field.fill(phone_number)
-                page.wait_for_timeout(1000)
-                page.click('#continue', timeout=5000)
+                # 2. Hacer clic en "Cuenta y Listas"
+                logger.debug("   👤 Haciendo clic en #nav-link-accountList...")
+                try:
+                    page.click('#nav-link-accountList', timeout=15000)
+                    page.wait_for_timeout(2000)
+                except Exception as e:
+                    logger.warning(f"   ⚠️ No se pudo hacer clic en #nav-link-accountList: {e}")
+                    browser.close()
+                    if attempt < max_attempts:
+                        time.sleep(2)
+                        continue
+                    return None
 
-            except Exception as e:
-                logger.warning(f"   ⚠️ Error al llenar email: {e}")
-                browser.close()
-                return None
+                # 3. Llenar el campo de email
+                logger.debug(f"   📱 Ingresando número: {phone_number}")
+                try:
+                    email_field = page.wait_for_selector('#ap_email, #ap_email_login', state='visible', timeout=10000)
+                    if not email_field:
+                        raise Exception("No se encontró campo de email")
+                    email_field.fill(phone_number)
+                    page.wait_for_timeout(1000)
+                    page.click('#continue', timeout=5000)
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Error al llenar email: {e}")
+                    browser.close()
+                    if attempt < max_attempts:
+                        time.sleep(2)
+                        continue
+                    return None
 
-            # 4. Esperar a que la página procese
-            page.wait_for_timeout(6000)
-            content = page.content()
-            # 🆕 Primero, detectar por texto exacto (más rápido y fiable)
-            if "Parece que eres nuevo en Amazon." in content:
-                logger.debug(f"   ✅ Número {phone_number} NUEVO (disponible)")
+                # 4. Esperar y detectar estado por texto
+                page.wait_for_timeout(6000)
+                content = page.content()
+
+                # Detección por texto exacto
+                if "Parece que eres nuevo en Amazon." in content:
+                    logger.debug(f"   ✅ Número {phone_number} NUEVO (disponible)")
+                    browser.close()
+                    return False
+
+                if "¿Ya tienes una cuenta?" in content or "Para iniciar sesión, ingresa tu contraseña." in content:
+                    logger.debug(f"   ✅ Número {phone_number} YA REGISTRADO")
+                    browser.close()
+                    return True
+
+                # Fallback a selectores
+                if page.query_selector('#ap_password'):
+                    logger.debug(f"   ✅ Número {phone_number} YA REGISTRADO (selector)")
+                    browser.close()
+                    return True
+
+                if page.query_selector('#ap_customer_name'):
+                    logger.debug(f"   ✅ Número {phone_number} NUEVO (selector)")
+                    browser.close()
+                    return False
+
+                # Si no se detecta nada, asumir nuevo
+                logger.warning(f"   ⚠️ Estado desconocido, asumiendo NUEVO")
                 browser.close()
                 return False
 
-            if "¿Ya tienes una cuenta?" in content or "Para iniciar sesión, ingresa tu contraseña." in content or "contraseña" in content:
-                logger.debug(f"   ✅ Número {phone_number} YA REGISTRADO")
-                browser.close()
-                return True
+        except Exception as e:
+            logger.error(f"❌ Error en intento {attempt}/{max_attempts} para {phone_number}: {e}")
+            if attempt < max_attempts:
+                time.sleep(2)
+            else:
+                return None
 
-            # Caso desconocido: asumir nuevo
-            logger.warning(f"   ⚠️ Estado desconocido, asumiendo usado")
-            browser.close()
-            return True
+    return None  # Fallo total
 
-    except Exception as e:
-        logger.error(f"❌ Error en is_phone_registered_sync: {e}")
-        return None
 async def is_phone_registered(phone_number, country_code='US'):
     """
     Verifica si un número de teléfono ya está registrado en Amazon.
@@ -805,49 +845,46 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
             if not numbers:
                 raise Exception("No se pudo obtener ningún número")
 
-            # ---------- VERIFICAR NÚMEROS EN PARALELO ----------
+            # ---------- VERIFICAR NÚMEROS (CON REINTENTOS Y PRIORIDAD CA) ----------
             available_number = None
             logger.debug("🔄 Iniciando verificación de números...")
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                future_to_number = {
-                    executor.submit(is_phone_registered_sync, f"+{phone}", country_code): (act_id, phone, country)
-                    for act_id, phone, country in numbers
-                }
-                for future in concurrent.futures.as_completed(future_to_number):
-                    act_id, phone, country = future_to_number[future]
-                    try:
-                        result = future.result(timeout=60)
-                        if result is None:
-                            logger.warning(f"   ⚠️ Error al verificar {phone}, cancelando...")
-                            set_status(hero_keys, act_id, 8)
-                        elif result is True:
-                            logger.debug(f"   ❌ Número {phone} ya registrado, cancelando...")
-                            set_status(hero_keys, act_id, 8)
-                        else:
-                            # Número disponible
-                            available_number = (act_id, phone, country)
-                            logger.debug(f"   ✅ Número {phone} disponible!")
-                            break
-                    except Exception as e:
-                        logger.error(f"   ❌ Excepción verificando {phone}: {e}")
+            # 1. Clasificar números: CA primero, luego los demás
+            ca_numbers = []
+            other_numbers = []
+            for act_id, phone, country in numbers:
+                if country == 'CA':
+                    ca_numbers.append((act_id, phone, country))
+                else:
+                    other_numbers.append((act_id, phone, country))
+
+            # 2. Verificar CA primero
+            for act_id, phone, country in ca_numbers:
+                logger.debug(f"   Verificando {phone} (CA) con reintentos...")
+                result = verify_with_retry(f"+{phone}", country_code, retries=3)
+                if result is False:  # Nuevo
+                    available_number = (act_id, phone, country)
+                    logger.debug(f"   ✅ Número {phone} (CA) disponible!")
+                    break
+                else:
+                    logger.debug(f"   ❌ Número {phone} (CA) no disponible o error, cancelando...")
+                    set_status(hero_keys, act_id, 8)
+
+            # 3. Si no se encontró CA disponible, probar otros países
+            if not available_number:
+                for act_id, phone, country in other_numbers:
+                    logger.debug(f"   Verificando {phone} ({country}) con reintentos...")
+                    result = verify_with_retry(f"+{phone}", country_code, retries=3)
+                    if result is False:  # Nuevo
+                        available_number = (act_id, phone, country)
+                        logger.debug(f"   ✅ Número {phone} ({country}) disponible!")
+                        break
+                    else:
+                        logger.debug(f"   ❌ Número {phone} ({country}) no disponible o error, cancelando...")
                         set_status(hero_keys, act_id, 8)
 
-            # ---------- MANEJAR RESULTADO DE LA VERIFICACIÓN ----------
-            if available_number:
-                # Cancelar los números no usados
-                for act_id, phone, country in numbers:
-                    if (act_id, phone, country) != available_number:
-                        try:
-                            set_status(hero_keys, act_id, 8)
-                            logger.debug(f"  Cancelando número {phone} (no usado)")
-                        except:
-                            pass
-                # Usar el número disponible
-                activation_id, sms_phone, purchase_country = available_number
-                logger.debug(f"✅ Número disponible: {sms_phone} (país {purchase_country})")
-            else:
-                # Cancelar todos los números y reintentar
+            # 4. Si no hay disponible, cancelar todos y reintentar
+            if not available_number:
                 for act_id, phone, country in numbers:
                     try:
                         set_status(hero_keys, act_id, 8)
@@ -855,7 +892,19 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         pass
                 logger.debug("Todos los números fueron cancelados (registrados o errores), reintentando...")
                 continue
-                        
+
+            # 5. Cancelar números no usados
+            for act_id, phone, country in numbers:
+                if (act_id, phone, country) != available_number:
+                    try:
+                        set_status(hero_keys, act_id, 8)
+                        logger.debug(f"  Cancelando número {phone} (no usado)")
+                    except:
+                        pass
+
+            # Usar el número disponible
+            activation_id, sms_phone, purchase_country = available_number
+            logger.debug(f"✅ Número disponible: {sms_phone} (país {purchase_country})")
             amazon_cc = {
                 'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
                 'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
