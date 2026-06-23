@@ -522,17 +522,21 @@ from playwright.sync_api import sync_playwright  # o async, pero usaremos sync p
 import traceback
 from playwright.sync_api import sync_playwright
 
-def is_phone_registered_sync(phone_number: str) -> bool:
+def is_phone_registered_sync(phone_number: str, country_code: str = 'MX') -> bool:
     """
-    Verifica si un número ya está registrado en Amazon (versión síncrona).
+    Verifica si un número ya está registrado en Amazon.
+    Replica el flujo de navegación de la función principal (paso 7.5).
     Retorna True si está registrado, False si es nuevo.
     """
-    logger.debug(f"📞 Verificando número {phone_number}...")
+    logger.debug(f"📞 Verificando número {phone_number} en {country_code}...")
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        logger.error("❌ Playwright no instalado. No se puede verificar.")
+        logger.error("❌ Playwright no instalado")
         return False
+
+    # Obtener la URL base del país
+    base_url = base_urls.get(country_code, 'https://www.amazon.com.mx')
 
     # Configurar proxy si existe
     proxy_config = None
@@ -542,69 +546,121 @@ def is_phone_registered_sync(phone_number: str) -> bool:
             user, pwd = PROXY_AUTH.split(':', 1)
             proxy_config['username'] = user
             proxy_config['password'] = pwd
-        logger.debug(f"   🌐 Usando proxy: {PROXY_HOST_PORT}")
 
     try:
         with sync_playwright() as p:
-            logger.debug("   🎬 Iniciando Playwright...")
-            launch_options = {
+            launch_opts = {
                 'headless': True,
                 'args': [
-                    '--disable-web-security',
-                    '--disable-features=IsolateOrigins,site-per-process',
                     '--no-sandbox',
-                    '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
-                    '--disable-gpu'
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-web-security'
                 ]
             }
             if proxy_config:
-                launch_options['proxy'] = proxy_config
+                launch_opts['proxy'] = proxy_config
 
-            browser = p.chromium.launch(**launch_options)
+            browser = p.chromium.launch(**launch_opts)
             context = browser.new_context(
                 viewport={'width': 1280, 'height': 720},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
             )
             page = context.new_page()
-            logger.debug("   🌐 Navegando a Amazon login...")
 
-            # Ir a login
-            page.goto("https://www.amazon.com/ap/signin", timeout=30000)
-            # Esperar que el campo esté visible antes de llenar
-            page.wait_for_selector('#ap_email', state='visible', timeout=10000)
-            page.fill('#ap_email', phone_number)
-            page.click('#continue')
+            # ----- PASO 1: Navegar a la página principal -----
+            logger.debug(f"   🌐 Navegando a {base_url}...")
+            page.goto(base_url, wait_until='domcontentloaded', timeout=30000)
+
+            # Esperar un poco para que cargue
+            page.wait_for_timeout(2000)
+
+            # Intentar cerrar overlays (cookies, etc.)
+            close_buttons = [
+                'button:has-text("Aceptar")',
+                'button:has-text("Aceptar cookies")',
+                'button:has-text("Continuar")',
+                'button:has-text("Cerrar")',
+                'button[aria-label="Cerrar"]',
+                'button[aria-label="Close"]'
+            ]
+            for selector in close_buttons:
+                try:
+                    element = page.wait_for_selector(selector, timeout=2000)
+                    if element:
+                        element.click()
+                        page.wait_for_timeout(500)
+                except:
+                    pass
+
+            # ----- PASO 2: Buscar y hacer clic en "Hola, identifícate" o similar -----
+            login_selectors = [
+                '#nav-link-accountList',
+                'a[data-nav-role="signin"]',
+                'a.nav-a.nav-a-2[href*="/ap/signin"]',
+                'a:has-text("Hola, identifícate")',
+                'a:has-text("Cuenta y Listas")',
+                'a[href*="/ap/signin"]'
+            ]
+            clicked = False
+            for selector in login_selectors:
+                try:
+                    page.wait_for_selector(selector, state='visible', timeout=5000)
+                    page.click(selector)
+                    logger.debug(f"   👤 Clic en selector: {selector}")
+                    clicked = True
+                    break
+                except:
+                    continue
+
+            if not clicked:
+                # Último recurso: ir directamente a login (pero con la URL correcta)
+                login_url = f"{base_url}/ap/signin?openid.return_to={base_url}%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_{country_code.lower()}&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
+                page.goto(login_url, wait_until='domcontentloaded', timeout=30000)
+                logger.debug("   ⚠️ Navegación directa a login")
+            else:
+                # Esperar que la página de login cargue
+                page.wait_for_timeout(3000)
+
+            # ----- PASO 3: Ingresar número de teléfono -----
+            logger.debug(f"   📱 Ingresando número: {phone_number}")
+            try:
+                page.wait_for_selector('#ap_email', state='visible', timeout=10000)
+                page.fill('#ap_email', phone_number)
+                page.click('#continue')
+            except Exception as e:
+                logger.warning(f"   ⚠️ Error al llenar email: {e}")
+                browser.close()
+                return False  # Asumir nuevo
+
+            # Esperar a que la página procese
             page.wait_for_timeout(3000)
 
-            # Detectar estado
+            # ----- PASO 4: Detectar estado -----
             if page.query_selector('#ap_password'):
-                browser.close()
                 logger.debug(f"   ✅ Número {phone_number} YA REGISTRADO")
-                return True
-            if page.query_selector('#ap_customer_name'):
                 browser.close()
+                return True
+
+            if page.query_selector('#ap_customer_name'):
                 logger.debug(f"   ✅ Número {phone_number} NUEVO (disponible)")
+                browser.close()
                 return False
 
             content = page.content()
             if "No hemos podido encontrar una cuenta" in content or "We cannot find an account" in content:
-                browser.close()
                 logger.debug(f"   ✅ Número {phone_number} NUEVO (no existe)")
+                browser.close()
                 return False
 
-            # Si hay captcha o algo inesperado, asumir que NO está registrado (para no perder oportunidad)
+            # Si hay captcha o algo inesperado, asumir nuevo
             logger.warning(f"   ⚠️ Estado desconocido para {phone_number}, asumiendo nuevo")
             browser.close()
             return False
 
     except Exception as e:
         logger.error(f"❌ Error en is_phone_registered_sync para {phone_number}: {e}")
-        logger.error(traceback.format_exc())
         return False  # Asumir nuevo para no bloquear
-    
-
-
 async def is_phone_registered(phone_number, country_code='US'):
     """
     Verifica si un número de teléfono ya está registrado en Amazon.
@@ -732,7 +788,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                         act_id, phone, country = future.result()
                         numbers.append((act_id, phone, country))
                     except Exception as e:
-                        print(f"Error obteniendo número: {e}")
+                        logger.debug(f"Error obteniendo número: {e}")
             
             if not numbers:
                 raise Exception("No se pudo obtener ningún número")
@@ -745,7 +801,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             for act_id, phone, country in numbers:
                 logger.debug(f"   Verificando {phone} (país {country})...")
                 try:
-                    if not is_phone_registered_sync(f"+{phone}"):
+                    if not is_phone_registered_sync(f"+{phone}", country_code):
                         available_number = (act_id, phone, country)
                         logger.debug(f"   ✅ Número {phone} disponible!")
                         break
@@ -773,13 +829,13 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             # Si encontramos uno disponible, usarlo
             if available_number:
                 activation_id, sms_phone, purchase_country = available_number
-                print(f"✅ Número disponible: {sms_phone} (país {purchase_country})")
+                logger.debug(f"✅ Número disponible: {sms_phone} (país {purchase_country})")
                 # Cancelar los otros números (los que no se van a usar)
                 for act_id, phone, country in numbers:
                     if (act_id, phone, country) != available_number:
                         try:
                             set_status(hero_key, act_id, 8)  # cancelar y reembolsar
-                            print(f"  Cancelando número {phone} (no usado)")
+                            logger.debug(f"  Cancelando número {phone} (no usado)")
                         except:
                             pass
             else:
@@ -787,10 +843,10 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 for act_id, phone, country in numbers:
                     try:
                         set_status(hero_key, act_id, 8)
-                        print(f"  Cancelando número {phone} (todos registrados)")
+                        logger.debug(f"  Cancelando número {phone} (todos registrados)")
                     except:
                         pass
-                print("Todos los números estaban registrados, reintentando...")
+                logger.debug("Todos los números estaban registrados, reintentando...")
                 continue
             
             
@@ -906,6 +962,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 continue
             
             # ---------- WAF ----------
+            verifyToken = None  # <--- DEFINIR ANTES
             if "data-context" in req2.text and "data-external-id" in req2.text:
                 logger.debug("* Resolviendo WAF...")
                 verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
@@ -968,7 +1025,14 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 )
                 
                 verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
-            
+                # Después del bloque WAF
+
+                if not verifyToken:
+                    # Si no hay WAF, intentar obtener verifyToken de req2 (puede estar en otro lugar)
+                    verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                    if not verifyToken:
+                        raise Exception("No se pudo obtener verifyToken")
+                    
             # ---------- OTP EMAIL ----------
             base_openid = {
                 "forceMobileLayout": "1", "openid.assoc_handle": assoc_handle,
