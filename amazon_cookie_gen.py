@@ -67,11 +67,15 @@ API_KEY = os.getenv('API_KEY', '')
 FIVESIM_API_KEY = os.getenv('FIVESIM_API_KEY', '')
 SERVICE_API_KEY = os.getenv('SERVICE_API_KEY', '')
 API_BASE_URL = os.getenv('API_BASE_URL', '')
+HERO_SMS_API_KEY_BACKUP  = os.getenv('HERO_SMS_API_KAYY', '')
+HERO_SMS_KEYS = [k for k in [HERO_SMS_API_KEY, HERO_SMS_API_KEY_BACKUP] if k]
+
 # ----- Timeouts configurables (en segundos) -----
 WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10'))          # Espera general para elementos
 NAVIGATION_TIMEOUT = int(os.getenv('NAVIGATION_TIMEOUT', '60'))  # Espera de navegación
 ACTION_TIMEOUT = int(os.getenv('ACTION_TIMEOUT', '5'))          # Espera para acciones específicas (clics, llenado)
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '10'))               # Reintentos globales
+
 
 # Opción para reducir calidad de capturas (si se usa)
 SCREENSHOT_QUALITY = int(os.getenv('SCREENSHOT_QUALITY', '30'))  # Calidad JPEG (0-100)
@@ -238,6 +242,14 @@ hero_country_map = {
     'MX': 54,    # México +52
 }
 
+def _is_banned_response(text: str) -> bool:
+    """Detecta si la respuesta de Hero SMS es un BANNED."""
+    try:
+        data = json.loads(text)
+        return data.get('title') == 'BANNED'
+    except:
+        return False
+
 def extract_hidden_inputs(html):
     """Extrae todos los inputs ocultos de un formulario HTML."""
     soup = BeautifulSoup(html, 'html.parser')
@@ -343,59 +355,89 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
             return jwt_client_id
     raise Exception("WAF Failed After 5 Attempts")
 
-
-def get_number(api_key: str, country_code: str = None) -> Tuple[str, str, str]:
+def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
     """
-    Obtiene número SMS probando países en el orden de HERO_COUNTRY_ORDER.
-    Si country_code se especifica, lo prueba primero.
-    Retorna (activation_id, phone, country_used) o lanza excepción.
+    Obtiene número SMS probando países en orden y keys en orden.
+    keys puede ser una lista de strings o un solo string.
+    Retorna (activation_id, phone, country_used).
     """
-    # Asegúrate de tener definido HERO_COUNTRY_ORDER y hero_country_map al inicio del archivo
-    if country_code:
-        countries_to_try = [country_code] + [c for c in HERO_COUNTRY_ORDER if c != country_code]
-    else:
-        countries_to_try = HERO_COUNTRY_ORDER
+    if isinstance(keys, str):
+        keys = [keys]
 
-    for iso_code in countries_to_try:
-        hero_country_num = hero_country_map.get(iso_code)
-        if not hero_country_num:
-            logger.debug(f"  ⚠️ País {iso_code} no mapeado en Hero SMS, saltando...")
-            continue
+    for key in keys:
+        if country_code:
+            countries_to_try = [country_code] + [c for c in HERO_COUNTRY_ORDER if c != country_code]
+        else:
+            countries_to_try = HERO_COUNTRY_ORDER
 
-        url = f"{_SMS_API}?api_key={api_key}&action=getNumber&service=am&country={hero_country_num}"
-        logger.debug(f"  📞 Intentando país {iso_code} (código {hero_country_num})...")
+        for iso_code in countries_to_try:
+            hero_country_num = hero_country_map.get(iso_code)
+            if not hero_country_num:
+                continue
+
+            url = f"{_SMS_API}?api_key={key}&action=getNumber&service=am&country={hero_country_num}"
+            logger.debug(f"  📞 Intentando país {iso_code} (código {hero_country_num}) con key {key[:4]}...")
+            try:
+                r = requests.get(url, timeout=30).text
+
+                if _is_banned_response(r):
+                    logger.warning(f"⚠️ Key {key[:4]} baneada, pasando a la siguiente...")
+                    break   # sale del bucle de países para probar la siguiente key
+
+                if r.startswith("ACCESS_NUMBER"):
+                    _, activation_id, phone = r.split(":")
+                    phone = phone.strip()
+                    phone = phone.lstrip("1") if phone.startswith("1") and len(phone) == 11 else phone
+                    logger.debug(f"  ✅ Número obtenido: {phone} (país {iso_code}) con key {key[:4]}")
+                    return activation_id, phone, iso_code
+                else:
+                    logger.debug(f"  ❌ Falló para {iso_code}: {r[:80]}")
+            except Exception as e:
+                logger.debug(f"  ❌ Error en {iso_code}: {e}")
+        # Si se agotaron los países con esta key, pasa a la siguiente key
+
+    raise Exception("No se pudo obtener número con ninguna key")
+
+
+def get_code(keys, activation_id: str, timeout: int = 120) -> str:
+    if isinstance(keys, str):
+        keys = [keys]
+
+    for key in keys:
+        start = time.time()
+        while time.time() - start < timeout:
+            url = f"{_SMS_API}?api_key={key}&action=getStatus&id={activation_id}"
+            try:
+                r = requests.get(url, timeout=30).text
+                if _is_banned_response(r):
+                    logger.warning(f"⚠️ Key {key[:4]} baneada en get_code, probando siguiente...")
+                    break   # prueba la siguiente key
+                if r.startswith("STATUS_OK"):
+                    return r.split(":")[1].strip()
+                if r == "STATUS_CANCEL":
+                    raise Exception("SMS activation canceled")
+            except Exception as e:
+                logger.debug(f"Error en get_code con key {key[:4]}: {e}")
+            time.sleep(5)
+    raise Exception("SMS timeout con todas las keys")
+
+def set_status(keys, activation_id: str, status: int) -> None:
+    if isinstance(keys, str):
+        keys = [keys]
+
+    for key in keys:
+        url = f"{_SMS_API}?api_key={key}&action=setStatus&status={status}&id={activation_id}"
         try:
             r = requests.get(url, timeout=30).text
-            if r.startswith("ACCESS_NUMBER"):
-                _, activation_id, phone = r.split(":")
-                phone = phone.strip()
-                # Quitar prefijo +1 si es número de EE.UU./Canadá (11 dígitos)
-                phone = phone.lstrip("1") if phone.startswith("1") and len(phone) == 11 else phone
-                logger.debug(f"  ✅ Número obtenido: {phone} (país {iso_code})")
-                return activation_id, phone, iso_code
-            else:
-                logger.debug(f"  ❌ Falló para {iso_code}: {r[:80]}")
+            if _is_banned_response(r):
+                logger.warning(f"⚠️ Key {key[:4]} baneada en set_status, probando siguiente...")
+                continue
+            # Si no hubo error, asumimos éxito
+            logger.debug(f"set_status con key {key[:4]} ejecutado (status {status})")
+            return
         except Exception as e:
-            logger.debug(f"  ❌ Error en {iso_code}: {e}")
-        time.sleep(1)
-    raise Exception("No se pudo obtener número en ningún país de la lista")
-
-def get_code(api_key: str, activation_id: str, timeout: int = 120) -> str:
-    """Espera código SMS"""
-    for _ in range(timeout // 5):
-        time.sleep(5)
-        r = requests.get(f"{_SMS_API}?api_key={api_key}&action=getStatus&id={activation_id}").text
-        if r.startswith("STATUS_OK"):
-            return r.split(":")[1].strip()
-        if r == "STATUS_CANCEL":
-            raise Exception("SMS activation canceled")
-    raise Exception("SMS timeout")
-
-
-def set_status(api_key: str, activation_id: str, status: int) -> None:
-    """Cambia estado SMS"""
-    requests.get(f"{_SMS_API}?api_key={api_key}&action=setStatus&status={status}&id={activation_id}")
-
+            logger.warning(f"Error en set_status con key {key[:4]}: {e}")
+    logger.error("❌ No se pudo setStatus con ninguna key")
 
 def _api_request(sess, method, url, json_data=None, headers=None, timeout=15):
     """Hace request a API de mail"""
@@ -716,7 +758,7 @@ def safe_request(sess, method, url, data=None, json_data=None, headers=None, max
     raise Exception("No se pudo completar la petición")
 
 
-def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
+def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None,
             activation_id=None, sms_phone=None, proxy=None, t=None, country_code='BR'):
     
     if t is None:
@@ -741,11 +783,10 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             password = "dfbc1992"
 
 
-
-            # Obtener 2 números en paralelo
+            # ---------- OBTENER 2 NÚMEROS EN PARALELO ----------
             numbers = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future_to_attempt = {executor.submit(get_number, hero_key): i for i in range(2)}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_to_attempt = {executor.submit(get_number, hero_keys): i for i in range(2)}
                 for future in concurrent.futures.as_completed(future_to_attempt):
                     try:
                         act_id, phone, country = future.result()
@@ -756,7 +797,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             if not numbers:
                 raise Exception("No se pudo obtener ningún número")
 
-            # Verificar en paralelo
+            # ---------- VERIFICAR NÚMEROS EN PARALELO ----------
             available_number = None
             logger.debug("🔄 Iniciando verificación de números...")
 
@@ -768,79 +809,45 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
                 for future in concurrent.futures.as_completed(future_to_number):
                     act_id, phone, country = future_to_number[future]
                     try:
-                        result = future.result(timeout=60)  # timeout por si se cuelga
+                        result = future.result(timeout=60)
                         if result is None:
                             logger.warning(f"   ⚠️ Error al verificar {phone}, cancelando...")
-                            set_status(hero_key, act_id, 8)
+                            set_status(hero_keys, act_id, 8)
                         elif result is True:
                             logger.debug(f"   ❌ Número {phone} ya registrado, cancelando...")
-                            set_status(hero_key, act_id, 8)
+                            set_status(hero_keys, act_id, 8)
                         else:
                             # Número disponible
                             available_number = (act_id, phone, country)
                             logger.debug(f"   ✅ Número {phone} disponible!")
-                            # Cancelar los otros futuros? No podemos fácilmente, pero al salir del bucle
-                            # los demás se seguirán ejecutando, pero los cancelaremos después.
                             break
                     except Exception as e:
                         logger.error(f"   ❌ Excepción verificando {phone}: {e}")
-                        set_status(hero_key, act_id, 8)
+                        set_status(hero_keys, act_id, 8)
 
-            # Si encontramos disponible, cancelar los que no se usaron
+            # ---------- MANEJAR RESULTADO DE LA VERIFICACIÓN ----------
             if available_number:
+                # Cancelar los números no usados
                 for act_id, phone, country in numbers:
                     if (act_id, phone, country) != available_number:
                         try:
-                            set_status(hero_key, act_id, 8)
+                            set_status(hero_keys, act_id, 8)
                             logger.debug(f"  Cancelando número {phone} (no usado)")
                         except:
                             pass
+                # Usar el número disponible
+                activation_id, sms_phone, purchase_country = available_number
+                logger.debug(f"✅ Número disponible: {sms_phone} (país {purchase_country})")
             else:
-                # Ninguno disponible, cancelar todos y reintentar
+                # Cancelar todos los números y reintentar
                 for act_id, phone, country in numbers:
                     try:
-                        set_status(hero_key, act_id, 8)
+                        set_status(hero_keys, act_id, 8)
                     except:
                         pass
                 logger.debug("Todos los números fueron cancelados (registrados o errores), reintentando...")
                 continue
-            # Si no se encontró disponible, usar el primer número como fallback (o reintentar)
-            if not available_number:
-                logger.warning("⚠️ No se encontró número disponible, usando el primero como fallback (o reintentar)")
-                # Cancelar todos
-                for act_id, phone, country in numbers:
-                    try:
-                        set_status(hero_key, act_id, 8)
-                    except:
-                        pass
-                # Reintentar el bucle externo
-                logger.debug("Todos los números estaban registrados, reintentando...")
-                continue
                         
-            # Si encontramos uno disponible, usarlo
-            if available_number:
-                activation_id, sms_phone, purchase_country = available_number
-                logger.debug(f"✅ Número disponible: {sms_phone} (país {purchase_country})")
-                # Cancelar los otros números (los que no se van a usar)
-                for act_id, phone, country in numbers:
-                    if (act_id, phone, country) != available_number:
-                        try:
-                            set_status(hero_key, act_id, 8)  # cancelar y reembolsar
-                            logger.debug(f"  Cancelando número {phone} (no usado)")
-                        except:
-                            pass
-            else:
-                # Ninguno disponible, cancelar todos y reintentar
-                for act_id, phone, country in numbers:
-                    try:
-                        set_status(hero_key, act_id, 8)
-                        logger.debug(f"  Cancelando número {phone} (todos registrados)")
-                    except:
-                        pass
-                logger.debug("Todos los números estaban registrados, reintentando...")
-                continue
-            
-            
             amazon_cc = {
                 'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
                 'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
@@ -1049,9 +1056,9 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
             logger.debug("* Esperando SMS...")
-            sms_code = get_code(hero_key, activation_id)
+            sms_code = get_code(hero_keys, activation_id)
             logger.debug(f"SMS Code: {sms_code}")
-            set_status(hero_key, activation_id, 6)
+            set_status(hero_keys, activation_id, 6)
             
             anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
             verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
@@ -1064,7 +1071,7 @@ def process(capsolver_key, hero_key, email=None, mail_token=None, mail_api=None,
             
             if "entered already exists with another account" in req7.text:
                 logger.debug("Número ya registrado")
-                set_status(hero_key, activation_id, 8) 
+                set_status(hero_keys, activation_id, 8) 
                 continue
                 
             if "new_account=1" not in req7.url:
@@ -4152,7 +4159,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                         None,
                         process,
                         CAPSOLVER_API_KEY,          # capsolver_key
-                        HERO_SMS_API_KEY,           # hero_key
+                        HERO_SMS_KEYS,         # hero_key
                         None, None, None, None, None,  # email, mail_token, mail_api, activation_id, sms_phone
                         PROXY_STRING,               # proxy
                         None,                       # t
