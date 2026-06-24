@@ -68,7 +68,8 @@ FIVESIM_API_KEY = os.getenv('FIVESIM_API_KEY', '')
 SERVICE_API_KEY = os.getenv('SERVICE_API_KEY', '')
 API_BASE_URL = os.getenv('API_BASE_URL', '')
 HERO_SMS_API_KEY_BACKUP  = os.getenv('HERO_SMS_API_KAYY', '')
-HERO_SMS_KEYS = [k for k in [HERO_SMS_API_KEY, HERO_SMS_API_KEY_BACKUP] if k]
+HERO_SMS_API_KEY_BACKUP2  = os.getenv('HERO_SMS_API_KOYYY', '')
+HERO_SMS_KEYS = [k for k in [HERO_SMS_API_KEY, HERO_SMS_API_KEY_BACKUP, HERO_SMS_API_KEY_BACKUP2 ] if k]
 
 # ----- Timeouts configurables (en segundos) -----
 WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10'))          # Espera general para elementos
@@ -373,40 +374,39 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
 
 
 
-
 def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
     """
     Obtiene número SMS probando países en orden y keys en orden.
-    keys puede ser una lista de strings o un solo string.
-    Retorna (activation_id, phone, country_used).
+    Primero prueba el país con todas las keys; si no funciona, pasa al siguiente país.
     """
     if isinstance(keys, str):
         keys = [keys]
 
-    for key in keys:
-        logger.debug(f"🔑 Probando con key: {key[:4]}...")
-        
-        if country_code:
-            countries_to_try = [country_code] + [c for c in HERO_COUNTRY_ORDER if c != country_code]
-        else:
-            countries_to_try = HERO_COUNTRY_ORDER
+    # Si se especifica country_code, lo ponemos primero en la lista
+    if country_code:
+        countries_to_try = [country_code] + [c for c in HERO_COUNTRY_ORDER if c != country_code]
+    else:
+        countries_to_try = HERO_COUNTRY_ORDER
 
-        key_banned = False
-        for iso_code in countries_to_try:
-            hero_country_num = hero_country_map.get(iso_code)
-            if not hero_country_num:
-                continue
+    for iso_code in countries_to_try:
+        hero_country_num = hero_country_map.get(iso_code)
+        if not hero_country_num:
+            continue
 
-            url = f"{_SMS_API}?api_key={key}&action=getNumber&service=am&country={hero_country_num}"
+        # Probar todas las keys para este país
+        key_index = 0
+        while key_index < len(keys):
+            key = keys[key_index]
             logger.debug(f"  📞 Intentando país {iso_code} (código {hero_country_num}) con key {key[:4]}...")
+            url = f"{_SMS_API}?api_key={key}&action=getNumber&service=am&country={hero_country_num}"
             try:
                 r = requests.get(url, timeout=30).text
 
                 # 🔴 DETECTAR BANNED
                 if _is_banned_response(r):
-                    logger.warning(f"⚠️ Key {key[:4]} BANEADA, pasando a la siguiente key...")
-                    key_banned = True
-                    break  # Sale del bucle de países, pasa a la siguiente key
+                    logger.warning(f"⚠️ Key {key[:4]} BANEADA para {iso_code}, probando siguiente key...")
+                    key_index += 1
+                    continue  # Probar siguiente key para el mismo país
 
                 if r.startswith("ACCESS_NUMBER"):
                     _, activation_id, phone = r.split(":")
@@ -415,16 +415,17 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
                     logger.debug(f"  ✅ Número obtenido: {phone} (país {iso_code}) con key {key[:4]}")
                     return activation_id, phone, iso_code
                 else:
-                    logger.debug(f"  ❌ Falló para {iso_code}: {r[:80]}")
+                    # Otro error (NO_NUMBERS, CHANNELS_LIMIT, etc.)
+                    logger.debug(f"  ❌ Falló para {iso_code} con key {key[:4]}: {r[:80]}")
+                    key_index += 1  # Probar siguiente key
             except Exception as e:
-                logger.debug(f"  ❌ Error en {iso_code}: {e}")
-        
-        # Si la key fue baneada o se agotaron los países, pasar a la siguiente key
-        if key_banned:
-            continue
+                logger.debug(f"  ❌ Error en {iso_code} con key {key[:4]}: {e}")
+                key_index += 1
 
-    raise Exception("No se pudo obtener número con ninguna key (todas baneadas o sin saldo)")
+        # Si se agotaron todas las keys para este país, pasar al siguiente país
+        logger.debug(f"  🔄 Agotadas todas las keys para {iso_code}, pasando al siguiente país")
 
+    raise Exception("No se pudo obtener número con ninguna key en ningún país (todas baneadas o sin saldo)")
 def get_code(keys, activation_id: str, timeout: int = 125) -> str:
     if isinstance(keys, str):
         keys = [keys]
