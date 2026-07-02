@@ -414,13 +414,6 @@ def set_service_enabled(enabled: bool) -> bool:
 # get_number MODIFICADA CON LA NUEVA LÓGICA
 # ===================================================================
 def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
-    """
-    Obtiene número SMS probando países y keys en orden.
-    Lanza excepciones según el análisis de errores:
-      - SMSNoBalance: si TODAS las keys tienen NO_BALANCE.
-      - SMSAccountBannedTemporarily: si AL MENOS UNA key tiene CHANNELS_LIMIT (y no todas NO_BALANCE).
-      - Exception genérica: para otros casos.
-    """
     if isinstance(keys, str):
         keys = [keys]
 
@@ -429,7 +422,7 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
     else:
         countries_to_try = HERO_COUNTRY_ORDER
 
-    key_errors = {}  # key -> error más grave
+    key_errors = {}
 
     for iso_code in countries_to_try:
         hero_country_num = hero_country_map.get(iso_code)
@@ -446,12 +439,13 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
 
                 if _is_banned_response(r):
                     if "CHANNELS_LIMIT" in r:
-                        key_errors[key] = _prioritize_error(key_errors.get(key), "CHANNELS_LIMIT")
+                        # ❗ Lanzamos inmediatamente, sin esperar a probar otros países
+                        logger.error(f"❌ CHANNELS_LIMIT detectado en key {key[:4]} para país {iso_code}. Deteniendo búsqueda.")
+                        raise SMSAccountBannedTemporarily(f"Key {key[:4]} baneada temporalmente (CHANNELS_LIMIT) en país {iso_code}")
                     else:
                         key_errors[key] = _prioritize_error(key_errors.get(key), "BANNED")
-                    logger.warning(f"⚠️ Key {key[:4]} baneada para {iso_code}: {r[:80]}")
-                    key_index += 1
-                    continue
+                        key_index += 1
+                        continue
 
                 if r.startswith("ACCESS_NUMBER"):
                     _, activation_id, phone = r.split(":")
@@ -463,39 +457,33 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
                     if "NO_BALANCE" in r:
                         key_errors[key] = _prioritize_error(key_errors.get(key), "NO_BALANCE")
                     elif "CHANNELS_LIMIT" in r:
-                        key_errors[key] = _prioritize_error(key_errors.get(key), "CHANNELS_LIMIT")
+                        # ❗ También lanzamos inmediatamente aquí
+                        logger.error(f"❌ CHANNELS_LIMIT detectado en key {key[:4]} para país {iso_code}. Deteniendo búsqueda.")
+                        raise SMSAccountBannedTemporarily(f"Key {key[:4]} baneada temporalmente (CHANNELS_LIMIT) en país {iso_code}")
                     else:
                         key_errors[key] = _prioritize_error(key_errors.get(key), r[:80])
                     logger.debug(f"  ❌ Falló para {iso_code} con key {key[:4]}: {r[:80]}")
                     key_index += 1
+            except SMSAccountBannedTemporarily:
+                # Propagar hacia arriba
+                raise
             except Exception as e:
                 logger.debug(f"  ❌ Error en {iso_code} con key {key[:4]}: {e}")
                 key_index += 1
 
         logger.debug(f"  🔄 Agotadas todas las keys para {iso_code}, pasando al siguiente país")
 
-    # ========== ANÁLISIS FINAL DE ERRORES ==========
-    if not key_errors:
-        raise Exception("No se pudo obtener número con ninguna key (sin errores específicos)")
-
+    # Si llegamos aquí, significa que no se obtuvo número y no hubo CHANNELS_LIMIT inmediato.
+    # Analizamos si todas las keys tienen NO_BALANCE.
     total_keys = len(keys)
     no_balance_count = sum(1 for err in key_errors.values() if "NO_BALANCE" in err)
-    channels_limit_count = sum(1 for err in key_errors.values() if "CHANNELS_LIMIT" in err)
-
-    # Caso 1: Todas las keys tienen NO_BALANCE
     if no_balance_count == total_keys:
         logger.error("❌ Todas las keys tienen NO_BALANCE. Apagando servicio indefinidamente.")
         raise SMSNoBalance("Saldo insuficiente en todas las cuentas de SMS. Avisar a administradores para recargar.")
 
-    # Caso 2: Al menos una key tiene CHANNELS_LIMIT (y no todas tienen NO_BALANCE)
-    if channels_limit_count > 0:
-        logger.error(f"❌ Al menos una key tiene CHANNELS_LIMIT ({channels_limit_count} keys). Apagando servicio por 30 minutos.")
-        raise SMSAccountBannedTemporarily("Al menos una cuenta de SMS está temporalmente baneada (límite de canales). El servicio se desactivará por 30 minutos.")
-
-    # Caso 3: Otros errores (sin NO_BALANCE ni CHANNELS_LIMIT)
+    # Otros errores (sin NO_BALANCE ni CHANNELS_LIMIT)
     error_summary = ", ".join([f"{key[:4]}: {err}" for key, err in key_errors.items()])
     raise Exception(f"No se pudo obtener número. Errores: {error_summary}")
-
 def _prioritize_error(old: Optional[str], new: str) -> str:
     """Prioriza NO_BALANCE > CHANNELS_LIMIT > otros."""
     if not old:
@@ -939,10 +927,293 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     time.sleep(2)
                     continue  # Siguiente número
 
-                # ... (resto del código de process, igual que antes) ...
-                # Nota: No modifico el resto para no alargar, pero se mantiene todo el flujo.
-                # Asegurarse de que cualquier excepción no capturada por el try interno sea propagada.
+                amazon_cc = {
+                    'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
+                    'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
+                }.get(purchase_country, 'US')
+                logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
 
+                # ---------- CREAR SESIÓN ----------
+                sess = curl_requests.Session()
+                sess.impersonate = "chrome"
+                sess.headers.update({
+                    "User-Agent": info["user_agent"],
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Connection": "keep-alive",
+                    "Upgrade-Insecure-Requests": "1",
+                    "sec-ch-ua": '"Chromium";v="147", "Not?A_Brand";v="99"',
+                    "sec-ch-ua-mobile": "?1",
+                    "sec-ch-ua-platform": '"Android"',
+                    "DNT": "1",
+                })
+                
+                if proxy:
+                    sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+                
+                # ---------- EMAIL EN PARALELO ----------
+                mail_result = {}
+                mail_thread = threading.Thread(target=new_mail, args=(sess, mail_result))
+                mail_thread.start()
+                
+                sess.get(f"https://www.amazon.com/ax/claim?arb={arb}")
+                mail_thread.join(timeout=10)
+                
+                if "error" in mail_result:
+                    raise Exception(f"Error creando email: {mail_result['error']}")
+                
+                email = mail_result.get("email")
+                mail_token = mail_result.get("token")
+                mail_api = mail_result.get("api")
+                
+                if not email:
+                    raise Exception("No se pudo obtener email")
+                
+                logger.debug(f"Email listo: {email} ({mail_api})")
+                
+                # ---------- PRIMER POST ----------
+                data1 = {"arb": arb, "email": email, "claimCollectionLayoutType": "unifiedAuthClaimCollection"}
+                req1 = safe_request(
+                    sess,
+                    "POST",
+                    "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
+                    "&openid.ns=http://specs.openid.net/auth/2.0"
+                    "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
+                    "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
+                    "&openid.assoc_handle=anywhere_v2_us"
+                    "&openid.return_to=https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                    data=data1,
+                    headers={"Referer": "https://www.amazon.com/ap/register", "Origin": "https://www.amazon.com"},
+                    max_retries=3
+                )
+                
+                if req1 is None or req1.status_code != 200 or "appActionToken" not in req1.text:
+                    raise Exception("req1 falló")
+                
+                appActionToken = find(req1.text, 'name="appActionToken" value="', '"')
+                workflowState = find(req1.text, 'name="workflowState" value="', '"')
+                openid_return_to = find(req1.text, 'name="openid.return_to" value="', '"')
+                prevRID = find(req1.text, 'name="prevRID" value="', '"')
+                
+                # ---------- REGISTRO ----------
+                data2 = {
+                    "appActionToken": appActionToken, "appAction": "REGISTER",
+                    "shouldShowPersistentLabels": "true", "openid.return_to": openid_return_to,
+                    "prevRID": prevRID, "workflowState": workflowState,
+                    "customerName": info["full_name"], "email": email,
+                    "password": password, "showPasswordChecked": "true"
+                }
+                
+                req2 = safe_request(
+                    sess,
+                    "POST",
+                    "https://www.amazon.com/ap/register",
+                    data=data2,
+                    headers={"Referer": req1.url, "Origin": "https://www.amazon.com"},
+                    max_retries=3
+                )
+                
+                if "already an account" in req2.text:
+                    logger.debug("Email ya registrado")
+                    set_status(hero_keys, activation_id, 8)
+                    continue  # Siguiente número (con nuevo email)
+                    
+                if "detected unusual activity" in req2.text:
+                    logger.debug("Actividad inusual - Rotando proxy en siguiente intento externo")
+                    set_status(hero_keys, activation_id, 8)
+                    break  # Sale del bucle interno, va al siguiente proxy
+                
+                # ---------- WAF ----------
+                verifyToken = None
+                if "data-context" in req2.text and "data-external-id" in req2.text:
+                    logger.debug("* Resolviendo WAF...")
+                    verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                    dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
+                    anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+                    
+                    json3 = json.dumps({
+                        "clientData": json.dumps({
+                            "sessionId": sess.cookies.get("session-id", ""),
+                            "marketplaceId": "ATVPDKIKX0DER",
+                            "clientUseCase": "/ap/register"
+                        }, separators=(",", ":")),
+                        "challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1",
+                        "locale": "en-US", "externalId": dataExternalId,
+                        "enableHeaderFooter": False, "enableBypassMechanism": False,
+                        "enableModalView": False, "eventTrigger": None,
+                        "aaExternalToken": None, "forceJsFlush": False,
+                        "aamationToken": None,
+                    }, separators=(",", ":"))
+                    
+                    req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
+                    clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
+                    aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
+                    captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
+                    jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
+                    
+                    if not jwt_client_id:
+                        logger.debug("WAF falló")
+                        set_status(hero_keys, activation_id, 8)
+                        continue  # Siguiente número
+                    
+                    logger.debug("WAF PASS")
+                    
+                    data4 = {
+                        "anti-csrftoken-a2z": anti_csrf,
+                        "cvf_aamation_response_token": jwt_client_id,
+                        "cvf_captcha_captcha_action": "verifyAamationChallenge",
+                        "cvf_aamation_error_code": "",
+                        "clientContext": sess.cookies.get("ubid-main"),
+                        "openid.pape.max_auth_age": "900",
+                        "openid.return_to": "https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                        "forceMobileLayout": "1",
+                        "openid.identity": "http://specs.openid.net/auth/2.0/identifier_select",
+                        "openid.assoc_handle": assoc_handle,
+                        "openid.mode": "checkid_setup",
+                        "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier_select",
+                        "pageId": assoc_handle,
+                        "openid.ns": "http://specs.openid.net/auth/2.0",
+                        "shouldShowPersistentLabels": "true",
+                        "verifyToken": verifyToken
+                    }
+                    
+                    req4 = safe_request(
+                        sess,
+                        "POST",
+                        "https://www.amazon.com/ap/cvf/verify",
+                        data=data4,
+                        headers={"Content-Type": "application/x-www-form-urlencoded",
+                                "Referer": req2.url, "Origin": "https://www.amazon.com"},
+                        max_retries=3
+                    )
+                    
+                    verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
+                    if not verifyToken:
+                        verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                        if not verifyToken:
+                            raise Exception("No se pudo obtener verifyToken")
+                
+                # ---------- OTP EMAIL ----------
+                base_openid = {
+                    "forceMobileLayout": "1", "openid.assoc_handle": assoc_handle,
+                    "openid.mode": "checkid_setup", "language": "en_US",
+                    "openid.ns": "http://specs.openid.net/auth/2.0",
+                    "shouldShowPersistentLabels": "true"
+                }
+                
+                otp_code = mail_code(sess, mail_token, mail_api)
+                logger.debug(f"OTP: {otp_code}")
+                
+                data5 = {**base_openid, "autoReadStatus": "manual",
+                        "verificationPageContactType": "email", "action": "code",
+                        "verifyToken": verifyToken, "code": otp_code}
+                
+                req5 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data5)
+                anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
+                verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
+                
+                data6 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
+                        "verifyToken": verifyToken, "cvf_phone_cc": amazon_cc,
+                        "cvf_phone_num": sms_phone, "cvf_action": "collect"}
+                
+                req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
+                logger.debug("* Esperando SMS...")
+                sms_code = get_code(hero_keys, activation_id)
+                logger.debug(f"SMS Code: {sms_code}")
+                set_status(hero_keys, activation_id, 6)
+                
+                anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
+                verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
+                
+                data7 = {**base_openid, "anti-csrftoken-a2z": anti_csrf,
+                        "verificationPageContactType": "sms", "verifyToken": verifyToken,
+                        "code": sms_code, "cvf_action": "code", "resendContactType": "sms"}
+                
+                req7 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data7)
+                
+                if "entered already exists with another account" in req7.text:
+                    logger.debug("Número ya registrado")
+                    set_status(hero_keys, activation_id, 8)
+                    continue  # 🔁 Reinicia el bucle interno con otro número (sin cambiar proxy)
+                    
+                if "new_account=1" not in req7.url:
+                    logger.debug("Cuenta no creada")
+                    set_status(hero_keys, activation_id, 8)
+                    continue  # 🔁 Otro número
+                
+                # ---------- DIRECCIÓN ----------
+                logger.debug("* Agregando dirección...")
+                
+                csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
+                customer_id = find(req7.text, 'name="address-ui-widgets-obfuscated-customerId" value="', '"')
+                wizard_id = find(req7.text, 'name="address-ui-widgets-address-wizard-interaction-id" value="', '"')
+                prev_token = find(req7.text, 'name="address-ui-widgets-previous-address-form-state-token" value="', '"')
+                widget_csrf = urllib.parse.quote(find(req7.text, 'name="address-ui-widgets-csrfToken" value="', '"'))
+                form_load = find(req7.text, 'name="address-ui-widgets-form-load-start-time" value="', '"')
+                
+                sess.headers.update({
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://www.amazon.com",
+                    "Referer": req7.url,
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1"
+                })
+                
+                data8 = (
+                    f"csrfToken={csrf_addr}&addressID="
+                    f"&address-ui-widgets-addressFormButtonText=save"
+                    f"&address-ui-widgets-addressFormHideHeading=true"
+                    f"&address-ui-widgets-addressFormHideSubmitButton=false"
+                    f"&address-ui-widgets-enableAddressDetails=true"
+                    f"&address-ui-widgets-enableAddressWizardForm=true"
+                    f"&address-ui-widgets-address-wizard-interaction-id={wizard_id}"
+                    f"&address-ui-widgets-obfuscated-customerId={customer_id}"
+                    f"&address-ui-widgets-csrfToken={widget_csrf}"
+                    f"&address-ui-widgets-form-load-start-time={form_load}"
+                    f"&address-ui-widgets-isAddressSuggestionsView=true"
+                    f"&address-ui-widgets-suggested-address-selection=original-address-"
+                    f"&original-address-address-ui-widgets-enterAddressFullName={urllib.parse.quote(info['full_name'])}"
+                    f"&original-address-address-ui-widgets-enterAddressLine1={urllib.parse.quote(info['street'])}"
+                    f"&original-address-address-ui-widgets-enterAddressLine2="
+                    f"&original-address-address-ui-widgets-enterAddressCity={urllib.parse.quote(info['city'])}"
+                    f"&original-address-address-ui-widgets-enterAddressStateOrRegion={info['state']}"
+                    f"&original-address-address-ui-widgets-enterAddressPostalCode={info['zip']}"
+                    f"&original-address-address-ui-widgets-countryCode=US"
+                    f"&original-address-address-ui-widgets-enterAddressPhoneNumber={info['phone']}"
+                    f"&address-ui-widgets-use-as-my-default=true"
+                    f"&address-ui-widgets-previous-address-form-state-token={prev_token}"
+                    f"&address-ui-widgets-saveOriginalOrSuggestedAddress=Submit+Query"
+                )
+                
+                sess.post("https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button", data=data8)
+                
+                cookies = "; ".join(f"{k}={v.replace(chr(34), chr(39))}" for k, v in sess.cookies.items())
+                elapsed = round(time.time() - t, 2)
+                
+                logger.debug(f"\n{'='*60}")
+                logger.debug(f"CUENTA CREADA!")
+                logger.debug(f"{'='*60}")
+                logger.debug(f"Email:    {email}")
+                logger.debug(f"Password: {password}")
+                logger.debug(f"Phone:    {sms_phone}")
+                logger.debug(f"Tiempo:   {elapsed}s | Intentos Ext: {intento} | NumIntent: {num_attempt}")
+                logger.debug(f"{'='*60}")
+                logger.debug(f"COOKIES:")
+                logger.debug(f"{cookies}")
+                logger.debug(f"{'='*60}\n")
+                
+                return {
+                    "name": info["full_name"], "phone": sms_phone,
+                    "password": password, "email": email,
+                    "cookies": cookies, "status": "Cuenta generada!",
+                    "response": cookies, "ip": get_current_ip(sess),
+                    "time": elapsed, "intentos": intento,
+                    "num_attempts": num_attempt
+                }
+                
             except (SMSAccountBannedTemporarily, SMSNoBalance):
                 # Propagar hacia arriba
                 raise
@@ -956,10 +1227,10 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                 else:
                     continue
         
+        # Si llegamos aquí, se agotaron los intentos internos para este proxy
         logger.debug(f"Se agotaron {max_num_intentos} números para el proxy actual, cambiando de proxy...")
     
     raise Exception(f"Se agotaron los {max_intentos} intentos externos")
-
 # ===================================================================
 # generate_cookie_api COMPLETA CON MANEJO DE EXCEPCIONES
 # ===================================================================
