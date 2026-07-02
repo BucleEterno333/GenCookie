@@ -1278,7 +1278,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
 # ===================================================================
 async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10, force_playwright=False):
     logger.debug(f"🚀 generate_cookie_api llamada con country={country}, force_playwright={force_playwright}")
-    global SERVICE_BLOCKED_UNTIL
+    global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
 
     try:
         if country not in base_urls:
