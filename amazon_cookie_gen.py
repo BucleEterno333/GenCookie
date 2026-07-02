@@ -64,6 +64,7 @@ HERO_SMS_OPERATOR = os.getenv('HERO_SMS_OPERATOR', 'any')
 API_HOST = os.getenv('API_HOST', '0.0.0.0')
 API_PORT = int(os.getenv('API_PORT', '8080'))
 API_KEY = os.getenv('API_KEY', '')
+BOT_API_KEY = os.getenv('BOT_API_KEY', '')
 FIVESIM_API_KEY = os.getenv('FIVESIM_API_KEY', '')
 SERVICE_API_KEY = os.getenv('SERVICE_API_KEY', '')
 API_BASE_URL = os.getenv('API_BASE_URL', '')
@@ -386,20 +387,14 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
 # FUNCIÓN PARA CONTROLAR EL SERVICIO (activar/desactivar)
 # ===================================================================
 def set_service_enabled(enabled: bool) -> bool:
-    """
-    Habilita o deshabilita el servicio de generación de cookies vía API de base de datos.
-    Retorna True si se ejecutó correctamente, False en caso de error.
-    """
     try:
-        # Intentar con varios métodos de autenticación
         headers = {
-            'x-api-key': SERVICE_API_KEY,
-            'x-bot-key': SERVICE_API_KEY,   # Algunos endpoints esperan este header
+            'x-bot-key': BOT_API_KEY,   # Solo este header es necesario
             'Content-Type': 'application/json'
         }
-
         payload = {'enabled': enabled}
-        response = requests.post(f"{API_BASE_URL}/admin/bot/toggle-service", json=payload, headers=headers, timeout=10)
+        # Cambiar URL a /bot/toggle-service (sin /admin)
+        response = requests.post(f"{API_BASE_URL}/bot/toggle-service", json=payload, headers=headers, timeout=10)
         if response.status_code == 200:
             logger.info(f"✅ Servicio de generación {'activado' if enabled else 'desactivado'} correctamente")
             return True
@@ -409,7 +404,6 @@ def set_service_enabled(enabled: bool) -> bool:
     except Exception as e:
         logger.error(f"❌ Error al cambiar estado del servicio: {e}")
         return False
-
 # ===================================================================
 # get_number MODIFICADA CON LA NUEVA LÓGICA
 # ===================================================================
@@ -439,9 +433,8 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
 
                 if _is_banned_response(r):
                     if "CHANNELS_LIMIT" in r:
-                        # ❗ Lanzamos inmediatamente, sin esperar a probar otros países
-                        logger.error(f"❌ CHANNELS_LIMIT detectado en key {key[:4]} para país {iso_code}. Deteniendo búsqueda.")
-                        raise SMSAccountBannedTemporarily(f"Key {key[:4]} baneada temporalmente (CHANNELS_LIMIT) en país {iso_code}")
+                        logger.error(f"❌ CHANNELS_LIMIT en key {key[:4]} para {iso_code}. Deteniendo.")
+                        raise SMSAccountBannedTemporarily(f"Key {key[:4]} baneada (CHANNELS_LIMIT) en {iso_code}")
                     else:
                         key_errors[key] = _prioritize_error(key_errors.get(key), "BANNED")
                         key_index += 1
@@ -457,15 +450,13 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
                     if "NO_BALANCE" in r:
                         key_errors[key] = _prioritize_error(key_errors.get(key), "NO_BALANCE")
                     elif "CHANNELS_LIMIT" in r:
-                        # ❗ También lanzamos inmediatamente aquí
-                        logger.error(f"❌ CHANNELS_LIMIT detectado en key {key[:4]} para país {iso_code}. Deteniendo búsqueda.")
-                        raise SMSAccountBannedTemporarily(f"Key {key[:4]} baneada temporalmente (CHANNELS_LIMIT) en país {iso_code}")
+                        logger.error(f"❌ CHANNELS_LIMIT en key {key[:4]} para {iso_code}. Deteniendo.")
+                        raise SMSAccountBannedTemporarily(f"Key {key[:4]} baneada (CHANNELS_LIMIT) en {iso_code}")
                     else:
                         key_errors[key] = _prioritize_error(key_errors.get(key), r[:80])
                     logger.debug(f"  ❌ Falló para {iso_code} con key {key[:4]}: {r[:80]}")
                     key_index += 1
             except SMSAccountBannedTemporarily:
-                # Propagar hacia arriba
                 raise
             except Exception as e:
                 logger.debug(f"  ❌ Error en {iso_code} con key {key[:4]}: {e}")
@@ -473,17 +464,15 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
 
         logger.debug(f"  🔄 Agotadas todas las keys para {iso_code}, pasando al siguiente país")
 
-    # Si llegamos aquí, significa que no se obtuvo número y no hubo CHANNELS_LIMIT inmediato.
-    # Analizamos si todas las keys tienen NO_BALANCE.
     total_keys = len(keys)
     no_balance_count = sum(1 for err in key_errors.values() if "NO_BALANCE" in err)
     if no_balance_count == total_keys:
         logger.error("❌ Todas las keys tienen NO_BALANCE. Apagando servicio indefinidamente.")
-        raise SMSNoBalance("Saldo insuficiente en todas las cuentas de SMS. Avisar a administradores para recargar.")
+        raise SMSNoBalance("Saldo insuficiente en todas las cuentas de SMS.")
 
-    # Otros errores (sin NO_BALANCE ni CHANNELS_LIMIT)
     error_summary = ", ".join([f"{key[:4]}: {err}" for key, err in key_errors.items()])
     raise Exception(f"No se pudo obtener número. Errores: {error_summary}")
+
 def _prioritize_error(old: Optional[str], new: str) -> str:
     """Prioriza NO_BALANCE > CHANNELS_LIMIT > otros."""
     if not old:
@@ -883,7 +872,6 @@ def safe_request(sess, method, url, data=None, json_data=None, headers=None, max
 
 # ===================================================================
 # process COMPLETO CON CAPTURA DE EXCEPCIONES PERSONALIZADAS
-# ===================================================================
 def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None,
             activation_id=None, sms_phone=None, proxy=None, t=None, country_code='BR'):
     """
@@ -893,17 +881,15 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
     if t is None:
         t = time.time()
     
-    max_intentos = 50      # Intentos externos (cambia de proxy si hay lista)
-    max_num_intentos = 5   # Intentos internos con el mismo proxy (número de números a probar)
+    max_intentos = 50
+    max_num_intentos = 5
     
     for intento in range(1, max_intentos + 1):
-        # ---------- CONFIGURAR PROXY ----------
         if PROXY_LIST:
             if intento > 1 or not proxy:
                 proxy = random.choice(PROXY_LIST).strip()
             logger.debug(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
         
-        # ---------- BUCLE INTERNO PARA REINTENTAR NÚMEROS ----------
         for num_attempt in range(1, max_num_intentos + 1):
             try:
                 logger.debug(f"\n{'='*60}")
@@ -920,12 +906,11 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     activation_id, sms_phone, purchase_country = get_number(hero_keys)
                     logger.debug(f"📞 Número obtenido: {sms_phone} (país {purchase_country})")
                 except (SMSAccountBannedTemporarily, SMSNoBalance) as e:
-                    # Propagar estas excepciones para que generate_cookie_api las maneje
                     raise
                 except Exception as e:
                     logger.warning(f"⚠️ No se pudo obtener número: {e}")
                     time.sleep(2)
-                    continue  # Siguiente número
+                    continue
 
                 amazon_cc = {
                     'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
@@ -1017,12 +1002,12 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                 if "already an account" in req2.text:
                     logger.debug("Email ya registrado")
                     set_status(hero_keys, activation_id, 8)
-                    continue  # Siguiente número (con nuevo email)
+                    continue
                     
                 if "detected unusual activity" in req2.text:
-                    logger.debug("Actividad inusual - Rotando proxy en siguiente intento externo")
+                    logger.debug("Actividad inusual - Rotando proxy")
                     set_status(hero_keys, activation_id, 8)
-                    break  # Sale del bucle interno, va al siguiente proxy
+                    break
                 
                 # ---------- WAF ----------
                 verifyToken = None
@@ -1055,7 +1040,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     if not jwt_client_id:
                         logger.debug("WAF falló")
                         set_status(hero_keys, activation_id, 8)
-                        continue  # Siguiente número
+                        continue
                     
                     logger.debug("WAF PASS")
                     
@@ -1135,12 +1120,12 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                 if "entered already exists with another account" in req7.text:
                     logger.debug("Número ya registrado")
                     set_status(hero_keys, activation_id, 8)
-                    continue  # 🔁 Reinicia el bucle interno con otro número (sin cambiar proxy)
+                    continue
                     
                 if "new_account=1" not in req7.url:
                     logger.debug("Cuenta no creada")
                     set_status(hero_keys, activation_id, 8)
-                    continue  # 🔁 Otro número
+                    continue
                 
                 # ---------- DIRECCIÓN ----------
                 logger.debug("* Agregando dirección...")
@@ -1215,23 +1200,20 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                 }
                 
             except (SMSAccountBannedTemporarily, SMSNoBalance):
-                # Propagar hacia arriba
                 raise
             except Exception as error:
                 logger.debug(f"Error en intento interno #{num_attempt}: {error}")
                 if activation_id:
                     set_status(hero_keys, activation_id, 8)
                 if "AMAZON_BLOCKED_ACCOUNT" in str(error) or "detected unusual activity" in str(error):
-                    logger.debug("🚫 Actividad inusual, cambiando de proxy en el siguiente intento externo")
+                    logger.debug("🚫 Actividad inusual, cambiando de proxy")
                     break
                 else:
                     continue
         
-        # Si llegamos aquí, se agotaron los intentos internos para este proxy
         logger.debug(f"Se agotaron {max_num_intentos} números para el proxy actual, cambiando de proxy...")
     
     raise Exception(f"Se agotaron los {max_intentos} intentos externos")
-# ===================================================================
 # generate_cookie_api COMPLETA CON MANEJO DE EXCEPCIONES
 # ===================================================================
 async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10, force_playwright=False):
@@ -1456,17 +1438,16 @@ def get_best_session():
         logger.debug(f"🗑️ Sesión {sid} expirada")
     return session_id
 
-
 def is_service_enabled():
     global SERVICE_BLOCKED_UNTIL
-    # Si estamos en bloqueo temporal, devolver False
     if time.time() < SERVICE_BLOCKED_UNTIL:
         logger.debug(f"Servicio bloqueado temporalmente hasta {SERVICE_BLOCKED_UNTIL}")
         return False
-    # Consultar el estado en la base de datos (como antes)
     try:
-        headers = {'x-api-key': SERVICE_API_KEY}
-        response = requests.get(f"{API_BASE_URL}/admin/service-status-for-generator", headers=headers, timeout=5)
+        # Usar solo x-bot-key (o Authorization Bearer si tienes token de admin)
+        headers = {'x-bot-key': BOT_API_KEY}
+        # La URL está bien: /service-status-for-generator
+        response = requests.get(f"{API_BASE_URL}/service-status-for-generator", headers=headers, timeout=5)
         if response.status_code == 200:
             data = response.json()
             return data.get('enabled', True)
@@ -1475,8 +1456,7 @@ def is_service_enabled():
             return True
     except Exception as e:
         logger.warning(f"Error consultando estado: {e}")
-        return True
-    
+        return True  
 def test_proxy(session, max_retries=3):
     """Prueba la conectividad del proxy y retorna la IP pública, con reintentos."""
     for attempt in range(max_retries):
@@ -1515,7 +1495,11 @@ import requests
 def check_user_credits(token, required=3):
     """Verifica que el usuario tenga al menos 'required' créditos y devuelve su rol."""
     db_api_url = f"{API_BASE_URL}/user/credits"
-    headers = {'Authorization': f'Bearer {token}'}
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'x-bot-key': BOT_API_KEY,
+        'x-api-key': SERVICE_API_KEY
+    }
     try:
         response = requests.get(db_api_url, headers=headers, timeout=10)
         if response.status_code == 200:
@@ -1536,6 +1520,8 @@ def deduct_credits(token, amount=3):
     db_api_url = f"{API_BASE_URL}/user/use-credits"
     headers = {
         'Authorization': f'Bearer {token}',
+        'x-bot-key': BOT_API_KEY,
+        'x-api-key': SERVICE_API_KEY,
         'Content-Type': 'application/json'
     }
     try:
