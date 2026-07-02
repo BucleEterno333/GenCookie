@@ -77,6 +77,7 @@ NAVIGATION_TIMEOUT = int(os.getenv('NAVIGATION_TIMEOUT', '60'))  # Espera de nav
 ACTION_TIMEOUT = int(os.getenv('ACTION_TIMEOUT', '5'))          # Espera para acciones específicas (clics, llenado)
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '10'))               # Reintentos globales
 
+SERVICE_BLOCKED_UNTIL = 0
 
 # Opción para reducir calidad de capturas (si se usa)
 SCREENSHOT_QUALITY = int(os.getenv('SCREENSHOT_QUALITY', '30'))  # Calidad JPEG (0-100)
@@ -390,7 +391,13 @@ def set_service_enabled(enabled: bool) -> bool:
     Retorna True si se ejecutó correctamente, False en caso de error.
     """
     try:
-        headers = {'x-api-key': SERVICE_API_KEY}
+        # Intentar con varios métodos de autenticación
+        headers = {
+            'x-api-key': SERVICE_API_KEY,
+            'x-bot-key': SERVICE_API_KEY,   # Algunos endpoints esperan este header
+            'Content-Type': 'application/json'
+        }
+
         payload = {'enabled': enabled}
         response = requests.post(f"{API_BASE_URL}/admin/bot/toggle-service", json=payload, headers=headers, timeout=10)
         if response.status_code == 200:
@@ -997,8 +1004,11 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
 
                 except SMSAccountBannedTemporarily as e:
                     logger.error(f"❌ Al menos una key de SMS está baneada temporalmente: {e}")
-                    # Desactivar servicio por 30 minutos
+                    # Desactivar servicio en API (puede fallar)
                     set_service_enabled(False)
+                    # Bloquear en memoria por 30 minutos
+                    SERVICE_BLOCKED_UNTIL = time.time() + 30 * 60
+                    # Programar timer para reactivar (aunque la llamada a la API falle, se intentará reactivar)
                     threading.Timer(30 * 60, lambda: set_service_enabled(True)).start()
                     return {
                         'success': False,
@@ -1009,7 +1019,6 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
 
                 except SMSNoBalance as e:
                     logger.error(f"❌ Todas las keys de SMS tienen saldo insuficiente: {e}")
-                    # Desactivar servicio indefinidamente
                     set_service_enabled(False)
                     return {
                         'success': False,
@@ -1017,7 +1026,6 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                         'screenshot': None,
                         'no_balance': True
                     }
-
                 except Exception as e:
                     logger.debug(f"   Intento rápido #{attempt} falló: {e}")
                     if attempt == max_attempts:
@@ -1179,7 +1187,12 @@ def get_best_session():
 
 
 def is_service_enabled():
-    """Consulta el estado del interruptor en CheckerCT."""
+    global SERVICE_BLOCKED_UNTIL
+    # Si estamos en bloqueo temporal, devolver False
+    if time.time() < SERVICE_BLOCKED_UNTIL:
+        logger.debug(f"Servicio bloqueado temporalmente hasta {SERVICE_BLOCKED_UNTIL}")
+        return False
+    # Consultar el estado en la base de datos (como antes)
     try:
         headers = {'x-api-key': SERVICE_API_KEY}
         response = requests.get(f"{API_BASE_URL}/admin/service-status-for-generator", headers=headers, timeout=5)
@@ -1188,7 +1201,7 @@ def is_service_enabled():
             return data.get('enabled', True)
         else:
             logger.warning(f"No se pudo obtener estado: {response.status_code}")
-            return True  # Por defecto activo si falla
+            return True
     except Exception as e:
         logger.warning(f"Error consultando estado: {e}")
         return True
