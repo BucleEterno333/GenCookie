@@ -79,6 +79,7 @@ ACTION_TIMEOUT = int(os.getenv('ACTION_TIMEOUT', '5'))          # Espera para ac
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '10'))               # Reintentos globales
 
 SERVICE_BLOCKED_UNTIL = 0
+SERVICE_BLOCKED_REASON = None  # 'sms_temp' o 'admin'
 
 # Opción para reducir calidad de capturas (si se usa)
 SCREENSHOT_QUALITY = int(os.getenv('SCREENSHOT_QUALITY', '30'))  # Calidad JPEG (0-100)
@@ -387,6 +388,13 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
 # FUNCIÓN PARA CONTROLAR EL SERVICIO (activar/desactivar)
 # ===================================================================
 def set_service_enabled(enabled: bool) -> bool:
+
+
+    global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
+    if enabled:
+        SERVICE_BLOCKED_UNTIL = 0
+        SERVICE_BLOCKED_REASON = None
+
     try:
         headers = {
             'x-bot-key': BOT_API_KEY,   # Solo este header es necesario
@@ -1316,6 +1324,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                     logger.error(f"❌ Al menos una key de SMS está baneada temporalmente: {e}")
                     # Desactivar servicio en API (puede fallar)
                     set_service_enabled(False)
+                    SERVICE_BLOCKED_REASON = 'sms_temp'
                     # Bloquear en memoria por 30 minutos
                     SERVICE_BLOCKED_UNTIL = time.time() + 30 * 60
                     # Programar timer para reactivar (aunque la llamada a la API falle, se intentará reactivar)
@@ -1330,6 +1339,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                 except SMSNoBalance as e:
                     logger.error(f"❌ Todas las keys de SMS tienen saldo insuficiente: {e}")
                     set_service_enabled(False)
+                    SERVICE_BLOCKED_REASON = 'no_balance'
                     return {
                         'success': False,
                         'error': 'Saldo de SMS insuficiente en todas las cuentas. Avisar a administradores para recargar. El servicio ha sido deshabilitado indefinidamente.',
@@ -1496,24 +1506,26 @@ def get_best_session():
     return session_id
 
 def is_service_enabled():
-    global SERVICE_BLOCKED_UNTIL
+    global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
+    # Si hay bloqueo temporal activo (por SMS o no balance)
     if time.time() < SERVICE_BLOCKED_UNTIL:
-        logger.debug(f"Servicio bloqueado temporalmente hasta {SERVICE_BLOCKED_UNTIL}")
         return False
+    else:
+        # Si expiró, limpiar
+        SERVICE_BLOCKED_UNTIL = 0
+        SERVICE_BLOCKED_REASON = None
+
+    # Consultar estado en la BD (por si el admin lo reactivó)
     try:
-        # Usar solo x-bot-key (o Authorization Bearer si tienes token de admin)
-        headers = {'x-bot-key': BOT_API_KEY}
-        # La URL está bien: /service-status-for-generator
-        response = requests.get(f"{API_BASE_URL}/admin/service-status-for-generator", headers=headers, timeout=5)
+        response = requests.get(f"{API_BASE_URL}/service-status-for-generator", headers={'x-bot-key': BOT_API_KEY}, timeout=5)
         if response.status_code == 200:
             data = response.json()
             return data.get('enabled', True)
         else:
-            logger.warning(f"No se pudo obtener estado: {response.status_code}")
             return True
-    except Exception as e:
-        logger.warning(f"Error consultando estado: {e}")
-        return True  
+    except Exception:
+        return True
+
 def test_proxy(session, max_retries=3):
     """Prueba la conectividad del proxy y retorna la IP pública, con reintentos."""
     for attempt in range(max_retries):
@@ -4408,7 +4420,14 @@ def generate():
     if role != 'admin':
         enabled = is_service_enabled()
         if not enabled:
-            return jsonify({'success': False, 'error': 'Servicio deshabilitado temporalmente. Contacta al administrador.'}), 503
+            if SERVICE_BLOCKED_REASON == 'sms_temp' and SERVICE_BLOCKED_UNTIL > time.time():
+                remaining = int((SERVICE_BLOCKED_UNTIL - time.time()) / 60)
+                msg = f'El servicio se ha deshabilitado por cuenta de SMS baneada temporalmente. Reintenta en {remaining} minutos.'
+            elif SERVICE_BLOCKED_REASON == 'no_balance':
+                msg = 'Saldo de SMS insuficiente en todas las cuentas. Avisar a administradores para recargar. El servicio ha sido deshabilitado indefinidamente.'
+            else:
+                msg = 'Servicio deshabilitado temporalmente por mantenimiento. Contacta al owner.'
+            return jsonify({'success': False, 'error': msg}), 503
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
