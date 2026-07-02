@@ -393,8 +393,8 @@ def set_service_enabled(enabled: bool) -> bool:
             'Content-Type': 'application/json'
         }
         payload = {'enabled': enabled}
-        # Cambiar URL a /bot/toggle-service (sin /admin)
-        response = requests.post(f"{API_BASE_URL}/bot/toggle-service", json=payload, headers=headers, timeout=10)
+        # ⚠️ URL corregida: sin /api
+        response = requests.post(f"{API_BASE_URL}/admin/bot/toggle-service", json=payload, headers=headers, timeout=10)
         if response.status_code == 200:
             logger.info(f"✅ Servicio de generación {'activado' if enabled else 'desactivado'} correctamente")
             return True
@@ -408,13 +408,21 @@ def set_service_enabled(enabled: bool) -> bool:
 # get_number MODIFICADA CON LA NUEVA LÓGICA
 # ===================================================================
 def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
+    """
+    Prueba todas las keys SOLO EN EL PRIMER PAÍS de la lista (CA si no se especifica).
+    Recolecta errores y al final:
+      - Si alguna key tiene CHANNELS_LIMIT -> lanza SMSAccountBannedTemporarily.
+      - Si todas tienen NO_BALANCE -> lanza SMSNoBalance.
+      - Otros casos -> excepción genérica.
+    """
     if isinstance(keys, str):
         keys = [keys]
 
+    # Si no se especifica país, usar el primero de la lista (CA)
     if country_code:
-        countries_to_try = [country_code] + [c for c in HERO_COUNTRY_ORDER if c != country_code]
+        countries_to_try = [country_code]  # solo el país forzado
     else:
-        countries_to_try = HERO_COUNTRY_ORDER
+        countries_to_try = [HERO_COUNTRY_ORDER[0]]  # solo el primer país
 
     key_errors = {}
 
@@ -433,12 +441,12 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
 
                 if _is_banned_response(r):
                     if "CHANNELS_LIMIT" in r:
-                        logger.error(f"❌ CHANNELS_LIMIT en key {key[:4]} para {iso_code}. Deteniendo.")
-                        raise SMSAccountBannedTemporarily(f"Key {key[:4]} baneada (CHANNELS_LIMIT) en {iso_code}")
+                        key_errors[key] = _prioritize_error(key_errors.get(key), "CHANNELS_LIMIT")
                     else:
                         key_errors[key] = _prioritize_error(key_errors.get(key), "BANNED")
-                        key_index += 1
-                        continue
+                    logger.warning(f"⚠️ Key {key[:4]} baneada para {iso_code}: {r[:80]}")
+                    key_index += 1
+                    continue
 
                 if r.startswith("ACCESS_NUMBER"):
                     _, activation_id, phone = r.split(":")
@@ -450,29 +458,38 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
                     if "NO_BALANCE" in r:
                         key_errors[key] = _prioritize_error(key_errors.get(key), "NO_BALANCE")
                     elif "CHANNELS_LIMIT" in r:
-                        logger.error(f"❌ CHANNELS_LIMIT en key {key[:4]} para {iso_code}. Deteniendo.")
-                        raise SMSAccountBannedTemporarily(f"Key {key[:4]} baneada (CHANNELS_LIMIT) en {iso_code}")
+                        key_errors[key] = _prioritize_error(key_errors.get(key), "CHANNELS_LIMIT")
                     else:
                         key_errors[key] = _prioritize_error(key_errors.get(key), r[:80])
                     logger.debug(f"  ❌ Falló para {iso_code} con key {key[:4]}: {r[:80]}")
                     key_index += 1
-            except SMSAccountBannedTemporarily:
-                raise
             except Exception as e:
                 logger.debug(f"  ❌ Error en {iso_code} con key {key[:4]}: {e}")
                 key_index += 1
 
-        logger.debug(f"  🔄 Agotadas todas las keys para {iso_code}, pasando al siguiente país")
+        logger.debug(f"  🔄 Agotadas todas las keys para {iso_code}")
+
+    # ========== ANÁLISIS FINAL DE ERRORES ==========
+    if not key_errors:
+        raise Exception("No se pudo obtener número con ninguna key (sin errores específicos)")
 
     total_keys = len(keys)
     no_balance_count = sum(1 for err in key_errors.values() if "NO_BALANCE" in err)
+    channels_limit_count = sum(1 for err in key_errors.values() if "CHANNELS_LIMIT" in err)
+
+    # Caso 1: Todas las keys tienen NO_BALANCE
     if no_balance_count == total_keys:
         logger.error("❌ Todas las keys tienen NO_BALANCE. Apagando servicio indefinidamente.")
-        raise SMSNoBalance("Saldo insuficiente en todas las cuentas de SMS.")
+        raise SMSNoBalance("Saldo insuficiente en todas las cuentas de SMS. Avisar a administradores para recargar.")
 
+    # Caso 2: Al menos una key tiene CHANNELS_LIMIT (y no todas son NO_BALANCE)
+    if channels_limit_count > 0:
+        logger.error(f"❌ Al menos una key tiene CHANNELS_LIMIT ({channels_limit_count} keys). Apagando servicio por 30 minutos.")
+        raise SMSAccountBannedTemporarily("Al menos una cuenta de SMS está temporalmente baneada (límite de canales). El servicio se desactivará por 30 minutos.")
+
+    # Caso 3: Otros errores (sin NO_BALANCE ni CHANNELS_LIMIT)
     error_summary = ", ".join([f"{key[:4]}: {err}" for key, err in key_errors.items()])
     raise Exception(f"No se pudo obtener número. Errores: {error_summary}")
-
 def _prioritize_error(old: Optional[str], new: str) -> str:
     """Prioriza NO_BALANCE > CHANNELS_LIMIT > otros."""
     if not old:
