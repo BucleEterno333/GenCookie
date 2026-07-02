@@ -933,7 +933,6 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                 'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
             }.get(purchase_country, 'US')
             logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
-
             # ---------- BUCLE DE REINTENTOS PARA EL MISMO NÚMERO ----------
             registration_success = False
             for reg_retry in range(MAX_REG_RETRIES):
@@ -1215,6 +1214,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     logger.debug(f"{'='*60}\n")
                     
                     # ÉXITO
+                    registration_success = True
                     return {
                         "name": info["full_name"], "phone": sms_phone,
                         "password": password, "email": email,
@@ -1230,7 +1230,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     error_str = str(e)
                     logger.debug(f"Error en reg_retry #{reg_retry+1}: {error_str}")
                     
-                    # Detectar errores permanentes que obligan a cambiar de número
+                    # Definir errores permanentes (los que requieren cambiar de número)
                     permanent_keywords = [
                         "PERMANENT_EMAIL_ALREADY_USED",
                         "PERMANENT_UNUSUAL_ACTIVITY",
@@ -1239,10 +1239,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "detected unusual activity",
                         "already an account",
                         "entered already exists with another account",
-                        "Capture failed",
-                        "verifyToken",
-                        "WAF bypass falló",
-                        "FUNCAPTCHA"
+                        # Quitamos "Capture failed" y "verifyToken" de la lista permanente
                     ]
                     is_permanent = any(kw in error_str for kw in permanent_keywords)
                     
@@ -1250,34 +1247,26 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         logger.debug(f"Error permanente, cancelando número y pasando al siguiente.")
                         if activation_id:
                             set_status(hero_keys, activation_id, 8)
-                        # Salir del bucle de reintentos y del num_attempt (para comprar otro)
-                        break  # sale del for reg_retry
+                        break  # sale del for reg_retry (y del num_attempt, porque salta a la compra de otro número)
                     else:
-                        # Error transitorio (SSL, timeout, WAF, etc.)
+                        # Error transitorio: se reintenta
                         if reg_retry == MAX_REG_RETRIES - 1:
-                            # Último reintento fallido, cancelamos el número y pasamos al siguiente
                             logger.warning(f"Agotados reintentos para este número. Cancelando.")
                             if activation_id:
                                 set_status(hero_keys, activation_id, 8)
-                            break  # sale del for reg_retry
+                            break  # sale del for reg_retry (y del num_attempt, porque se agotaron los intentos)
                         else:
                             logger.debug(f"Reintentando con el mismo número (retry {reg_retry+2}/{MAX_REG_RETRIES})")
-                            time.sleep(2)  # espera antes de reintentar
+                            time.sleep(2)
                             continue  # siguiente reg_retry
-            else:
-                # Si el bucle for reg_retry termina sin break (éxito), no llegamos aquí.
-                # Pero si llegamos, significa que no hubo éxito y no se rompió por permanente.
-                # Lo manejamos como fallo total del número.
-                # En la parte donde se captura la excepción:
-
-                if activation_id:
-                    set_status(hero_keys, activation_id, 8)
-                # Saltar al siguiente intento externo (cambiar proxy)
-
+            # Aquí finaliza el for reg_retry
+            if not registration_success:
+                # Si no se registró, continuar con el siguiente número (num_attempt)
+                # No hace falta break porque el for reg_retry terminó por permanente o agotado
                 continue
-
-            # Si salimos del for reg_retry con break (por permanente o agotado), continuamos al siguiente número
-            continue
+            else:
+                # Si registration_success es True, ya se retornó, así que nunca se ejecuta
+                pass
 
         # Si se agotaron los números para este proxy, cambiar proxy
         logger.debug(f"Se agotaron {max_num_intentos} números para el proxy actual, cambiando de proxy...")
