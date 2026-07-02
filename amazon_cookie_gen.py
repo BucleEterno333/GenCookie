@@ -908,7 +908,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
     
     max_intentos = 50
     max_num_intentos = 5
-    MAX_REG_RETRIES = 10   # Reintentos del mismo número
+    MAX_REG_RETRIES = 20   # Reintentos del mismo número
 
     for intento in range(1, max_intentos + 1):
         if PROXY_LIST:
