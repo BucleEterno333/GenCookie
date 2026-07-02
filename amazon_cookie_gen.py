@@ -514,7 +514,7 @@ def _prioritize_error(old: Optional[str], new: str) -> str:
 
 
 
-def get_code(keys, activation_id: str, timeout: int = 125) -> str:
+def get_code(keys, activation_id: str, timeout: int = 300) -> str:
     if isinstance(keys, str):
         keys = [keys]
 
@@ -1238,7 +1238,11 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "AMAZON_BLOCKED_ACCOUNT",
                         "detected unusual activity",
                         "already an account",
-                        "entered already exists with another account"
+                        "entered already exists with another account",
+                        "Capture failed",
+                        "verifyToken",
+                        "WAF bypass falló",
+                        "FUNCAPTCHA"
                     ]
                     is_permanent = any(kw in error_str for kw in permanent_keywords)
                     
@@ -1264,9 +1268,12 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                 # Si el bucle for reg_retry termina sin break (éxito), no llegamos aquí.
                 # Pero si llegamos, significa que no hubo éxito y no se rompió por permanente.
                 # Lo manejamos como fallo total del número.
+                # En la parte donde se captura la excepción:
+
                 if activation_id:
                     set_status(hero_keys, activation_id, 8)
-                # Continuamos al siguiente num_attempt
+                # Saltar al siguiente intento externo (cambiar proxy)
+
                 continue
 
             # Si salimos del for reg_retry con break (por permanente o agotado), continuamos al siguiente número
@@ -2361,7 +2368,8 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
     else:
         logger.warning("   No se encontró botón Confirmar, asumiendo éxito")
         return True  
-async def wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=120, resend_interval=40):
+    
+async def wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=300, resend_interval=40):
     """
     Espera el código SMS hasta timeout_total segundos.
     Cada resend_interval segundos intenta hacer clic en el enlace de reenviar (si existe).
@@ -4129,7 +4137,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                     raise Exception(f"Campo de código no apareció: {e}")
 
                             # Esperar código SMS (con reenvío automático)
-                            sms_code = await wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=120, resend_interval=40)
+                            sms_code = await wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=300, resend_interval=40)
                             if sms_code:
                                 # Limpiar campo e ingresar código
                                 await code_input.fill('')
@@ -4149,7 +4157,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                 else:
                                     logger.warning("   No se encontró botón de verificar")
                             else:
-                                logger.warning(f"⏰ No se recibió código en 2 minutos (intento {num_att})")
+                                logger.warning(f"⏰ No se recibió código en 5 minutos (intento {num_att})")
                                 # Falló este número, continuar con el siguiente número del mismo país
 
                         # Incrementar contador de países probados y pasar al siguiente país
