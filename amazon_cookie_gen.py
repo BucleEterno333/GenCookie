@@ -1274,6 +1274,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
 # ===================================================================
 async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10, force_playwright=False):
     logger.debug(f"🚀 generate_cookie_api llamada con country={country}, force_playwright={force_playwright}")
+    global SERVICE_BLOCKED_UNTIL
 
     try:
         if country not in base_urls:
@@ -1503,7 +1504,7 @@ def is_service_enabled():
         # Usar solo x-bot-key (o Authorization Bearer si tienes token de admin)
         headers = {'x-bot-key': BOT_API_KEY}
         # La URL está bien: /service-status-for-generator
-        response = requests.get(f"{API_BASE_URL}/service-status-for-generator", headers=headers, timeout=5)
+        response = requests.get(f"{API_BASE_URL}/admin/service-status-for-generator", headers=headers, timeout=5)
         if response.status_code == 200:
             data = response.json()
             return data.get('enabled', True)
