@@ -350,40 +350,40 @@ def capS(api_key: str, images: list, question: str) -> dict:
     capsolver.api_key = api_key
     return capsolver.solve({"type": "AwsWafClassification", "question": f"aws:grid:{question}", "images": images})
 
-
 def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key) -> str:
-    """Bypassea WAF Amazon"""
-    import urllib.parse  # <-- agrega esto
+    """Bypassea WAF Amazon con reintentos internos ante errores de red."""
+    import urllib.parse
     for attempt in range(5):
-        j4 = sess.get(f"{captcha_url}/problem?kind=visual&domain=www.amazon.com&locale=en-US&problem=gridcaptcha-v2-5-0.1-0&num_solutions_required=1&id={aamation_id}").json()
-        target = json.loads(j4["assets"]["target"])[0]
-        images_raw = json.loads(j4["assets"]["images"])
         try:
-            solved = capS(solver_key, images_raw, target).get("objects", [])
+            j4 = sess.get(f"{captcha_url}/problem?kind=visual&domain=www.amazon.com&locale=en-US&problem=gridcaptcha-v2-5-0.1-0&num_solutions_required=1&id={aamation_id}").json()
+            target = json.loads(j4["assets"]["target"])[0]
+            images_raw = json.loads(j4["assets"]["images"])
+            try:
+                solved = capS(solver_key, images_raw, target).get("objects", [])
+            except Exception as e:
+                logger.debug(f"* CapSolver Exception: {e}")
+                continue
+            j5 = sess.post(f"{captcha_url}/verify", json={
+                "state": {"iv": j4["state"]["iv"], "payload": j4["state"]["payload"]},
+                "key": j4["key"], "hmac_tag": j4["hmac_tag"],
+                "client_solution": solved,
+                "metrics": {"solve_time_millis": random.randint(5000, 8000)},
+                "locale": "en-us"
+            }).json()
+            if not j5.get("captcha_voucher"):
+                logger.debug(f"* Captcha Failed => Attempt {attempt + 1}/5")
+                continue
+            captcha_jwt = j5["captcha_voucher"]
+            jwt_client_id = json.loads(base64.urlsafe_b64decode(captcha_jwt.split(".")[1] + "=="))["client_id"]
+            json6 = json.dumps({"challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1", "data": f'"{captcha_jwt}"'}, separators=(",", ":"))
+            action_type = json.loads(sess.get(f"https://www.amazon.com/aaut/verify/cvf/{jwt_client_id}?context={urllib.parse.quote(client_ctx)}&options={urllib.parse.quote(json_opt)}&response={urllib.parse.quote(json6)}").headers.get("amz-aamation-resp")).get("actionType")
+            logger.debug(f"* WAF Attempt {attempt + 1}/5 => {action_type}")
+            if action_type == "PASS":
+                return jwt_client_id
         except Exception as e:
-            logger.debug(f"* CapSolver Exception: {e}")
-            continue
-        j5 = sess.post(f"{captcha_url}/verify", json={
-            "state": {"iv": j4["state"]["iv"], "payload": j4["state"]["payload"]},
-            "key": j4["key"], "hmac_tag": j4["hmac_tag"],
-            "client_solution": solved,
-            "metrics": {"solve_time_millis": random.randint(5000, 8000)},
-            "locale": "en-us"
-        }).json()
-        if not j5.get("captcha_voucher"):
-            logger.debug(f"* Captcha Failed => Attempt {attempt + 1}/5")
-            continue
-        captcha_jwt = j5["captcha_voucher"]
-        jwt_client_id = json.loads(base64.urlsafe_b64decode(captcha_jwt.split(".")[1] + "=="))["client_id"]
-        json6 = json.dumps({"challengeType": "WAF_ADVERSARIAL_SYNTHETIC_GRID_V2_LEVEL_1", "data": f'"{captcha_jwt}"'}, separators=(",", ":"))
-        action_type = json.loads(sess.get(f"https://www.amazon.com/aaut/verify/cvf/{jwt_client_id}?context={urllib.parse.quote(client_ctx)}&options={urllib.parse.quote(json_opt)}&response={urllib.parse.quote(json6)}").headers.get("amz-aamation-resp")).get("actionType")
-        logger.debug(f"* WAF Attempt {attempt + 1}/5 => {action_type}")
-        if action_type == "PASS":
-            return jwt_client_id
+            logger.debug(f"* WAF attempt {attempt+1} error: {e}")
+            continue  # Reintenta en el siguiente intento
     raise Exception("WAF Failed After 5 Attempts")
-
-
-
 # ===================================================================
 # FUNCIÓN PARA CONTROLAR EL SERVICIO (activar/desactivar)
 # ===================================================================
