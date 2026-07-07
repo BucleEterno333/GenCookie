@@ -1568,32 +1568,7 @@ def is_service_enabled():
             return True
     except Exception:
         return True
-
-        
-    global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
-
-    # Si hay un bloqueo en memoria por falta de saldo de CapSolver, devolver False
-    if SERVICE_BLOCKED_REASON == 'capsolver_balance':
-        return False
-
-    # Si hay bloqueo temporal por SMS, comprobar si expiró
-    if time.time() < SERVICE_BLOCKED_UNTIL:
-        return False
-    else:
-        SERVICE_BLOCKED_UNTIL = 0
-        SERVICE_BLOCKED_REASON = None
-
-    # Consultar estado en la BD (por si el admin lo reactivó)
-    try:
-        response = requests.get(f"{API_BASE_URL}/service-status-for-generator", headers={'x-bot-key': BOT_API_KEY}, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get('enabled', True)
-        else:
-            return True
-    except Exception:
-        # Si no se puede conectar, devolver el estado local (si no hay bloqueo, True)
-        return True
+    
 def test_proxy(session, max_retries=3):
     """Prueba la conectividad del proxy y retorna la IP pública, con reintentos."""
     for attempt in range(max_retries):
