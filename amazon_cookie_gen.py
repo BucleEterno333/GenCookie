@@ -389,6 +389,9 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
             logger.debug(f"* WAF Attempt {attempt + 1}/5 => {action_type}")
             if action_type == "PASS":
                 return jwt_client_id
+            
+        except CAPSolverNoBalance:
+            raise   # <--- NUEVA LÍNEA: propaga esta excepción
         except Exception as e:
             logger.debug(f"* WAF attempt {attempt+1} error: {e}")
             continue  # Reintenta en el siguiente intento
