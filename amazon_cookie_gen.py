@@ -1529,50 +1529,46 @@ def get_best_session():
 def is_service_enabled():
     global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
 
-    # Si hay un bloqueo por SMS temporal, respetarlo
-    if SERVICE_BLOCKED_REASON == 'sms_temp' and time.time() < SERVICE_BLOCKED_UNTIL:
-        return False
-
-    # Si hay un bloqueo por falta de saldo de CapSolver, consultar la BD para ver si el admin ya reactivó
-    if SERVICE_BLOCKED_REASON == 'capsolver_balance':
-        # Preguntar a la BD si el servicio está habilitado
+    # Si no hay bloqueo, consultar BD
+    if SERVICE_BLOCKED_REASON is None and time.time() >= SERVICE_BLOCKED_UNTIL:
+        SERVICE_BLOCKED_UNTIL = 0
         try:
-            response = requests.get(f"{API_BASE_URL}/service-status-for-generator", headers={'x-bot-key': BOT_API_KEY}, timeout=5)
+            response = requests.get(
+                f"{API_BASE_URL}/service-status-for-generator",
+                headers={'x-bot-key': BOT_API_KEY},
+                timeout=5
+            )
             if response.status_code == 200:
                 data = response.json()
-                if data.get('enabled', False):
-                    # El admin reactivó, limpiar bloqueo local
-                    SERVICE_BLOCKED_REASON = None
-                    SERVICE_BLOCKED_UNTIL = 0
-                    return True
-                else:
-                    # Sigue desactivado
-                    return False
+                return data.get('enabled', True)
             else:
-                # No se puede consultar, mantener bloqueo (asumir desactivado)
-                return False
+                return True
         except Exception:
-            # Error de conexión, mantener bloqueo
-            return False
+            return True
 
-    # Si hay bloqueo temporal (no de CapSolver) y expiró, limpiar
-    if time.time() < SERVICE_BLOCKED_UNTIL:
-        return False
-    else:
-        SERVICE_BLOCKED_UNTIL = 0
-        SERVICE_BLOCKED_REASON = None
-
-    # Consultar estado en la BD
+    # Hay un bloqueo: consultar BD para ver si el admin ya reactivó
     try:
-        response = requests.get(f"{API_BASE_URL}/service-status-for-generator", headers={'x-bot-key': BOT_API_KEY}, timeout=5)
+        response = requests.get(
+            f"{API_BASE_URL}/service-status-for-generator",
+            headers={'x-bot-key': BOT_API_KEY},
+            timeout=5
+        )
         if response.status_code == 200:
             data = response.json()
-            return data.get('enabled', True)
+            if data.get('enabled', False):
+                # Admin reactivó → limpiar bloqueo local
+                SERVICE_BLOCKED_REASON = None
+                SERVICE_BLOCKED_UNTIL = 0
+                return True
+            else:
+                # Admin mantiene desactivado → respetar tiempo local
+                return time.time() < SERVICE_BLOCKED_UNTIL
         else:
-            return True
+            # No se puede consultar, usar tiempo local
+            return time.time() < SERVICE_BLOCKED_UNTIL
     except Exception:
-        return True
-    
+        # Error de conexión, usar tiempo local
+        return time.time() < SERVICE_BLOCKED_UNTIL   
 def test_proxy(session, max_retries=3):
     """Prueba la conectividad del proxy y retorna la IP pública, con reintentos."""
     for attempt in range(max_retries):
