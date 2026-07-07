@@ -397,20 +397,22 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
 # FUNCIÓN PARA CONTROLAR EL SERVICIO (activar/desactivar)
 # ===================================================================
 def set_service_enabled(enabled: bool) -> bool:
-
-
     global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
+
     if enabled:
         SERVICE_BLOCKED_UNTIL = 0
         SERVICE_BLOCKED_REASON = None
+    else:
+        # Si se desactiva, establecer un bloqueo en memoria (fallback)
+        SERVICE_BLOCKED_UNTIL = time.time() + 3600  # 1 hora
+        SERVICE_BLOCKED_REASON = 'capsolver_balance'  # o 'admin'
 
     try:
         headers = {
-            'x-bot-key': BOT_API_KEY,   # Solo este header es necesario
+            'x-bot-key': BOT_API_KEY,
             'Content-Type': 'application/json'
         }
         payload = {'enabled': enabled}
-        # ⚠️ URL corregida: sin /api
         response = requests.post(f"{API_BASE_URL}/admin/bot/toggle-service", json=payload, headers=headers, timeout=10)
         if response.status_code == 200:
             logger.info(f"✅ Servicio de generación {'activado' if enabled else 'desactivado'} correctamente")
@@ -1328,14 +1330,13 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
 
                 except CAPSolverNoBalance as e:
                     logger.error(f"❌ CapSolver sin saldo: {e}")
-                    set_service_enabled(False)
+                    set_service_enabled(False)   # Esto ya actualiza SERVICE_BLOCKED_REASON y SERVICE_BLOCKED_UNTIL
                     return {
                         'success': False,
                         'error': 'El servicio de resolución de captchas (CapSolver) no tiene saldo. El generador de cookies ha sido desactivado. Por favor, contacta al administrador para recargar el saldo y reactivar el servicio mediante /estatusCuki en el bot.',
                         'screenshot': None,
                         'captcha_balance': True
                     }
-
                 except SMSAccountBannedTemporarily as e:
                     logger.error(f"❌ Al menos una key de SMS está baneada temporalmente: {e}")
                     # Desactivar servicio en API (puede fallar)
@@ -1523,11 +1524,62 @@ def get_best_session():
 
 def is_service_enabled():
     global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
-    # Si hay bloqueo temporal activo (por SMS o no balance)
+
+    # Si hay un bloqueo por SMS temporal, respetarlo
+    if SERVICE_BLOCKED_REASON == 'sms_temp' and time.time() < SERVICE_BLOCKED_UNTIL:
+        return False
+
+    # Si hay un bloqueo por falta de saldo de CapSolver, consultar la BD para ver si el admin ya reactivó
+    if SERVICE_BLOCKED_REASON == 'capsolver_balance':
+        # Preguntar a la BD si el servicio está habilitado
+        try:
+            response = requests.get(f"{API_BASE_URL}/service-status-for-generator", headers={'x-bot-key': BOT_API_KEY}, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('enabled', False):
+                    # El admin reactivó, limpiar bloqueo local
+                    SERVICE_BLOCKED_REASON = None
+                    SERVICE_BLOCKED_UNTIL = 0
+                    return True
+                else:
+                    # Sigue desactivado
+                    return False
+            else:
+                # No se puede consultar, mantener bloqueo (asumir desactivado)
+                return False
+        except Exception:
+            # Error de conexión, mantener bloqueo
+            return False
+
+    # Si hay bloqueo temporal (no de CapSolver) y expiró, limpiar
     if time.time() < SERVICE_BLOCKED_UNTIL:
         return False
     else:
-        # Si expiró, limpiar
+        SERVICE_BLOCKED_UNTIL = 0
+        SERVICE_BLOCKED_REASON = None
+
+    # Consultar estado en la BD
+    try:
+        response = requests.get(f"{API_BASE_URL}/service-status-for-generator", headers={'x-bot-key': BOT_API_KEY}, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('enabled', True)
+        else:
+            return True
+    except Exception:
+        return True
+
+        
+    global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
+
+    # Si hay un bloqueo en memoria por falta de saldo de CapSolver, devolver False
+    if SERVICE_BLOCKED_REASON == 'capsolver_balance':
+        return False
+
+    # Si hay bloqueo temporal por SMS, comprobar si expiró
+    if time.time() < SERVICE_BLOCKED_UNTIL:
+        return False
+    else:
         SERVICE_BLOCKED_UNTIL = 0
         SERVICE_BLOCKED_REASON = None
 
@@ -1540,8 +1592,8 @@ def is_service_enabled():
         else:
             return True
     except Exception:
+        # Si no se puede conectar, devolver el estado local (si no hay bloqueo, True)
         return True
-
 def test_proxy(session, max_retries=3):
     """Prueba la conectividad del proxy y retorna la IP pública, con reintentos."""
     for attempt in range(max_retries):
