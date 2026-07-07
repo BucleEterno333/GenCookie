@@ -1235,9 +1235,13 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "num_attempts": num_attempt
                     }
                 
+                except CAPSolverNoBalance:
+                    # Propaga la excepción para que generate_cookie_api la capture y desactive el servicio
+                    raise
                 except (SMSAccountBannedTemporarily, SMSNoBalance):
                     raise
                 except Exception as e:
+                    
                     error_str = str(e)
                     logger.debug(f"Error en reg_retry #{reg_retry+1}: {error_str}")
                     
