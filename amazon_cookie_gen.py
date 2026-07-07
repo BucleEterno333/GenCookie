@@ -252,6 +252,10 @@ class SMSAccountBannedTemporarily(Exception):
     """Al menos una key de SMS está en ban temporal (CHANNELS_LIMIT)"""
     pass
 
+class CAPSolverNoBalance(Exception):
+    """La key de CapSolver tiene saldo insuficiente"""
+    pass
+
 class SMSNoBalance(Exception):
     """Todas las keys de SMS tienen saldo insuficiente (NO_BALANCE)"""
     pass
@@ -361,8 +365,13 @@ def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key)
             try:
                 solved = capS(solver_key, images_raw, target).get("objects", [])
             except Exception as e:
-                logger.debug(f"* CapSolver Exception: {e}")
-                continue
+                error_str = str(e)
+                if "AuthenticationError" in error_str or "balance is insufficient" in error_str:
+                    # Lanzar excepción específica para desactivar el servicio
+                    raise CAPSolverNoBalance("CapSolver sin saldo o clave inválida")
+                else:
+                    logger.debug(f"* CapSolver Exception: {e}")
+                    continue
             j5 = sess.post(f"{captcha_url}/verify", json={
                 "state": {"iv": j4["state"]["iv"], "payload": j4["state"]["payload"]},
                 "key": j4["key"], "hmac_tag": j4["hmac_tag"],
@@ -1315,6 +1324,17 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                             'purchase_country': country
                         }
                         return {'success': True, 'data': account_data, 'country': country, 'screenshot': None}
+                    
+
+                except CAPSolverNoBalance as e:
+                    logger.error(f"❌ CapSolver sin saldo: {e}")
+                    set_service_enabled(False)
+                    return {
+                        'success': False,
+                        'error': 'El servicio de resolución de captchas (CapSolver) no tiene saldo. El generador de cookies ha sido desactivado. Por favor, contacta al administrador para recargar el saldo y reactivar el servicio mediante /estatusCuki en el bot.',
+                        'screenshot': None,
+                        'captcha_balance': True
+                    }
 
                 except SMSAccountBannedTemporarily as e:
                     logger.error(f"❌ Al menos una key de SMS está baneada temporalmente: {e}")
