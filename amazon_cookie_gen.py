@@ -101,7 +101,7 @@ USER_AGENTS = [
 ]
 
 
-
+TIMEOUT_SMS = int(os.getenv('TIMEOUT_SMS', '30'))   # <--- NUEVA LÍNEA
 
 
 _SMS_API = "https://hero-sms.com/stubs/handler_api.php"
@@ -528,7 +528,7 @@ def _prioritize_error(old: Optional[str], new: str) -> str:
 
 
 
-def get_code(keys, activation_id: str, timeout: int = 300) -> str:
+def get_code(keys, activation_id: str, timeout: int = TIMEOUT_SMS) -> str:
     if isinstance(keys, str):
         keys = [keys]
 
@@ -2408,7 +2408,7 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
         logger.warning("   No se encontró botón Confirmar, asumiendo éxito")
         return True  
     
-async def wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=300, resend_interval=40):
+async def wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total: int = TIMEOUT_SMS, resend_interval: int = 40):
     """
     Espera el código SMS hasta timeout_total segundos.
     Cada resend_interval segundos intenta hacer clic en el enlace de reenviar (si existe).
@@ -2658,7 +2658,7 @@ async def get_hero_sms_number(country_code, service='am'):
         logger.warning(f"Hero SMS exception: {e}")
         return None
     
-async def get_hero_sms_code(activation_id, timeout=180):
+async def get_hero_sms_code(activation_id, timeout: int = TIMEOUT_SMS):
     url = "https://hero-sms.com/stubs/handler_api.php"
     params = {
         'api_key': HERO_SMS_API_KEY,
@@ -2722,7 +2722,7 @@ def get_phone_number_sync(country_code, force_service=None, force_country=None):
     finally:
         loop.close()
 
-def get_hero_sms_code_sync(activation_id, timeout=180):
+def get_hero_sms_code_sync(activation_id, timeout: int = TIMEOUT_SMS):
     """SMS code polling síncrono para Hero SMS"""
     start = time.time()
     url = "https://hero-sms.com/stubs/handler_api.php"
@@ -2739,7 +2739,7 @@ def get_hero_sms_code_sync(activation_id, timeout=180):
         time.sleep(5)
     return None
 
-def get_fivesim_code_sync(order_id, timeout=180):
+def get_fivesim_code_sync(order_id, timeout: int = TIMEOUT_SMS):
     """SMS code polling síncrono para 5sim"""
     url = f"{FIVESIM_BASE_URL}/user/check/{order_id}"
     headers = {'Authorization': f'Bearer {FIVESIM_API_KEY}', 'Accept': 'application/json'}
@@ -4176,7 +4176,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                     raise Exception(f"Campo de código no apareció: {e}")
 
                             # Esperar código SMS (con reenvío automático)
-                            sms_code = await wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=300, resend_interval=40)
+                            sms_code = await wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=TIMEOUT_SMS, resend_interval=40)
                             if sms_code:
                                 # Limpiar campo e ingresar código
                                 await code_input.fill('')
