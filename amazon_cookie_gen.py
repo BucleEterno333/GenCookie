@@ -925,11 +925,16 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
     MAX_REG_RETRIES = 20   # Reintentos del mismo número
 
     for intento in range(1, max_intentos + 1):
+        # Si hay lista de proxies y es el primer intento o se requiere nuevo proxy, elegir uno (pero la selección se hará dentro del bucle)
+        # Solo para propósitos de depuración, podemos dejar un proxy por defecto si no tenemos lista.
         if PROXY_LIST:
-            if intento > 1 or not proxy:
-                proxy = random.choice(PROXY_LIST).strip()
-            logger.debug(f"Proxy: {proxy.split('@')[1] if '@' in proxy else proxy}")
-        
+            # El proxy se elegirá en cada reg_retry, pero podemos inicializar con uno
+            current_proxy = random.choice(PROXY_LIST).strip() if PROXY_LIST else None
+        else:
+            current_proxy = proxy  # el proxy pasado por parámetro (puede ser None)
+
+        logger.debug(f"Proxy base para intento {intento}: {current_proxy.split('@')[1] if current_proxy and '@' in current_proxy else current_proxy}")
+
         for num_attempt in range(1, max_num_intentos + 1):
             # ---------- OBTENER NÚMERO ----------
             try:
@@ -947,9 +952,17 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                 'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
             }.get(purchase_country, 'US')
             logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
+            
             # ---------- BUCLE DE REINTENTOS PARA EL MISMO NÚMERO ----------
             registration_success = False
             for reg_retry in range(MAX_REG_RETRIES):
+                # ====== NUEVO: Seleccionar proxy al inicio de cada reintento (si hay lista) ======
+                if PROXY_LIST:
+                    proxy_elegido = random.choice(PROXY_LIST).strip()
+                    logger.debug(f"Proxy elegido para reg_retry {reg_retry+1}: {proxy_elegido}")
+                else:
+                    proxy_elegido = current_proxy  # si no hay lista, usar el que vino por parámetro (puede ser None)
+                
                 try:
                     logger.debug(f"\n{'='*60}")
                     logger.debug(f"INTENTO EXTERNO #{intento} - NUM # {num_attempt} - REG RETRY #{reg_retry+1}")
@@ -976,8 +989,9 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "DNT": "1",
                     })
                     
-                    if proxy:
-                        sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+                    if proxy_elegido:
+                        sess.proxies = {"http": f"http://{proxy_elegido}", "https": f"http://{proxy_elegido}"}
+                        logger.debug(f"Usando proxy: {proxy_elegido}")
                     
                     # ---------- EMAIL EN PARALELO ----------
                     mail_result = {}
@@ -1239,25 +1253,30 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     }
                 
                 except CAPSolverNoBalance:
-                    # Propaga la excepción para que generate_cookie_api la capture y desactive el servicio
                     raise
                 except (SMSAccountBannedTemporarily, SMSNoBalance):
                     raise
                 except Exception as e:
-                    
                     error_str = str(e)
                     logger.debug(f"Error en reg_retry #{reg_retry+1}: {error_str}")
                     
-                    # Definir errores permanentes (los que requieren cambiar de número)
+                    # ====== NUEVO: Detectar actividad inusual y cambiar proxy (sin cancelar número) ======
+                    is_unusual = "PERMANENT_UNUSUAL_ACTIVITY" in error_str or "detected unusual activity" in error_str
+                    
+                    if is_unusual and PROXY_LIST:
+                        # Cambiamos proxy y reintentamos con el mismo número
+                        logger.debug("🔄 Actividad inusual detectada → cambiando proxy y reintentando (mismo número)")
+                        # No cancelamos el número, solo continuamos al siguiente reintento con nuevo proxy
+                        continue  # va al siguiente reg_retry
+                    
+                    # Para otros errores, mantener la lógica original
                     permanent_keywords = [
                         "PERMANENT_EMAIL_ALREADY_USED",
-                        "PERMANENT_UNUSUAL_ACTIVITY",
+                        "PERMANENT_UNUSUAL_ACTIVITY",  # ya cubierto, pero por si acaso
                         "PERMANENT_NUMBER_ALREADY_REGISTERED",
                         "AMAZON_BLOCKED_ACCOUNT",
-                        "detected unusual activity",
                         "already an account",
                         "entered already exists with another account",
-                        # Quitamos "Capture failed" y "verifyToken" de la lista permanente
                     ]
                     is_permanent = any(kw in error_str for kw in permanent_keywords)
                     
@@ -1277,6 +1296,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                             logger.debug(f"Reintentando con el mismo número (retry {reg_retry+2}/{MAX_REG_RETRIES})")
                             time.sleep(2)
                             continue  # siguiente reg_retry
+
             # Aquí finaliza el for reg_retry
             if not registration_success:
                 # Si no se registró, continuar con el siguiente número (num_attempt)
@@ -1290,8 +1310,6 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
         logger.debug(f"Se agotaron {max_num_intentos} números para el proxy actual, cambiando de proxy...")
     
     raise Exception(f"Se agotaron los {max_intentos} intentos externos")
-
-
 # generate_cookie_api COMPLETA CON MANEJO DE EXCEPCIONES
 # ===================================================================
 async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10, force_playwright=False):
