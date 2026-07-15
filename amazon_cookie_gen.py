@@ -3727,7 +3727,9 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                 '#ap_change_login_claim',
                                 'a:has-text("Cambiar")',
                                 'a:has-text("Change")',
-                                'a[href*="ap/signin"][href*="prepopulatedLoginId"]'
+                                'a[href*="ap/signin"][href*="prepopulatedLoginId"]',
+                                'a[href*="/ap/register?"]',          # <-- añadir
+                                'a[href*="sign_in_otp_change"]'      # <-- añadir
                             ]
                             for sel in change_selectors:
                                 try:
@@ -3817,26 +3819,19 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
                     # ----- PASO 10.3: Manejar números ya registrados (bucle de cambio) -----
                     if "claim?" in page.url.lower():
-
                         logger.warning("⚠️ Número ya registrado detectado en el paso de registro.")
-                        page_content = await page.content()
-                        if "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content:
-                            logger.warning("   ❌ Página de error de Amazon detectada (Lo sentimos, no podemos crear tu cuenta). Lanzando excepción para reintento  .")
-                            raise Exception("AMAZON_ERROR_LOSENTIMOS")
                         try:
-
                             phone_info, service_id, service_name, purchase_country = await handle_registered_number(
                                 page, phone_info, service_id, service_name, country_code,
                                 phone_field_selector, continue_selectors, account_data
                             )
-                            # Actualizar también variables externas
+                            # Actualizar variables externas
                             account_data['phone'] = phone_info['local']
                             account_data['purchase_country'] = purchase_country
-                            # Ahora ya tenemos un nuevo número, continuar con el flujo normal
+                            # Continuar con el flujo normal
                         except Exception as e:
                             logger.error(f"Error cambiando número registrado: {e}")
                             raise
-
 
                     # ----- PASO 10.5: Resolver captcha si aparece antes del envío -----
                     await handle_captcha_if_present(page, step_name="pre_submit")
