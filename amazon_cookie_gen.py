@@ -2793,251 +2793,176 @@ def get_fivesim_code_sync(order_id, timeout: int = TIMEOUT_SMS):
         time.sleep(5)
     return None
 
-
+# ===================================================================
+# FUNCIÓN PRINCIPAL PARA OBTENER NÚMERO (VERSIÓN UNIFICADA)
+# ===================================================================
 async def get_phone_number(account_country, force_service=None, force_country=None):
     """
-    Obtiene un número de teléfono.
-    Si force_service está presente, solo intenta ese servicio.
-    Si force_country está presente, intenta ese país primero y luego el resto del orden (sin duplicados).
-    De lo contrario, sigue el orden por precio de cada servicio.
+    Obtiene un número de teléfono usando la lógica unificada:
+    - Prueba todas las keys de Hero SMS para cada país en orden.
+    - Si Hero falla (NO_BALANCE o CHANNELS_LIMIT), pasa a 5sim.
+    - Si se fuerza un servicio y/o país, respeta esa preferencia.
     """
     # Prefijos para extraer número local (dígitos después del código país)
     prefix_len = {
         'ID': 2, 'MX': 2, 'US': 1, 'CA': 1, 'UK': 2, 'DE': 2, 'FR': 2,
         'IT': 2, 'ES': 2, 'JP': 2, 'AU': 2, 'IN': 2,
-        # Países adicionales para Hero SMS
-        'BR': 2,   # Brasil +55 (2 dígitos después del 55)
-        'CM': 3,   # Camerún +237 (3 dígitos)
-        'MA': 3,   # Marruecos +212 (3 dígitos)
-        'KG': 3,   # Kirguistán +996 (3 dígitos)
-        'CO': 2,   # Colombia +57 (2 dígitos)
+        'BR': 2, 'CM': 3, 'MA': 3, 'KG': 3, 'CO': 2,
     }
     prefix_len_plus = {
         'ID': 3, 'MX': 3, 'US': 2, 'CA': 2, 'UK': 3, 'DE': 3, 'FR': 3,
-        'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3, 'KG': 3, 'PL': 3, 'CO': 3, 'LV': 3, 'PK': 3, 'TJ': 3, 'KE': 3,
-        # Los mismos países para 5sim (si usas + y código)
-        'BR': 3,   # +55 son 2 dígitos? En realidad el número devuelto por 5sim puede incluir el código de país como prefijo, ajusta según lo que observes.
-        'CM': 4,
-        'MA': 4,
+        'IT': 3, 'ES': 3, 'JP': 3, 'AU': 3, 'IN': 3, 'KG': 3, 'PL': 3,
+        'CO': 3, 'LV': 3, 'PK': 3, 'TJ': 3, 'KE': 3, 'BR': 3, 'CM': 4, 'MA': 4,
     }
 
-
-
-    # Orden de países por precio (barato a caro) para Hero
-    hero_order = HERO_COUNTRY_ORDER 
-
-
-    # Para 5sim, obtener precios reales
-    fivesim_prices = await get_fivesim_prices()
-    if fivesim_prices:
-        fivesim_order = list(fivesim_prices.keys())  # ya ordenado por precio
-    else:
-        fivesim_order = FIVESIM_MANUAL_ORDER
-
-    # -------------------------------------------------------------------
-    # Caso 1: Se fuerza un servicio y un país específico
-    # -------------------------------------------------------------------
+    # ---------- CASO 1: Se fuerza un servicio y un país específico ----------
     if force_service and force_country:
-        logger.debug(f"🔒 Forzando servicio={force_service}, país={force_country} (primero, luego resto del orden)")
-        target_service = None
-        for s in SMS_SERVICES:
-            if s['name'] == force_service and s['enabled']:
-                target_service = s
-                break
-        if not target_service:
-            logger.warning(f"   ❌ Servicio {force_service} no disponible")
+        logger.debug(f"🔒 Forzando servicio={force_service}, país={force_country}")
+        if force_service == 'hero':
+            try:
+                activation_id, phone, purchase_country = get_number(HERO_SMS_KEYS, country_code=force_country)
+                local_len = prefix_len.get(purchase_country, 0)
+                phone_local = phone[local_len:] if local_len and len(phone) > local_len else phone
+                phone_local = re.sub(r'\D', '', phone_local)
+                return {
+                    'full': f'+{phone}',
+                    'local': phone_local,
+                    'service_id': activation_id,
+                    'service_name': 'hero',
+                    'purchase_country': purchase_country
+                }
+            except Exception as e:
+                logger.warning(f"Hero SMS forzado falló en {force_country}: {e}")
+                return None
+        elif force_service == '5sim':
+            try:
+                phone_full, service_id = await get_fivesim_number(force_country)
+                if not phone_full or not service_id:
+                    return None
+                local_len = prefix_len_plus.get(force_country, 0)
+                phone_local = phone_full[local_len:] if local_len and len(phone_full) > local_len else phone_full
+                phone_local = re.sub(r'\D', '', phone_local)
+                return {
+                    'full': phone_full,
+                    'local': phone_local,
+                    'service_id': service_id,
+                    'service_name': '5sim',
+                    'purchase_country': force_country
+                }
+            except Exception as e:
+                logger.warning(f"5sim forzado falló en {force_country}: {e}")
+                return None
+        else:
             return None
 
-        # Construir la lista de países a probar: primero el forzado, luego el resto del orden sin duplicados
+    # ---------- CASO 2: Se fuerza solo el servicio (sin país) ----------
+    if force_service:
+        logger.debug(f"🔒 Forzando solo servicio={force_service}")
         if force_service == 'hero':
-            full_order = hero_order
+            for country in HERO_COUNTRY_ORDER:
+                try:
+                    activation_id, phone, purchase_country = get_number(HERO_SMS_KEYS, country_code=country)
+                    local_len = prefix_len.get(purchase_country, 0)
+                    phone_local = phone[local_len:] if local_len and len(phone) > local_len else phone
+                    phone_local = re.sub(r'\D', '', phone_local)
+                    return {
+                        'full': f'+{phone}',
+                        'local': phone_local,
+                        'service_id': activation_id,
+                        'service_name': 'hero',
+                        'purchase_country': purchase_country
+                    }
+                except SMSNoBalance as e:
+                    logger.error(f"Hero SMS sin saldo en {country}: {e}")
+                    break  # si todas las keys tienen NO_BALANCE, no seguir con otros países (misma cuenta)
+                except SMSAccountBannedTemporarily as e:
+                    logger.warning(f"Hero SMS baneado temporalmente en {country}: {e}")
+                    continue
+                except Exception as e:
+                    logger.debug(f"Hero SMS error en {country}: {e}")
+                    continue
+            return None
         elif force_service == '5sim':
-            full_order = fivesim_order
-        else:
-            full_order = [account_country]
-
-        # Crear lista ordenada: force_country primero, luego los demás en el orden original (sin repetir)
-        countries_to_try = [force_country]
-        for c in full_order:
-            if c != force_country:
-                countries_to_try.append(c)
-
-        for purchase_country in countries_to_try:
-            logger.debug(f"   Probando país {purchase_country} (servicio forzado {force_service})...")
-            try:
-                if force_service == 'hero':
-                    country_num = hero_country_map.get(purchase_country)
-                    if not country_num:
-                        logger.debug(f"   No hay mapeo Hero para {purchase_country}")
+            # Obtener orden de países para 5sim (por precio)
+            fivesim_prices = await get_fivesim_prices()
+            order = list(fivesim_prices.keys()) if fivesim_prices else FIVESIM_MANUAL_ORDER
+            for country in order:
+                try:
+                    phone_full, service_id = await get_fivesim_number(country)
+                    if not phone_full or not service_id:
                         continue
-                    result = await target_service['get_number'](country_num, service='am')
-                    if result:
-                        phone_full, service_id = result
-                        local_len = prefix_len.get(purchase_country, 0)
-                        if local_len and len(phone_full) > local_len:
-                            phone_local = phone_full[local_len:]
-                            phone_local = re.sub(r'\D', '', phone_local)
-                        else:
-                            phone_local = phone_full
-                        return {
-                            'full': f'+{phone_full}',
-                            'local': phone_local,
-                            'service_id': service_id,
-                            'service_name': force_service,
-                            'purchase_country': purchase_country
-                        }
-                elif force_service == '5sim':
-                    result = await target_service['get_number'](purchase_country, product='amazon')
-                    if result:
-                        phone_full, service_id = result
-                        local_len = prefix_len_plus.get(purchase_country, 0)
-                        if local_len and len(phone_full) > local_len:
-                            phone_local = phone_full[local_len:]
-                            phone_local = re.sub(r'\D', '', phone_local)
-                        else:
-                            phone_local = phone_full
-                        return {
-                            'full': phone_full,
-                            'local': phone_local,
-                            'service_id': service_id,
-                            'service_name': force_service,
-                            'purchase_country': purchase_country
-                        }
-            except Exception as e:
-                logger.warning(f"   Error con {force_service} en {purchase_country}: {e}")
-                continue
-        return None
-
-    # -------------------------------------------------------------------
-    # Caso 2: Se fuerza solo el servicio (sin país): iterar sobre todos los países de ese servicio
-    # -------------------------------------------------------------------
-    if force_service and not force_country:
-        logger.debug(f"🔒 Forzando solo servicio={force_service} (probando todos los países en orden)")
-        target_service = None
-        for s in SMS_SERVICES:
-            if s['name'] == force_service and s['enabled']:
-                target_service = s
-                break
-        if not target_service:
-            logger.warning(f"   ❌ Servicio {force_service} no disponible")
+                    local_len = prefix_len_plus.get(country, 0)
+                    phone_local = phone_full[local_len:] if local_len and len(phone_full) > local_len else phone_full
+                    phone_local = re.sub(r'\D', '', phone_local)
+                    return {
+                        'full': phone_full,
+                        'local': phone_local,
+                        'service_id': service_id,
+                        'service_name': '5sim',
+                        'purchase_country': country
+                    }
+                except Exception as e:
+                    logger.debug(f"5sim error en {country}: {e}")
+                    continue
+            return None
+        else:
             return None
 
-        # Obtener el orden de países para ese servicio
-        if force_service == 'hero':
-            country_order = hero_order
-        elif force_service == '5sim':
-            country_order = fivesim_order
-        else:
-            country_order = [account_country]
-
-        for purchase_country in country_order:
-            logger.debug(f"   Probando país {purchase_country} (servicio forzado {force_service})...")
-            try:
-                if force_service == 'hero':
-                    country_num = hero_country_map.get(purchase_country)
-                    if not country_num:
-                        continue
-                    result = await target_service['get_number'](country_num, service='am')
-                    if result:
-                        phone_full, service_id = result
-                        local_len = prefix_len.get(purchase_country, 0)
-                        if local_len and len(phone_full) > local_len:
-                            phone_local = phone_full[local_len:]
-                            phone_local = re.sub(r'\D', '', phone_local)
-                        else:
-                            phone_local = phone_full
-                        return {
-                            'full': f'+{phone_full}',
-                            'local': phone_local,
-                            'service_id': service_id,
-                            'service_name': force_service,
-                            'purchase_country': purchase_country
-                        }
-                elif force_service == '5sim':
-                    result = await target_service['get_number'](purchase_country, product='amazon')
-                    if result:
-                        phone_full, service_id = result
-                        local_len = prefix_len_plus.get(purchase_country, 0)
-                        if local_len and len(phone_full) > local_len:
-                            phone_local = phone_full[local_len:]
-                            phone_local = re.sub(r'\D', '', phone_local)
-                        else:
-                            phone_local = phone_full
-                        return {
-                            'full': phone_full,
-                            'local': phone_local,
-                            'service_id': service_id,
-                            'service_name': force_service,
-                            'purchase_country': purchase_country
-                        }
-            except Exception as e:
-                logger.warning(f"   Error con {force_service} en {purchase_country}: {e}")
-                continue
-        return None
-
-    # -------------------------------------------------------------------
-    # Caso 3: Sin fuerza: iterar sobre servicios y países normalmente
-    # -------------------------------------------------------------------
-    for service in SMS_SERVICES:
-        if not service['enabled']:
+    # ---------- CASO 3: Sin fuerza: probar hero (con todas las keys) y luego 5sim ----------
+    # 3.1 Intentar con Hero SMS (todas las keys) en cada país del orden
+    for country in HERO_COUNTRY_ORDER:
+        try:
+            activation_id, phone, purchase_country = get_number(HERO_SMS_KEYS, country_code=country)
+            local_len = prefix_len.get(purchase_country, 0)
+            phone_local = phone[local_len:] if local_len and len(phone) > local_len else phone
+            phone_local = re.sub(r'\D', '', phone_local)
+            logger.debug(f"✅ Número obtenido con Hero SMS: {phone} (país {purchase_country})")
+            return {
+                'full': f'+{phone}',
+                'local': phone_local,
+                'service_id': activation_id,
+                'service_name': 'hero',
+                'purchase_country': purchase_country
+            }
+        except SMSNoBalance as e:
+            logger.error(f"❌ Hero SMS sin saldo en {country}: {e}")
+            # Si es NO_BALANCE para todas las keys, no tiene sentido probar otros países (misma cuenta)
+            break
+        except SMSAccountBannedTemporarily as e:
+            logger.warning(f"⚠️ Hero SMS baneado temporalmente en {country}: {e}")
+            continue  # probar siguiente país (podría funcionar)
+        except Exception as e:
+            logger.debug(f"⚠️ Hero SMS error en {country}: {e}")
             continue
-        logger.debug(f"Intentando con {service['name']}...")
 
-        # Elegir orden de países según servicio
-        if service['name'] == '5sim':
-            country_order = fivesim_order
-        elif service['name'] == 'hero':
-            country_order = hero_order
-        else:
-            country_order = [account_country]
-
-        for purchase_country in country_order:
-            logger.debug(f"   Probando país {purchase_country}...")
+    # 3.2 Si Hero falla, intentar con 5sim
+    logger.debug("🔄 Hero SMS falló, intentando con 5sim...")
+    if FIVESIM_API_KEY:
+        fivesim_prices = await get_fivesim_prices()
+        order = list(fivesim_prices.keys()) if fivesim_prices else FIVESIM_MANUAL_ORDER
+        for country in order:
             try:
-                if service['name'] == 'hero':
-                    purchase_country_num = hero_country_map.get(purchase_country)
-                    if not purchase_country_num:
-                        logger.debug(f"   No hay mapeo Hero SMS para {purchase_country}")
-                        continue
-                    result = await service['get_number'](purchase_country_num, service='am')
-                    if result:
-                        phone_full, service_id = result
-                        local_len = prefix_len.get(purchase_country, 0)
-                        if local_len and len(phone_full) > local_len:
-                            phone_local = phone_full[local_len:]
-                            phone_local = re.sub(r'\D', '', phone_local)
-                        else:
-                            phone_local = phone_full
-                        return {
-                            'full': f'+{phone_full}',
-                            'local': phone_local,
-                            'service_id': service_id,
-                            'service_name': service['name'],
-                            'purchase_country': purchase_country
-                        }
-                elif service['name'] == '5sim':
-                    result = await service['get_number'](purchase_country, product='amazon')
-                    if result:
-                        phone_full, service_id = result
-                        local_len = prefix_len_plus.get(purchase_country, 0)
-                        if local_len and len(phone_full) > local_len:
-                            phone_local = phone_full[local_len:]
-                            phone_local = re.sub(r'\D', '', phone_local)
-                        else:
-                            phone_local = phone_full
-                        return {
-                            'full': phone_full,
-                            'local': phone_local,
-                            'service_id': service_id,
-                            'service_name': service['name'],
-                            'purchase_country': purchase_country
-                        }
+                phone_full, service_id = await get_fivesim_number(country)
+                if not phone_full or not service_id:
+                    continue
+                local_len = prefix_len_plus.get(country, 0)
+                phone_local = phone_full[local_len:] if local_len and len(phone_full) > local_len else phone_full
+                phone_local = re.sub(r'\D', '', phone_local)
+                logger.debug(f"✅ Número obtenido con 5sim: {phone_full} (país {country})")
+                return {
+                    'full': phone_full,
+                    'local': phone_local,
+                    'service_id': service_id,
+                    'service_name': '5sim',
+                    'purchase_country': country
+                }
             except Exception as e:
-                logger.warning(f"   Error con {service['name']} en {purchase_country}: {e}")
+                logger.debug(f"⚠️ 5sim error en {country}: {e}")
                 continue
+
+    # Si todo falla
+    logger.error("❌ No se pudo obtener número de teléfono con ningún servicio.")
     return None
-
-
 async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30):
     for attempt in range(max_retries):
         logger.debug(f"📱 Esperando código SMS (intento {attempt+1}/{max_retries})...")
