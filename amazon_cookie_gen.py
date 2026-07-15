@@ -3617,74 +3617,80 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     last_screenshot = await take_screenshot(page, "despues_continuar")
 
 
+
+
                     async def handle_registered_number(page, phone_info, service_id, service_name, country_code,
                                                     phone_field_selector, continue_selectors, account_data,
-                                                    max_attempts=5):  # Reducimos intentos
+                                                    max_attempts=3):
                         """
                         Maneja el escenario donde el número actual ya está registrado en Amazon.
-                        Busca el enlace 'Cambiar', obtiene un nuevo número (probando otros países si es necesario),
-                        lo ingresa y hace clic en Continuar.
+                        Busca el enlace 'Cambiar' (por ID), obtiene la URL y navega directamente.
                         """
                         for attempt in range(1, max_attempts + 1):
                             logger.debug(f"   Intentando cambiar número (intento {attempt}/{max_attempts})...")
 
-                            # --- Estrategia 1: Esperar el enlace con Playwright ---
-                            change_url = None
+                            # ---- Estrategia 1: Obtener URL directamente con evaluate ----
                             try:
-                                # Esperar hasta 10 segundos a que el enlace aparezca
+                                change_url = await page.evaluate('''
+                                    () => {
+                                        const el = document.querySelector('a#ap_change_login_claim');
+                                        return el ? el.href : null;
+                                    }
+                                ''')
+                                if change_url:
+                                    logger.debug(f"   ✅ URL obtenida vía evaluate: {change_url}")
+                                    await page.goto(change_url, wait_until='domcontentloaded', timeout=30000)
+                                    await page.wait_for_selector(phone_field_selector, state='visible', timeout=10000)
+                                    break  # éxito, salimos del bucle
+                            except Exception as e:
+                                logger.debug(f"   ⚠️ Evaluate falló: {e}")
+
+                            # ---- Estrategia 2: Esperar selector (attached) y luego obtener href ----
+                            try:
                                 change_link = await page.wait_for_selector(
                                     'a#ap_change_login_claim',
-                                    state='visible',
-                                    timeout=10000
+                                    state='attached',
+                                    timeout=3000
                                 )
                                 if change_link:
-                                    # Obtener href y hacer clic con navegación
                                     change_url = await change_link.get_attribute('href')
                                     if change_url:
-                                        # Asegurar que la URL esté completa (si es relativa)
                                         if change_url.startswith('/'):
                                             change_url = urljoin(page.url, change_url)
-                                        logger.debug(f"   ✅ Enlace encontrado: {change_url}")
-                                        await page.goto(change_url, wait_until='domcontentloaded', timeout=30000)
-                                        # Esperar que cargue el campo de número
-                                        await page.wait_for_selector(phone_field_selector, state='visible', timeout=10000)
-                                        change_link = True
-                                        break  # Salir del bucle si se encontró y navegó
-                            except Exception as e:
-                                logger.debug(f"   ⚠️ No se pudo hacer clic en el enlace: {e}")
-
-                            # --- Estrategia 2: Extraer URL del HTML manualmente ---
-                            if not change_url:
-                                logger.debug("   🔍 Buscando enlace en el HTML...")
-                                try:
-                                    content = await page.content()
-                                    # Regex mejorado para capturar href con todos los caracteres
-                                    match = re.search(
-                                        r'<a\s+id="ap_change_login_claim"[^>]*href="([^"]+)"',
-                                        content,
-                                        re.IGNORECASE
-                                    )
-                                    if match:
-                                        raw_url = match.group(1)
-                                        # Reemplazar &amp; por &
-                                        change_url = raw_url.replace('&amp;', '&')
-                                        if change_url.startswith('/'):
-                                            change_url = urljoin(page.url, change_url)
-                                        logger.debug(f"   ✅ URL extraída: {change_url}")
+                                        logger.debug(f"   ✅ Enlace encontrado vía selector: {change_url}")
                                         await page.goto(change_url, wait_until='domcontentloaded', timeout=30000)
                                         await page.wait_for_selector(phone_field_selector, state='visible', timeout=10000)
                                         break
-                                except Exception as e:
-                                    logger.debug(f"   ⚠️ Error extrayendo URL: {e}")
+                            except Exception as e:
+                                logger.debug(f"   ⚠️ Selector falló: {e}")
 
-                            # --- Si no se encontró enlace en este intento, esperar y reintentar ---
+                            # ---- Estrategia 3: Extraer del HTML con regex (fallback) ----
+                            try:
+                                content = await page.content()
+                                match = re.search(
+                                    r'<a\s+id="ap_change_login_claim"[^>]*href="([^"]+)"',
+                                    content,
+                                    re.IGNORECASE
+                                )
+                                if match:
+                                    raw_url = match.group(1)
+                                    change_url = raw_url.replace('&amp;', '&')
+                                    if change_url.startswith('/'):
+                                        change_url = urljoin(page.url, change_url)
+                                    logger.debug(f"   ✅ URL extraída vía regex: {change_url}")
+                                    await page.goto(change_url, wait_until='domcontentloaded', timeout=30000)
+                                    await page.wait_for_selector(phone_field_selector, state='visible', timeout=10000)
+                                    break
+                            except Exception as e:
+                                logger.debug(f"   ⚠️ Regex falló: {e}")
+
+                            # Si no se encontró enlace en este intento, esperar y reintentar
                             if attempt < max_attempts:
-                                await asyncio.sleep(1)  # Pausa breve antes de reintentar
+                                await asyncio.sleep(1)
                             else:
-                                logger.warning("   ❌ No se pudo encontrar el enlace 'Cambiar' después de varios intentos")
-                                raise Exception("No se pudo encontrar enlace para cambiar número")
+                                raise Exception("No se pudo encontrar el enlace 'Cambiar' después de varios intentos")
 
-                        # --- Cancelar la activación anterior del número (si existe) ---
+                        # ---- Cancelar la activación anterior (si existe) ----
                         if service_id:
                             try:
                                 if service_name == 'hero':
@@ -3694,29 +3700,27 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             except Exception as e:
                                 logger.debug(f"   ⚠️ Error cancelando número anterior: {e}")
 
-                        # --- Obtener nuevo número (mismo servicio, sin forzar país -> probará todos los países) ---
+                        # ---- Obtener nuevo número ----
                         current_service = service_name
                         new_phone = await get_phone_number(country_code, force_service=current_service, force_country=None)
                         if not new_phone:
                             raise Exception("No hay números disponibles para este servicio después de varios intentos")
 
-                        # Actualizar variables
                         new_phone_info = new_phone
                         new_service_id = new_phone_info['service_id']
                         new_service_name = new_phone_info['service_name']
                         new_purchase_country = new_phone_info['purchase_country']
                         logger.debug(f"   ✅ Nuevo número obtenido: {new_phone_info['full']} (país: {new_purchase_country})")
 
-                        # Actualizar account_data
                         account_data['phone'] = new_phone_info['local']
                         account_data['purchase_country'] = new_purchase_country
 
-                        # --- Rellenar el nuevo número en el campo ---
+                        # ---- Rellenar el nuevo número ----
                         phone_field = await page.wait_for_selector(phone_field_selector, timeout=10000)
                         await phone_field.fill('')
                         await phone_field.fill(new_phone_info['full'])
 
-                        # --- Hacer clic en Continuar ---
+                        # ---- Hacer clic en Continuar ----
                         continue_clicked = False
                         for selector in continue_selectors:
                             if await smart_click(page, selector, timeout=5000, wait_for_navigation=True):
@@ -3725,8 +3729,13 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         if not continue_clicked:
                             raise Exception("No se pudo hacer clic en Continuar después de cambiar número")
 
-                        # Retornar la nueva información
                         return new_phone_info, new_service_id, new_service_name, new_purchase_country
+
+
+
+
+
+
 
                     # ----- PASO 10.3: Manejar números ya registrados (bucle de cambio) -----
                     if "claim?" in page.url.lower():
