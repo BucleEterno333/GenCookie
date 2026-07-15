@@ -3160,6 +3160,9 @@ async def wait_for_text(page, text, timeout=WAIT_TIMEOUT*1000):
 
 # -------------------------------------------------------------------
 # FUNCIÓN PRINCIPAL DE CREACIÓN DE CUENTA (OPTIMIZADA CON REINTENTOS INTERNOS)
+# -------------------------------------------------------------------
+
+
 async def create_amazon_account(country_code, add_address_flag=True, max_retries=None, max_internal_retries=10):
     retries = max_retries if max_retries is not None else MAX_RETRIES
     logger.debug(f"🏁 Iniciando creación de cuenta para {country_code} (reintentos: {retries})")
@@ -3838,7 +3841,15 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                 await playwright.stop()
             logger.debug("✅ Limpieza completada")
 
-    return None, "Error desconocido", None-----------------------------------------------------------------
+    return None, "Error desconocido", None
+
+
+
+
+
+
+
+
 # API FLASK
 # -------------------------------------------------------------------
 app = Flask(__name__)
