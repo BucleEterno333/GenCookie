@@ -1326,7 +1326,6 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
         logger.debug(f"Se agotaron {max_num_intentos} números para el proxy actual, cambiando de proxy...")
 
     raise Exception(f"Se agotaron los {max_intentos} intentos externos")
-# ===================================================================
 async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10, force_playwright=False):
     logger.debug(f"🚀 generate_cookie_api llamada con country={country}, force_playwright={force_playwright}")
     global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
@@ -1335,82 +1334,80 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
         if country not in base_urls:
             return {'success': False, 'error': f'País no soportado: {country}', 'country': country, 'screenshot': None}
 
-        # ---------- MÉTODO RÁPIDO ----------
-        if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
-            logger.debug("🔧 Intentando método rápido (curl_cffi + Capsolver) de forma secuencial...")
-            loop = asyncio.get_running_loop()
-            max_attempts = 10
-            for attempt in range(1, max_attempts + 1):
-                logger.debug(f"   Intento rápido #{attempt}/{max_attempts}")
-                try:
-                    fast_result = await loop.run_in_executor(
-                        None,
-                        process,
-                        CAPSOLVER_API_KEY,
-                        HERO_SMS_KEYS,
-                        None, None, None, None, None,
-                        PROXY_STRING,
-                        None,
-                        country
-                    )
-                    if fast_result:
-                        logger.debug("✅ Método rápido exitoso.")
-                        account_data = {
-                            'phone': fast_result['phone'],
-                            'password': fast_result['password'],
-                            'name': fast_result['name'],
-                            'address': 'No address added',
-                            'cookie_string': fast_result['cookies'],
-                            'cookie_dict': dict(x.split('=', 1) for x in fast_result['cookies'].split('; ') if '=' in x),
-                            'country': country,
-                            'purchase_country': country
-                        }
-                        return {'success': True, 'data': account_data, 'country': country, 'screenshot': None}
-                    
-
-                except CAPSolverNoBalance as e:
-                    logger.error(f"❌ CapSolver sin saldo: {e}")
-                    set_service_enabled(False)   # Esto ya actualiza SERVICE_BLOCKED_REASON y SERVICE_BLOCKED_UNTIL
-                    return {
-                        'success': False,
-                        'error': 'El servicio de resolución de captchas (CapSolver) no tiene saldo. El generador de cookies ha sido desactivado. Por favor, contacta al administrador para recargar el saldo y reactivar el servicio mediante /estatusCuki en el bot.',
-                        'screenshot': None,
-                        'captcha_balance': True
-                    }
-                except SMSAccountBannedTemporarily as e:
-                    logger.error(f"❌ Al menos una key de SMS está baneada temporalmente: {e}")
-                    # Desactivar servicio en API (puede fallar)
-                    set_service_enabled(False)
-                    SERVICE_BLOCKED_REASON = 'sms_temp'
-                    # Bloquear en memoria por 30 minutos
-                    SERVICE_BLOCKED_UNTIL = time.time() + 30 * 60
-                    # Programar timer para reactivar (aunque la llamada a la API falle, se intentará reactivar)
-                    threading.Timer(30 * 60, lambda: set_service_enabled(True)).start()
-                    return {
-                        'success': False,
-                        'error': 'Una cuenta de SMS está baneada temporalmente. El servicio se ha deshabilitado por 30 minutos. Reintenta más tarde.',
-                        'screenshot': None,
-                        'banned_temporarily': True
-                    }
-
-                except SMSNoBalance as e:
-                    logger.error(f"❌ Todas las keys de SMS tienen saldo insuficiente: {e}")
-                    set_service_enabled(False)
-                    SERVICE_BLOCKED_REASON = 'no_balance'
-                    return {
-                        'success': False,
-                        'error': 'Saldo de SMS insuficiente en todas las cuentas. Avisar a administradores para recargar. El servicio ha sido deshabilitado indefinidamente.',
-                        'screenshot': None,
-                        'no_balance': True
-                    }
-                except Exception as e:
-                    logger.debug(f"   Intento rápido #{attempt} falló: {e}")
-                    if attempt == max_attempts:
-                        logger.debug("⚠️ Todos los intentos rápidos fallaron. Recurriendo a Playwright...")
-                    else:
-                        await asyncio.sleep(2)
+        # ========== NUEVO: Si force_playwright está activado, saltar método rápido ==========
+        if force_playwright:
+            logger.debug("🔧 force_playwright activado: saltando método rápido y usando Playwright directamente.")
         else:
-            logger.debug("⚠️ Método rápido no disponible (faltan claves o proxy). Usando Playwright directamente.")
+            # ---------- MÉTODO RÁPIDO ----------
+            if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
+                logger.debug("🔧 Intentando método rápido (curl_cffi + Capsolver) de forma secuencial...")
+                loop = asyncio.get_running_loop()
+                max_attempts = 10
+                for attempt in range(1, max_attempts + 1):
+                    logger.debug(f"   Intento rápido #{attempt}/{max_attempts}")
+                    try:
+                        fast_result = await loop.run_in_executor(
+                            None,
+                            process,
+                            CAPSOLVER_API_KEY,
+                            HERO_SMS_KEYS,
+                            None, None, None, None, None,
+                            PROXY_STRING,
+                            None,
+                            country
+                        )
+                        if fast_result:
+                            logger.debug("✅ Método rápido exitoso.")
+                            account_data = {
+                                'phone': fast_result['phone'],
+                                'password': fast_result['password'],
+                                'name': fast_result['name'],
+                                'address': 'No address added',
+                                'cookie_string': fast_result['cookies'],
+                                'cookie_dict': dict(x.split('=', 1) for x in fast_result['cookies'].split('; ') if '=' in x),
+                                'country': country,
+                                'purchase_country': country
+                            }
+                            return {'success': True, 'data': account_data, 'country': country, 'screenshot': None}
+                    except CAPSolverNoBalance as e:
+                        logger.error(f"❌ CapSolver sin saldo: {e}")
+                        set_service_enabled(False)
+                        return {
+                            'success': False,
+                            'error': 'El servicio de resolución de captchas (CapSolver) no tiene saldo. El generador de cookies ha sido desactivado. Por favor, contacta al administrador para recargar el saldo y reactivar el servicio mediante /estatusCuki en el bot.',
+                            'screenshot': None,
+                            'captcha_balance': True
+                        }
+                    except SMSAccountBannedTemporarily as e:
+                        logger.error(f"❌ Al menos una key de SMS está baneada temporalmente: {e}")
+                        set_service_enabled(False)
+                        SERVICE_BLOCKED_REASON = 'sms_temp'
+                        SERVICE_BLOCKED_UNTIL = time.time() + 30 * 60
+                        threading.Timer(30 * 60, lambda: set_service_enabled(True)).start()
+                        return {
+                            'success': False,
+                            'error': 'Una cuenta de SMS está baneada temporalmente. El servicio se ha deshabilitado por 30 minutos. Reintenta más tarde.',
+                            'screenshot': None,
+                            'banned_temporarily': True
+                        }
+                    except SMSNoBalance as e:
+                        logger.error(f"❌ Todas las keys de SMS tienen saldo insuficiente: {e}")
+                        set_service_enabled(False)
+                        SERVICE_BLOCKED_REASON = 'no_balance'
+                        return {
+                            'success': False,
+                            'error': 'Saldo de SMS insuficiente en todas las cuentas. Avisar a administradores para recargar. El servicio ha sido deshabilitado indefinidamente.',
+                            'screenshot': None,
+                            'no_balance': True
+                        }
+                    except Exception as e:
+                        logger.debug(f"   Intento rápido #{attempt} falló: {e}")
+                        if attempt == max_attempts:
+                            logger.debug("⚠️ Todos los intentos rápidos fallaron. Recurriendo a Playwright...")
+                        else:
+                            await asyncio.sleep(2)
+            else:
+                logger.debug("⚠️ Método rápido no disponible (faltan claves o proxy). Usando Playwright directamente.")
 
         # ---------- FALLBACK: PLAYWRIGHT ----------
         account_data, error_msg, screenshot = await create_amazon_account(
@@ -1426,8 +1423,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
 
     except Exception as e:
         logger.exception(f"💥 Excepción en generate_cookie_api: {e}")
-        return {'success': False, 'error': str(e), 'country': country, 'screenshot': None}
-# -------------------------------------------------------------------
+        return {'success': False, 'error': str(e), 'country': country, 'screenshot': None}# -------------------------------------------------------------------
 # MAPA DE PAÍSES A DOMINIOS Y URLS BASE
 # -------------------------------------------------------------------
 base_urls = {
