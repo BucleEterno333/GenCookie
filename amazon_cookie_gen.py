@@ -1944,6 +1944,39 @@ def solve_anticaptcha_coordinates(image_path, hint):
     except Exception as e:
         logger.warning(f"Error en anticaptcha HTTP: {e}")
         return None
+    
+
+
+
+
+def solve_funcaptcha_capsolver(page_url, site_key, surl=None):
+    """Resuelve FunCaptcha usando Capsolver."""
+    if not CAPSOLVER_API_KEY:
+        return None
+    capsolver.api_key = CAPSOLVER_API_KEY
+    try:
+        task = {
+            "type": "FunCaptchaTaskProxyless",
+            "websiteURL": page_url,
+            "websitePublicKey": site_key,
+        }
+        if surl:
+            task["funcaptchaApiJSSubdomain"] = surl
+        logger.debug(f"   Intentando Capsolver con site_key: {site_key[:10]}...")
+        result = capsolver.solve(task)
+        if result and result.get('solution', {}).get('token'):
+            token = result['solution']['token']
+            logger.debug(f"   ✅ Token obtenido con Capsolver")
+            return token
+        else:
+            logger.warning(f"   Capsolver falló: {result}")
+            return None
+    except Exception as e:
+        logger.warning(f"   Capsolver error: {e}")
+        return None
+    
+
+
 def solve_funcaptcha_2captcha(page_url, site_key, surl=None):
     """Resuelve FunCaptcha usando 2captcha, probando múltiples configuraciones."""
     if not API_KEY_2CAPTCHA:
@@ -2044,30 +2077,23 @@ def solve_funcaptcha_anticaptcha(page_url, site_key, surl=None):
             logger.warning(f"   Error con AntiCaptcha (surl={test_surl}): {e}")
             continue
     return None
-
 async def extract_site_key_robust(page):
-    """
-    Extrae el site_key de la página 'Confirma tu identidad' usando múltiples estrategias,
-    incluyendo esperar a que el iframe cargue su contenido y buscar en frames anidados.
-    Retorna (site_key, surl)
-    """
     site_key = None
     surl = None
 
-    # --- Estrategia 1: Esperar a que el iframe principal tenga un src válido ---
+    # Esperar iframe
     iframe = None
-    for _ in range(15):  # hasta 15 segundos
+    for _ in range(15):
         iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
         if iframe:
             src = await iframe.get_attribute('src')
             if src and src != 'about:blank' and 'arkoselabs' in src:
                 break
         await page.wait_for_timeout(1000)
-    
+
     if iframe:
         src = await iframe.get_attribute('src')
-        if src and 'arkoselabs' in src:
-            logger.debug(f"   Iframe src: {src[:200]}")
+        if src:
             # Extraer pk
             pk_match = re.search(r'[?&]pk=([A-Za-z0-9_-]{20,})', src)
             if pk_match:
@@ -2079,74 +2105,33 @@ async def extract_site_key_robust(page):
                 surl_candidate = surl_match.group(1)
                 if surl_candidate.startswith('http'):
                     surl = surl_candidate
-                    logger.debug(f"   Surl desde src: {surl}")
                 else:
-                    # Decodificar URL si está codificada
                     from urllib.parse import unquote
                     surl_decoded = unquote(surl_candidate)
                     if surl_decoded.startswith('http'):
                         surl = surl_decoded
-                        logger.debug(f"   Surl decodificado: {surl}")
+                logger.debug(f"   Surl desde src: {surl}")
 
-    # --- Estrategia 2: Buscar en el script de ACIC (data-external-id) ---
+    # Buscar en el contenido de la página
     page_content = await page.content()
-    # UUID con guiones (formato clásico)
-    uuid_match = re.search(r'"data-external-id":\s*"([A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12})"', page_content, re.IGNORECASE)
-    if uuid_match:
-        site_key = uuid_match.group(1)
-        logger.debug(f"   Site_key (UUID) desde script: {site_key}")
-    else:
-        # Alfanumérico largo (20+ caracteres) - nuevo formato
-        alnum_match = re.search(r'"data-external-id":\s*"([A-Za-z0-9]{20,})"', page_content)
-        if alnum_match:
-            site_key = alnum_match.group(1)
-            logger.debug(f"   Site_key (alfanumérico) desde script: {site_key}")
+
+    # Buscar data-public-key
+    pub_match = re.search(r'"data-public-key":\s*"([^"]+)"', page_content)
+    if pub_match:
+        site_key = pub_match.group(1)
+        logger.debug(f"   Site_key desde data-public-key: {site_key}")
+
+    # Buscar data-external-id (si no se encontró antes)
+    if not site_key:
+        uuid_match = re.search(r'"data-external-id":\s*"([A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12})"', page_content, re.IGNORECASE)
+        if uuid_match:
+            site_key = uuid_match.group(1)
+            logger.debug(f"   Site_key (UUID) desde script: {site_key}")
         else:
-            # Buscar data-public-key
-            pub_match = re.search(r'"data-public-key":\s*"([^"]+)"', page_content)
-            if pub_match:
-                site_key = pub_match.group(1)
-                logger.debug(f"   Site_key desde data-public-key: {site_key}")
-
-    # --- Estrategia 3: Buscar en frames anidados (game-core-frame) ---
-    if not site_key:
-        for frame in page.frames:
-            if 'game-core' in frame.name or 'arkoselabs' in frame.url:
-                try:
-                    # Buscar data-external-id dentro del frame
-                    ext_id = await frame.evaluate('() => document.querySelector("[data-external-id]")?.getAttribute("data-external-id")')
-                    if ext_id and not site_key:
-                        site_key = ext_id
-                        logger.debug(f"   Site_key desde frame interno: {site_key}")
-                    # Buscar en el src del frame
-                    frame_url = frame.url
-                    if frame_url:
-                        match = re.search(r'[?&]pk=([A-Za-z0-9_-]{20,})', frame_url)
-                        if match and not site_key:
-                            site_key = match.group(1)
-                            logger.debug(f"   Site_key desde frame url pk: {site_key}")
-                        # También buscar surl en el frame
-                        surl_match = re.search(r'surl=([^&]+)', frame_url)
-                        if surl_match:
-                            surl_candidate = surl_match.group(1)
-                            if surl_candidate.startswith('http'):
-                                surl = surl_candidate
-                            else:
-                                from urllib.parse import unquote
-                                surl_decoded = unquote(surl_candidate)
-                                if surl_decoded.startswith('http'):
-                                    surl = surl_decoded
-                            logger.debug(f"   Surl desde frame: {surl}")
-                except Exception as e:
-                    logger.debug(f"   Error accediendo a frame: {e}")
-
-    # --- Estrategia 4: Si aún no hay site_key, intentar obtenerlo de la URL de la página (parámetro public_key) ---
-    if not site_key:
-        current_url = page.url
-        match = re.search(r'[?&]public_key=([A-Za-z0-9_-]+)', current_url)
-        if match:
-            site_key = match.group(1)
-            logger.debug(f"   Site_key desde URL: {site_key}")
+            alnum_match = re.search(r'"data-external-id":\s*"([A-Za-z0-9]{20,})"', page_content)
+            if alnum_match:
+                site_key = alnum_match.group(1)
+                logger.debug(f"   Site_key (alfanumérico) desde script: {site_key}")
 
     # Si site_key es una URL codificada, decodificarla
     if site_key and '%' in site_key:
@@ -2155,8 +2140,6 @@ async def extract_site_key_robust(page):
         logger.debug(f"   Site_key decodificado: {site_key}")
 
     return site_key, surl
-
-
 
 
 
@@ -2292,25 +2275,28 @@ async def handle_captcha_if_present(page, step_name="captcha"):
             logger.debug("   No se detectó FunCaptcha real. Asumiendo que es página de verificación SMS/WhatsApp.")
             return False
 
-        # --- Extracción inicial (puede fallar) ---
-        site_key, surl = await extract_site_key_robust(page)
-        if site_key:
-            logger.debug(f"   Intentando resolver FunCaptcha con site_key: {site_key}")
-            token = solve_funcaptcha_2captcha(page.url, site_key, surl)
-            if not token and API_KEY_ANTICAPTCHA:
-                token = solve_funcaptcha_anticaptcha(page.url, site_key, surl)
-            if token:
-                await page.evaluate(f"""
-                    document.getElementById('cvf_aamation_response_token').value = '{token}';
-                    document.getElementById('cvf-aamation-challenge-form').submit();
-                """)
-                await page.wait_for_load_state('domcontentloaded', timeout=30000)
-                return True
-            else:
-                logger.warning("   Falló resolución directa, buscando botón...")
+    # --- Extracción inicial ---
+    site_key, surl = await extract_site_key_robust(page)
+    if site_key:
+        logger.debug(f"   Intentando resolver FunCaptcha con site_key: {site_key}")
+        token = solve_funcaptcha_2captcha(page.url, site_key, surl)
+        if not token and API_KEY_ANTICAPTCHA:
+            token = solve_funcaptcha_anticaptcha(page.url, site_key, surl)
+        if not token:
+            token = solve_funcaptcha_capsolver(page.url, site_key, surl)
+        if token:
+            await page.evaluate(f"""
+                document.getElementById('cvf_aamation_response_token').value = '{token}';
+                document.getElementById('cvf-aamation-challenge-form').submit();
+            """)
+            await page.wait_for_load_state('domcontentloaded', timeout=30000)
+            return True
         else:
-            logger.debug("   No se encontró site_key, buscando botón 'Iniciar rompecabezas'...")
-
+            logger.warning("   Falló resolución directa con site_key. No se intentará buscar botón (captcha ya cargado).")
+            # Podríamos reintentar o lanzar excepción
+            raise Exception("FUNCAPTCHA_NO_TOKEN")
+    else:
+        logger.debug("   No se encontró site_key, buscando botón 'Iniciar rompecabezas'...")
         # --- Función interna para buscar botón en todos los frames ---
         async def find_button_in_frames(frame_list):
             for frame in frame_list:
@@ -2444,7 +2430,7 @@ async def solve_coordinate_captcha(page, step_name="coordinate", round_num=1):
     Parámetros configurables abajo.
     """
     # ========== CONFIGURACIÓN ==========
-    NUM_REQUESTS = 8          # número de peticiones paralelas
+    NUM_REQUESTS = 5          # número de peticiones paralelas
     MIN_MATCHES = 2           # coincidencias requeridas
     TIMEOUT = 50              # segundos máximo total
     # ==================================
