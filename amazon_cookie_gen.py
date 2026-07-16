@@ -227,7 +227,7 @@ _MAIL_APIS = [
 
 
 # Orden de países para Hero SMS (barato a caro, según tu preferencia)
-HERO_COUNTRY_ORDER = ['CA', 'KZ', 'ID', 'MA', 'KG', 'CO', 'MX', 'BR', 'CM']
+HERO_COUNTRY_ORDER = ['KZ', 'ID', 'MA', 'KG', 'CO', 'MX', 'BR', 'CM', 'CA' ]
 
 FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
 
