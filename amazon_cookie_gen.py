@@ -2953,6 +2953,8 @@ async def get_phone_number(account_country, force_service=None, force_country=No
 
     # ---------- CASO 3: Sin fuerza: probar hero (con todas las keys) y luego 5sim ----------
     # 3.1 Intentar con Hero SMS (todas las keys) en cada país del orden
+    channels_limit_detected = False  # Flag para saber si al menos un país dio CHANNELS_LIMIT en todas las keys
+
     for country in HERO_COUNTRY_ORDER:
         try:
             activation_id, phone, purchase_country = get_number(HERO_SMS_KEYS, country_code=country)
@@ -2969,14 +2971,21 @@ async def get_phone_number(account_country, force_service=None, force_country=No
             }
         except SMSNoBalance as e:
             logger.error(f"❌ Hero SMS sin saldo en {country}: {e}")
-            # Si es NO_BALANCE para todas las keys, no tiene sentido probar otros países (misma cuenta)
-            break
+            break  # si todas las keys tienen NO_BALANCE, no tiene sentido probar otros países
         except SMSAccountBannedTemporarily as e:
             logger.warning(f"⚠️ Hero SMS baneado temporalmente en {country}: {e}")
+            # Si TODAS las keys dieron CHANNELS_LIMIT en este país, marcamos el flag
+            channels_limit_detected = True
             continue  # probar siguiente país (podría funcionar)
         except Exception as e:
             logger.debug(f"⚠️ Hero SMS error en {country}: {e}")
             continue
+
+    # Si se detectó CHANNELS_LIMIT en al menos un país Y no se obtuvo ningún número,
+    # significa que TODOS los países tienen CHANNELS_LIMIT. Propagar la excepción.
+    if channels_limit_detected:
+        logger.error("❌ CHANNELS_LIMIT en todos los países de Hero SMS. Deteniendo proceso.")
+        raise SMSAccountBannedTemporarily("Límite de canales alcanzado en todos los países. El servicio se desactivará.")
 
     # 3.2 Si Hero falla, intentar con 5sim
     logger.debug("🔄 Hero SMS falló, intentando con 5sim...")
