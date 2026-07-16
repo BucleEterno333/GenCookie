@@ -1947,7 +1947,10 @@ def solve_anticaptcha_coordinates(image_path, hint):
     
 
 
+
+
 def solve_funcaptcha_capsolver(page_url, site_key, surl=None):
+    """Resuelve FunCaptcha usando Capsolver."""
     if not CAPSOLVER_API_KEY:
         return None
     capsolver.api_key = CAPSOLVER_API_KEY
@@ -1958,16 +1961,7 @@ def solve_funcaptcha_capsolver(page_url, site_key, surl=None):
             "websitePublicKey": site_key,
         }
         if surl:
-            # Si surl es una URL completa, extraer el subdominio
-            if 'arkoselabs.com' in surl:
-                import re
-                match = re.search(r'https?://([^.]+)\.arkoselabs\.com', surl)
-                if match:
-                    task["funcaptchaApiJSSubdomain"] = match.group(1)
-                else:
-                    task["funcaptchaApiJSSubdomain"] = surl
-            else:
-                task["funcaptchaApiJSSubdomain"] = surl
+            task["funcaptchaApiJSSubdomain"] = surl
         logger.debug(f"   Intentando Capsolver con site_key: {site_key[:10]}...")
         result = capsolver.solve(task)
         if result and result.get('solution', {}).get('token'):
@@ -1980,6 +1974,9 @@ def solve_funcaptcha_capsolver(page_url, site_key, surl=None):
     except Exception as e:
         logger.warning(f"   Capsolver error: {e}")
         return None
+    
+
+
 def solve_funcaptcha_2captcha(page_url, site_key, surl=None):
     """Resuelve FunCaptcha usando 2captcha, probando múltiples configuraciones."""
     if not API_KEY_2CAPTCHA:
@@ -2258,116 +2255,116 @@ async def handle_captcha_if_present(page, step_name="captcha"):
         else:
             raise Exception(f"No se pudo completar el captcha después de {max_global_attempts} intentos.")
     
-        # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
-        title = await page.title()
+    # ---------- 2. FUNCAPTCHA (ARKOSE) ----------
+    title = await page.title()
 
-        if "Confirma tu identidad" in title or "Verify your identity" in title:
-            logger.debug("   Página 'Confirma tu identidad' detectada")
-            await page.wait_for_timeout(3000)
+    if "Confirma tu identidad" in title or "Verify your identity" in title:
+        logger.debug("   Página 'Confirma tu identidad' detectada")
+        await page.wait_for_timeout(3000)
 
-            # Verificar si realmente hay un FunCaptcha
-            page_content = await page.content()
-            has_arkose = bool(re.search(r'acic\.setupACIC', page_content)) or \
-                        bool(await page.query_selector('#cvf-aamation-challenge-iframe'))
+        # Verificar si realmente hay un FunCaptcha
+        page_content = await page.content()
+        has_arkose = bool(re.search(r'acic\.setupACIC', page_content)) or \
+                    bool(await page.query_selector('#cvf-aamation-challenge-iframe'))
 
-            if not has_arkose:
-                logger.debug("   No se detectó FunCaptcha real. Asumiendo página de verificación SMS/WhatsApp.")
-                return False
+        if not has_arkose:
+            logger.debug("   No se detectó FunCaptcha real. Asumiendo página de verificación SMS/WhatsApp.")
+            return False
 
-            # --- Buscar botón "Iniciar rompecabezas" primero ---
-            start_button = None
-            target_frame = None
-            for _ in range(15):  # hasta 15 segundos
-                # Buscar en todos los frames
-                for frame in page.frames:
-                    for sel in [
-                        'button:has-text("Iniciar rompecabezas")',
-                        'button[aria-label="Iniciar rompecabezas"]',
-                        'button:has-text("Start puzzle")',
-                        'button[aria-label="Start puzzle"]',
-                        '.button:has-text("Iniciar rompecabezas")'
-                    ]:
-                        try:
-                            btn = await frame.query_selector(sel)
-                            if btn:
-                                start_button = btn
-                                target_frame = frame
-                                break
-                        except:
-                            continue
-                    if start_button:
-                        break
+        # --- Buscar botón "Iniciar rompecabezas" primero ---
+        start_button = None
+        target_frame = None
+        for _ in range(15):  # hasta 15 segundos
+            # Buscar en todos los frames
+            for frame in page.frames:
+                for sel in [
+                    'button:has-text("Iniciar rompecabezas")',
+                    'button[aria-label="Iniciar rompecabezas"]',
+                    'button:has-text("Start puzzle")',
+                    'button[aria-label="Start puzzle"]',
+                    '.button:has-text("Iniciar rompecabezas")'
+                ]:
+                    try:
+                        btn = await frame.query_selector(sel)
+                        if btn:
+                            start_button = btn
+                            target_frame = frame
+                            break
+                    except:
+                        continue
                 if start_button:
                     break
-                await page.wait_for_timeout(1000)
-
             if start_button:
-                logger.debug("   ✅ Botón 'Iniciar rompecabezas' encontrado, haciendo clic...")
-                await start_button.click()
-                await page.wait_for_timeout(5000)
+                break
+            await page.wait_for_timeout(1000)
 
-                # Esperar a que el iframe principal tenga src
-                iframe = await page.wait_for_selector('#cvf-aamation-challenge-iframe', timeout=15000)
-                src = await iframe.get_attribute('src')
-                if not src or src == 'about:blank':
-                    for _ in range(10):
-                        src = await iframe.get_attribute('src')
-                        if src and src != 'about:blank':
-                            break
-                        await page.wait_for_timeout(1000)
+        if start_button:
+            logger.debug("   ✅ Botón 'Iniciar rompecabezas' encontrado, haciendo clic...")
+            await start_button.click()
+            await page.wait_for_timeout(5000)
 
-                # Extraer site_key y surl del iframe
-                site_key = None
-                surl = None
-                if src:
-                    pk_match = re.search(r'[?&]pk=([A-Za-z0-9_-]{20,})', src)
-                    if pk_match:
-                        site_key = pk_match.group(1)
-                        logger.debug(f"   Site_key desde src pk: {site_key}")
-                    surl_match = re.search(r'surl=([^&]+)', src)
-                    if surl_match:
-                        surl_candidate = surl_match.group(1)
-                        if surl_candidate.startswith('http'):
-                            surl = surl_candidate
-                        else:
-                            from urllib.parse import unquote
-                            surl_decoded = unquote(surl_candidate)
-                            if surl_decoded.startswith('http'):
-                                surl = surl_decoded
-                        logger.debug(f"   Surl desde src: {surl}")
+            # Esperar a que el iframe principal tenga src
+            iframe = await page.wait_for_selector('#cvf-aamation-challenge-iframe', timeout=15000)
+            src = await iframe.get_attribute('src')
+            if not src or src == 'about:blank':
+                for _ in range(10):
+                    src = await iframe.get_attribute('src')
+                    if src and src != 'about:blank':
+                        break
+                    await page.wait_for_timeout(1000)
 
-                if not site_key:
-                    # Fallback: extraer del contenido de la página o del iframe
-                    site_key, surl = await extract_site_key_robust(page)
-
-                if site_key:
-                    logger.debug(f"   Intentando resolver FunCaptcha con site_key: {site_key}")
-                    # Priorizar Capsolver
-                    token = solve_funcaptcha_capsolver(page.url, site_key, surl)
-                    if not token and API_KEY_2CAPTCHA:
-                        token = solve_funcaptcha_2captcha(page.url, site_key, surl)
-                    if not token and API_KEY_ANTICAPTCHA:
-                        token = solve_funcaptcha_anticaptcha(page.url, site_key, surl)
-                    if token:
-                        await page.evaluate(f"""
-                            document.getElementById('cvf_aamation_response_token').value = '{token}';
-                            document.getElementById('cvf-aamation-challenge-form').submit();
-                        """)
-                        await page.wait_for_load_state('domcontentloaded', timeout=30000)
-                        logger.debug("   ✅ FunCaptcha resuelto")
-                        return True
+            # Extraer site_key y surl del iframe
+            site_key = None
+            surl = None
+            if src:
+                pk_match = re.search(r'[?&]pk=([A-Za-z0-9_-]{20,})', src)
+                if pk_match:
+                    site_key = pk_match.group(1)
+                    logger.debug(f"   Site_key desde src pk: {site_key}")
+                surl_match = re.search(r'surl=([^&]+)', src)
+                if surl_match:
+                    surl_candidate = surl_match.group(1)
+                    if surl_candidate.startswith('http'):
+                        surl = surl_candidate
                     else:
-                        logger.warning("   Falló resolución del FunCaptcha")
-                        raise Exception("FUNCAPTCHA_NO_TOKEN")
-                else:
-                    logger.warning("   No se pudo obtener site_key después del clic")
-                    raise Exception("FUNCAPTCHA_NO_SITEKEY")
-            else:
-                # No se encontró botón en 15 segundos
-                logger.warning("   ❌ No se encontró botón 'Iniciar rompecabezas'")
-                raise Exception("FUNCAPTCHA_NOT_DETECTED")
+                        from urllib.parse import unquote
+                        surl_decoded = unquote(surl_candidate)
+                        if surl_decoded.startswith('http'):
+                            surl = surl_decoded
+                    logger.debug(f"   Surl desde src: {surl}")
 
-        return False
+            if not site_key:
+                # Fallback: extraer del contenido de la página o del iframe
+                site_key, surl = await extract_site_key_robust(page)
+
+            if site_key:
+                logger.debug(f"   Intentando resolver FunCaptcha con site_key: {site_key}")
+                # Priorizar Capsolver
+                token = solve_funcaptcha_capsolver(page.url, site_key, surl)
+                if not token and API_KEY_2CAPTCHA:
+                    token = solve_funcaptcha_2captcha(page.url, site_key, surl)
+                if not token and API_KEY_ANTICAPTCHA:
+                    token = solve_funcaptcha_anticaptcha(page.url, site_key, surl)
+                if token:
+                    await page.evaluate(f"""
+                        document.getElementById('cvf_aamation_response_token').value = '{token}';
+                        document.getElementById('cvf-aamation-challenge-form').submit();
+                    """)
+                    await page.wait_for_load_state('domcontentloaded', timeout=30000)
+                    logger.debug("   ✅ FunCaptcha resuelto")
+                    return True
+                else:
+                    logger.warning("   Falló resolución del FunCaptcha")
+                    raise Exception("FUNCAPTCHA_NO_TOKEN")
+            else:
+                logger.warning("   No se pudo obtener site_key después del clic")
+                raise Exception("FUNCAPTCHA_NO_SITEKEY")
+        else:
+            # No se encontró botón en 15 segundos
+            logger.warning("   ❌ No se encontró botón 'Iniciar rompecabezas'")
+            raise Exception("FUNCAPTCHA_NOT_DETECTED")
+
+    return False
 
 
 
