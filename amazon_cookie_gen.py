@@ -101,7 +101,7 @@ USER_AGENTS = [
 ]
 
 
-TIMEOUT_SMS = int(os.getenv('TIMEOUT_SMS', '300'))   # <--- NUEVA LÍNEA
+TIMEOUT_SMS = int(os.getenv('TIMEOUT_SMS', '180'))   # <--- NUEVA LÍNEA
 
 
 _SMS_API = "https://hero-sms.com/stubs/handler_api.php"
