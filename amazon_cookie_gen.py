@@ -260,6 +260,51 @@ class SMSNoBalance(Exception):
     """Todas las keys de SMS tienen saldo insuficiente (NO_BALANCE)"""
     pass
 
+
+# Historial de números comprados
+NUM_HISTORY = []
+
+def add_to_history(activation_id, phone_full, service_name):
+    global NUM_HISTORY
+    # Evitar duplicados
+    NUM_HISTORY = [h for h in NUM_HISTORY if h['activation_id'] != activation_id]
+    NUM_HISTORY.append({
+        'activation_id': activation_id,
+        'phone_full': phone_full,
+        'service_name': service_name,
+        'timestamp': time.time()
+    })
+    logger.debug(f"📝 Número {phone_full} agregado al historial (total: {len(NUM_HISTORY)})")
+
+def cancel_all_numbers():
+    global NUM_HISTORY
+    if not NUM_HISTORY:
+        return
+    logger.debug(f"🔄 Cancelando {len(NUM_HISTORY)} números del historial...")
+    for entry in NUM_HISTORY:
+        try:
+            if entry['service_name'] == 'hero':
+                cancel_hero_sms(entry['activation_id'])
+            elif entry['service_name'] == '5sim':
+                cancel_fivesim(entry['activation_id'])
+        except Exception as e:
+            logger.debug(f"Error cancelando {entry['phone_full']}: {e}")
+    NUM_HISTORY = []
+    logger.debug("🗑️ Historial limpiado")
+
+def cancel_number(activation_id, service_name):
+    global NUM_HISTORY
+    try:
+        if service_name == 'hero':
+            cancel_hero_sms(activation_id)
+        elif service_name == '5sim':
+            cancel_fivesim(activation_id)
+    except Exception as e:
+        logger.debug(f"Error cancelando número {activation_id}: {e}")
+    # Remover del historial
+    NUM_HISTORY = [h for h in NUM_HISTORY if h['activation_id'] != activation_id]
+    logger.debug(f"🗑️ Número {activation_id} removido del historial")
+
 def verify_with_retry(phone, country_code, retries=3):
     """
     Verifica un número con reintentos en caso de error.
@@ -430,29 +475,18 @@ def set_service_enabled(enabled: bool) -> bool:
 # get_number MODIFICADA CON LA NUEVA LÓGICA
 # ===================================================================
 def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
-    """
-    Prueba todas las keys SOLO EN EL PRIMER PAÍS de la lista (CA si no se especifica).
-    Recolecta errores y al final:
-      - Si alguna key tiene CHANNELS_LIMIT -> lanza SMSAccountBannedTemporarily.
-      - Si todas tienen NO_BALANCE -> lanza SMSNoBalance.
-      - Otros casos -> excepción genérica.
-    """
     if isinstance(keys, str):
         keys = [keys]
-
-    # Si no se especifica país, usar el primero de la lista (CA)
     if country_code:
-        countries_to_try = [country_code]  # solo el país forzado
+        countries_to_try = [country_code]
     else:
-        countries_to_try = [HERO_COUNTRY_ORDER[0]]  # solo el primer país
+        countries_to_try = [HERO_COUNTRY_ORDER[0]]
 
     key_errors = {}
-
     for iso_code in countries_to_try:
         hero_country_num = hero_country_map.get(iso_code)
         if not hero_country_num:
             continue
-
         key_index = 0
         while key_index < len(keys):
             key = keys[key_index]
@@ -460,7 +494,6 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
             url = f"{_SMS_API}?api_key={key}&action=getNumber&service=am&country={hero_country_num}"
             try:
                 r = requests.get(url, timeout=30).text
-
                 if _is_banned_response(r):
                     if "CHANNELS_LIMIT" in r:
                         key_errors[key] = _prioritize_error(key_errors.get(key), "CHANNELS_LIMIT")
@@ -469,11 +502,11 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
                     logger.warning(f"⚠️ Key {key[:4]} baneada para {iso_code}: {r[:80]}")
                     key_index += 1
                     continue
-
                 if r.startswith("ACCESS_NUMBER"):
                     _, activation_id, phone = r.split(":")
                     phone = phone.strip()
-                    phone = phone.lstrip("1") if phone.startswith("1") and len(phone) == 11 else phone
+                    # NO eliminar el '1' inicial
+                    # phone = phone.lstrip("1") if phone.startswith("1") and len(phone) == 11 else phone
                     logger.debug(f"  ✅ Número obtenido: {phone} (país {iso_code}) con key {key[:4]}")
                     return activation_id, phone, iso_code
                 else:
@@ -488,7 +521,6 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
             except Exception as e:
                 logger.debug(f"  ❌ Error en {iso_code} con key {key[:4]}: {e}")
                 key_index += 1
-
         logger.debug(f"  🔄 Agotadas todas las keys para {iso_code}")
 
     # ========== ANÁLISIS FINAL DE ERRORES ==========
@@ -512,6 +544,10 @@ def get_number(keys, country_code: str = None) -> Tuple[str, str, str]:
     # Caso 3: Otros errores (sin NO_BALANCE ni CHANNELS_LIMIT)
     error_summary = ", ".join([f"{key[:4]}: {err}" for key, err in key_errors.items()])
     raise Exception(f"No se pudo obtener número. Errores: {error_summary}")
+
+
+
+
 def _prioritize_error(old: Optional[str], new: str) -> str:
     """Prioriza NO_BALANCE > CHANNELS_LIMIT > otros."""
     if not old:
@@ -932,6 +968,8 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
             # ---------- OBTENER NÚMERO ----------
             try:
                 activation_id, sms_phone, purchase_country = get_number(hero_keys)
+                add_to_history(activation_id, sms_phone, 'hero')
+
                 logger.debug(f"📞 Número obtenido: {sms_phone} (país {purchase_country})")
             except (SMSAccountBannedTemporarily, SMSNoBalance) as e:
                 raise
@@ -1189,7 +1227,10 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
 
                     if "entered already exists with another account" in req7.text:
                         logger.debug("Número ya registrado")
+                        cancel_number(activation_id, 'hero')
+                        cancel_all_numbers()  # Por si hay otros
                         raise Exception("PERMANENT_NUMBER_ALREADY_REGISTERED")
+                    
 
                     if "new_account=1" not in req7.url:
                         logger.debug("Cuenta no creada")
@@ -1285,6 +1326,8 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     # Si es actividad inusual, reintentamos con nueva sesión (mismo número)
                     if "PERMANENT_UNUSUAL_ACTIVITY" in error_str or "detected unusual activity" in error_str.lower():
                         logger.debug("🔄 Actividad inusual detectada → reintentando con nueva sesión (mismo número)")
+                        
+                        
                         continue  # No cancelamos número, solo seguimos al siguiente reintento
 
                     # Para otros errores, mantener lógica anterior
@@ -3161,7 +3204,6 @@ async def wait_for_text(page, text, timeout=WAIT_TIMEOUT*1000):
 # -------------------------------------------------------------------
 # FUNCIÓN PRINCIPAL DE CREACIÓN DE CUENTA (OPTIMIZADA CON REINTENTOS INTERNOS)
 # -------------------------------------------------------------------
-
 async def create_amazon_account(country_code, add_address_flag=True, max_retries=None, max_internal_retries=10):
     retries = max_retries if max_retries is not None else MAX_RETRIES
     logger.debug(f"🏁 Iniciando creación de cuenta para {country_code} (reintentos: {retries})")
@@ -3366,8 +3408,8 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                 internal_attempt += 1
                 logger.debug(f"🔄 Intento interno {internal_attempt}/{max_internal_retries} (misma IP)")
 
+                # Si no es el primer intento, cerrar página y abrir nueva (mismo contexto)
                 if internal_attempt > 1:
-                    # Cerrar página actual y abrir una nueva en el mismo contexto
                     await page.close()
                     page = await context.new_page()
 
@@ -3385,11 +3427,14 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             logger.debug(f"Número obtenido: {phone_info['full']} (servicio: {service_name}, país: {purchase_country})")
                             account_data['phone'] = sms_phone
                             account_data['purchase_country'] = purchase_country
+                            # Agregar al historial (para posible cancelación posterior)
+                            add_to_history(service_id, phone_info['full'], service_name)
                         except SMSAccountBannedTemporarily as e:
-                            logger.error(f"❌ Todas las keys de SMS están en CHANNELS_LIMIT. Deteniendo proceso.")
-                            # Lanzar excepción para que el global la capture y desactive el servicio
-                            raise SMSAccountBannedTemporarily("Límite de canales alcanzado en todas las keys y países")
+                            # Si todas las keys están en CHANNELS_LIMIT, propagar para desactivar servicio
+                            logger.error(f"❌ CHANNELS_LIMIT en todas las keys: {e}")
+                            raise
                         except Exception as e:
+                            logger.error(f"❌ Error obteniendo número: {e}")
                             raise
 
                     # ----- PASO 7: Navegar a la URL base (con reintentos) -----
@@ -3521,33 +3566,25 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         raise Exception("No se encontró botón Continuar")
                     last_screenshot = await take_screenshot(page, "despues_continuar")
 
-                    # ====== NUEVO: SI LA URL CONTIENE "claim?" ======
+                    # ====== DETECCIÓN DE NÚMERO YA REGISTRADO ======
                     if "claim?" in page.url.lower():
-                        logger.warning("⚠️ Número ya registrado. Cancelando este número y comprando otro...")
-
-                        # 1. Intentar cancelar el número (si es posible, pero si da EARLY_CANCEL_DENIED, lo ignoramos)
+                        logger.warning("⚠️ Número ya registrado. Cancelando y comprando otro...")
+                        # Cancelar el número actual (si se puede)
                         if service_id:
                             try:
-                                # Solo intentar cancelar si ha pasado más de 2 minutos (120 segundos)
-                                # Para saberlo, necesitaríamos guardar el timestamp de compra.
-                                # Como no lo tenemos, mejor no cancelar y dejar que el número expire solo.
-                                # O simplemente intentar cancelar y si falla, continuar.
                                 if service_name == 'hero':
                                     await cancel_hero_sms(service_id)
                                 elif service_name == '5sim':
                                     await cancel_fivesim(service_id)
-                                logger.debug(f"   ✅ Número {phone_info['full']} cancelado (o se intentó)")
+                                logger.debug(f"   ✅ Número {phone_info['full']} cancelado")
                             except Exception as e:
-                                logger.debug(f"   ⚠️ No se pudo cancelar el número (probablemente EARLY_CANCEL_DENIED): {e}")
-
-                        # 2. Marcar phone_info como None para forzar la compra de un nuevo número en la siguiente iteración
+                                logger.debug(f"   ⚠️ No se pudo cancelar (probablemente EARLY_CANCEL_DENIED): {e}")
+                        # Forzar compra de nuevo número en la siguiente iteración
                         phone_info = None
-                        # 3. Reiniciar el bucle interno (continue) para que se compre un nuevo número
-                        logger.debug("   🔄 Reiniciando bucle para comprar otro número...")
-                        # Limpiar cookies y cerrar página para empezar fresco
+                        # Cerrar página y abrir nueva para empezar fresco
                         await page.close()
                         page = await context.new_page()
-                        continue
+                        continue  # reinicia el bucle interno
 
                     # ----- PASO 10.5: Resolver captcha si aparece antes del envío -----
                     await handle_captcha_if_present(page, step_name="pre_submit")
@@ -3568,22 +3605,22 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         page_content = await page.content()
                         is_login_page = await page.query_selector('#ap_email') is not None
                         if is_login_page:
-                            logger.warning("   🔄 Redirigido a la página de inicio de sesión. Reiniciando proceso interno.")
-                            # Limpiar cookies y reiniciar
+                            logger.warning("   🔄 Redirigido a login. Reiniciando...")
+                            # No cancelamos número, solo reiniciamos la página
                             await page.close()
                             page = await context.new_page()
                             continue
                         elif "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content:
-                            logger.warning("   ❌ Página de error de Amazon detectada. Reiniciando proceso interno.")
+                            logger.warning("   ❌ Error de Amazon. Reiniciando sin cancelar número...")
                             await page.close()
                             page = await context.new_page()
                             continue
                         else:
-                            logger.debug("   ℹ️ No se detectó error. Esperando 4 segundos a que el formulario cargue automáticamente...")
+                            logger.debug("   ℹ️ No se detectó error. Esperando 4 segundos...")
                             await page.wait_for_timeout(4000)
                             try:
                                 await page.wait_for_selector('#ap_customer_name', state='visible', timeout=2000)
-                                logger.debug("   ✅ Formulario de registro cargado automáticamente")
+                                logger.debug("   ✅ Formulario cargado automáticamente")
                             except Exception:
                                 raise Exception("No se pudo acceder al formulario de registro después de Continuar")
 
@@ -3642,18 +3679,32 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                 logger.warning("   🚫 ACTIVIDAD INUSUAL -> reinicio GLOBAL")
                                 raise Exception("AMAZON_BLOCKED_ACCOUNT")
                             if "incorrecto o no válido" in content or "Introduzca un número de móvil válido" in content:
-                                logger.warning(f"   NÚMERO INVÁLIDO (intento {submit_attempt}) -> rellenando número")
-                                # Si el número es inválido, comprar otro
-                                phone_field = await page.wait_for_selector(phone_field_selector, timeout=3000)
-                                if phone_field:
-                                    # Marcar phone_info como None para comprar otro
-                                    phone_info = None
-                                    raise Exception("NUMERO_INVALIDO_RECARGAR")
+                                logger.warning(f"   NÚMERO INVÁLIDO -> comprando otro")
+                                # Cancelar número actual
+                                if service_id:
+                                    try:
+                                        if service_name == 'hero':
+                                            await cancel_hero_sms(service_id)
+                                        elif service_name == '5sim':
+                                            await cancel_fivesim(service_id)
+                                    except Exception:
+                                        pass
+                                phone_info = None  # forzar nuevo número
+                                raise Exception("NUMERO_INVALIDO_RECARGAR")
                             if "Mínimo 6 caracteres requeridos" in content or "Minimo 6 caracteres requeridos" in content:
                                 logger.warning(f"   CONTRASEÑA VACÍA (intento {submit_attempt}) -> reintentando")
                                 continue
                             if "El número de teléfono móvil ya está en uso" in content or "El número de teléfono móvil ya está registrado" in content:
-                                logger.warning("   NÚMERO YA REGISTRADO -> comprando otro número")
+                                logger.warning("   NÚMERO YA REGISTRADO -> comprando otro")
+                                # Cancelar número actual
+                                if service_id:
+                                    try:
+                                        if service_name == 'hero':
+                                            await cancel_hero_sms(service_id)
+                                        elif service_name == '5sim':
+                                            await cancel_fivesim(service_id)
+                                    except Exception:
+                                        pass
                                 phone_info = None
                                 raise Exception("NUMERO_REGISTRADO_RECARGAR")
                             submit_success = True
@@ -3668,7 +3719,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     except Exception as e:
                         if "NUMERO_INVALIDO_RECARGAR" in str(e) or "NUMERO_REGISTRADO_RECARGAR" in str(e):
                             # Reiniciar el bucle para comprar otro número
-                            logger.debug("   🔄 Número inválido o registrado. Comprando otro...")
+                            logger.debug("   🔄 Comprando otro número...")
                             await page.close()
                             page = await context.new_page()
                             continue
@@ -3678,10 +3729,10 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     last_screenshot = await take_screenshot(page, "despues_registro")
 
                     # ----- PASO 15: VERIFICACIÓN POR SMS -----
-                    logger.debug("📱 Verificación SMS con reintentos por país y número...")
+                    logger.debug("📱 Verificación SMS...")
                     await page.wait_for_timeout(5000)
 
-                    # Verificar si estamos en WhatsApp
+                    # Manejar WhatsApp
                     content = await safe_get_content(page)
                     if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
                         logger.warning("📱 WhatsApp detectado, seleccionando SMS...")
@@ -3709,8 +3760,8 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                             await cancel_hero_sms(service_id)
                                         elif service_name == '5sim':
                                             await cancel_fivesim(service_id)
-                                    except Exception as cancel_err:
-                                        logger.debug(f"   ⚠️ Error cancelando número: {cancel_err}")
+                                    except Exception:
+                                        pass
                                 phone_info = None
                                 await page.close()
                                 page = await context.new_page()
@@ -3734,16 +3785,15 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             if 'your-account' in page.url.lower() or 'account' in page.url.lower():
                                 logger.debug("   ✅ Registro exitoso después de SMS.")
                             else:
-                                logger.warning("   Código incorrecto o no redirigió, reintentando...")
-                                # Si el código falla, cancelar número y comprar otro
+                                logger.warning("   Código incorrecto o no redirigió. Cancelando número...")
                                 if service_id:
                                     try:
                                         if service_name == 'hero':
                                             await cancel_hero_sms(service_id)
                                         elif service_name == '5sim':
                                             await cancel_fivesim(service_id)
-                                    except Exception as cancel_err:
-                                        logger.debug(f"   ⚠️ Error cancelando número: {cancel_err}")
+                                    except Exception:
+                                        pass
                                 phone_info = None
                                 await page.close()
                                 page = await context.new_page()
@@ -3758,8 +3808,8 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                     await cancel_hero_sms(service_id)
                                 elif service_name == '5sim':
                                     await cancel_fivesim(service_id)
-                            except Exception as cancel_err:
-                                logger.debug(f"   ⚠️ Error cancelando número: {cancel_err}")
+                            except Exception:
+                                pass
                         phone_info = None
                         await page.close()
                         page = await context.new_page()
@@ -3892,14 +3942,15 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     if "SMSAccountBannedTemporarily" in error_str or "Límite de canales" in error_str:
                         raise
 
-                    # Si es error de página de Amazon, reiniciar el bucle
+                    # Si es error de página de Amazon, reiniciar el bucle sin cancelar número
                     if "AMAZON_ERROR_PAGE" in error_str or "AMAZON_ERROR_LOSENTIMOS" in error_str or "AMAZON_BLOCKED_ACCOUNT" in error_str:
                         logger.warning("⚠️ Error de página de Amazon. Reiniciando el bucle interno...")
+                        # No cancelamos número, solo reiniciamos página
                         await page.close()
                         page = await context.new_page()
                         continue
 
-                    # Si es error recuperable, continuar el bucle
+                    # Errores recuperables: reiniciar página y mantener el número
                     if "SMS_TIME_OUT" in error_str or "AMAZON_CAPTCHA_ERROR" in error_str or "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_REDIRECTED_TO_LOGIN" in error_str or "SMS_UNAVAILABLE_RETRY" in error_str:
                         logger.warning(f"Fallo recuperable (intento interno {internal_attempt}), reiniciando en nueva pestaña...")
                         await page.close()
@@ -3959,9 +4010,6 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             logger.debug("✅ Limpieza completada")
 
     return None, "Error desconocido", None
-
-
-
 
 # API FLASK
 # -------------------------------------------------------------------
