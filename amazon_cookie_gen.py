@@ -110,62 +110,6 @@ PROXY_LIST = []
 # 5 APIs de mail temporal con sus formatos específicos
 _MAIL_APIS = [
     {
-        "name": "tmailor",
-        "base": "https://tmailor.com/api",
-        "create": lambda: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "newemail", "curentToken": "", "fbToken": None}
-        ),
-        "inbox": lambda token: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "listinbox", "accesstoken": token, "fbToken": None, "curentToken": token}
-        ),
-        "read": lambda token, msg_id: (
-            "POST",
-            "https://tmailor.com/api",
-            {"action": "read", "accesstoken": token, "email_code": msg_id["id"], "email_token": msg_id["email_id"], "fbToken": None, "curentToken": token}
-        ),
-        "get_email": lambda data: data.get("email"),
-        "get_token": lambda data: data.get("accesstoken"),
-        "has_messages": lambda data: bool(data.get("data")),
-        "get_messages": lambda data: list(data.get("data", {}).values()),
-        "get_msg_id": lambda msg: {"id": msg["id"], "email_id": msg["email_id"]},
-        "get_body": lambda data: data.get("data", {}).get("body", ""),
-        "check_errors": lambda data: None,
-    },
-    {
-        "name": "mailtm",
-        "base": "https://api.mail.tm",
-        "create": lambda: (
-            "POST",
-            "https://api.mail.tm/accounts",
-            {"address": None, "password": "Pass1234!"},
-            {"Content-Type": "application/json"}
-        ),
-        "inbox": lambda token: (
-            "GET",
-            f"https://api.mail.tm/messages?page=1",
-            None,
-            {"Authorization": f"Bearer {token}"}
-        ),
-        "read": lambda token, msg_id: (
-            "GET",
-            f"https://api.mail.tm/messages/{msg_id['id']}",
-            None,
-            {"Authorization": f"Bearer {token}"}
-        ),
-        "get_email": lambda data: data.get("address"),
-        "get_token": lambda data: data.get("token") or data.get("jwt"),
-        "has_messages": lambda data: bool(data.get("hydra:member") or data.get("data")),
-        "get_messages": lambda data: data.get("hydra:member") or data.get("data", []),
-        "get_msg_id": lambda msg: {"id": msg["id"]},
-        "get_body": lambda data: data.get("text") or data.get("body", ""),
-        "check_errors": lambda data: None,
-        "pre_create": lambda sess: None,
-    },
-    {
         "name": "10minutemail",
         "base": "https://10minutemail.com",
         "create": lambda: (
@@ -178,7 +122,7 @@ _MAIL_APIS = [
             "GET",
             f"https://10minutemail.com/messages/messagesAfter/0",
             None,
-            None
+            None  # No necesita token en headers, usa cookies
         ),
         "read": lambda token, msg_id: (
             "GET",
@@ -186,13 +130,14 @@ _MAIL_APIS = [
             None,
             None
         ),
-        "get_email": lambda data: data.get("address") or data.get("mail"),
-        "get_token": lambda data: data.get("token") or data.get("session"),
+        "get_email": lambda data: data.get("address"),
+        "get_token": lambda data: None,  # No hay token, usaremos cookies
         "has_messages": lambda data: isinstance(data, list) and len(data) > 0,
         "get_messages": lambda data: data if isinstance(data, list) else [],
         "get_msg_id": lambda msg: {"id": msg.get("id", msg.get("messageId", 0))},
         "get_body": lambda data: data.get("body") or data.get("html", ""),
         "check_errors": lambda data: None,
+        "uses_cookies": True,  # Flag para indicar que usa cookies en lugar de token
     },
     {
         "name": "guerrillamail",
@@ -223,9 +168,19 @@ _MAIL_APIS = [
         "get_body": lambda data: data.get("mail_body") or data.get("body", ""),
         "check_errors": lambda data: None,
     },
+    {
+        "name": "tempmail",
+        "base": "https://api.temp-mail.org",
+        "create": lambda: (
+            "GET",
+            "https://api.temp-mail.org/request/domains/format/json",
+            None,
+            None
+        ),
+        # Esto es un placeholder, realmente necesitas implementar la lógica correcta,
+        # pero como es más complejo, mejor usar las que ya funcionan.
+    },
 ]
-
-
 # Orden de países para Hero SMS (barato a caro, según tu preferencia)
 HERO_COUNTRY_ORDER = ['KZ', 'ID', 'MA', 'KG', 'CO', 'MX', 'BR', 'CM', 'CA' ]
 
@@ -623,38 +578,42 @@ def _api_request(sess, method, url, json_data=None, headers=None, timeout=15):
 
 def new_mail(sess, result_container):
     """Crea email temporal y guarda el resultado en el contenedor"""
-    try:
-        for api in _MAIL_APIS:
-            try:
-                method, url, data, *extra = api["create"]()
-                headers = extra[0] if extra else {}
-                
-                res = _api_request(sess, method, url, data, headers)
-                logger.debug(f"API {api['name']} - create status: {res.status_code}, body: {res.text[:200]}")
+    for api in _MAIL_APIS:
+        try:
+            method, url, data, *extra = api["create"]()
+            headers = extra[0] if extra else {}
+            
+            res = _api_request(sess, method, url, data, headers)
+            logger.debug(f"API {api['name']} - create status: {res.status_code}, body: {res.text[:200]}")
 
-                if res.status_code not in [200, 201]:
-                    continue
-                
-                resp_data = res.json()
-                
-                email = api["get_email"](resp_data)
-                token = api["get_token"](resp_data)
-                
-                if email and token:
-                    result_container["email"] = email
-                    result_container["token"] = token
-                    result_container["api"] = api["name"]
-                    logger.debug(f"* Email creado: {email} ({api['name']})")
-                    return
-            except:
+            if res.status_code not in [200, 201]:
                 continue
-        result_container["error"] = "No se pudo crear email"
-    except Exception as e:
-        result_container["error"] = str(e)
-
+            
+            resp_data = res.json()
+            
+            email = api["get_email"](resp_data)
+            token = api["get_token"](resp_data)
+            
+            # Si la API usa cookies en lugar de token (como 10minutemail)
+            if not token and api.get("uses_cookies"):
+                # Intentar obtener token de la cookie de sesión (ej. PHPSESSID)
+                token = sess.cookies.get('PHPSESSID') or sess.cookies.get('session') or 'cookie_based'
+                logger.debug(f"   Usando cookie como token: {token[:10]}...")
+            
+            if email:
+                result_container["email"] = email
+                result_container["token"] = token if token else ''
+                result_container["api"] = api["name"]
+                logger.debug(f"* Email creado: {email} ({api['name']})")
+                return
+        except Exception as e:
+            logger.debug(f"   API {api['name']} falló: {e}")
+            continue
+    
+    result_container["error"] = "No se pudo crear email con ninguna API"
+    logger.error("❌ No se pudo crear email con ninguna API")
 def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
     """Obtiene código OTP del email"""
-    # Buscar la API
     api = None
     for a in _MAIL_APIS:
         if a["name"] == api_name:
@@ -666,6 +625,10 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
     
     logger.debug(f"* Esperando mail en {api['name']}...")
     
+    # Si la API usa cookies, el token real es la cookie de sesión
+    if api.get("uses_cookies") and token == 'cookie_based':
+        token = sess.cookies.get('PHPSESSID') or sess.cookies.get('session') or ''
+    
     for i in range(timeout // 5):
         time.sleep(5)
         try:
@@ -673,7 +636,7 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
             headers = extra[0] if extra else {}
             
             res = _api_request(sess, method, url, data, headers)
-            logger.debug(f"API {api_name} - inbox status: {res.status_code}, body: {res.text[:200]}")  # <--- LÍNEA NUEVA
+            logger.debug(f"API {api_name} - inbox status: {res.status_code}, body: {res.text[:200]}")
 
             resp_data = res.json()
             
@@ -693,7 +656,7 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
             headers = extra[0] if extra else {}
             
             res2 = _api_request(sess, method, url, data, headers)
-            logger.debug(f"API {api_name} - read status: {res2.status_code}, body: {res2.text[:200]}")  # <--- NUEVO
+            logger.debug(f"API {api_name} - read status: {res2.status_code}, body: {res2.text[:200]}")
             body = str(api["get_body"](res2.json()))
             
             # Buscar OTP
@@ -718,12 +681,7 @@ def mail_code(sess, token: str, api_name: str, timeout: int = 120) -> str:
             logger.debug(f"  Error: {str(e)[:80]}")
             continue
 
-
-
-
-    
     raise Exception(f"Mail OTP timeout en {api['name']}")
-
 from playwright.async_api import async_playwright
 
 
