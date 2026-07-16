@@ -348,11 +348,46 @@ def capR(pattern: str, text: str) -> str:
         raise ValueError(f"Extract failed: '{pattern}' not found")
     return match.group(1)
 
-
 def capS(api_key: str, images: list, question: str) -> dict:
-    """Resuelve captcha WAF"""
+    """Resuelve captcha WAF (AwsWafClassification) con imágenes en base64."""
     capsolver.api_key = api_key
-    return capsolver.solve({"type": "AwsWafClassification", "question": f"aws:grid:{question}", "images": images})
+    processed_images = []
+    
+    for img in images:
+        if isinstance(img, str) and img.startswith('http'):
+            try:
+                # Descargar la imagen y convertir a base64
+                resp = requests.get(img, timeout=10)
+                img_base64 = base64.b64encode(resp.content).decode('utf-8')
+                processed_images.append(img_base64)
+                logger.debug(f"   ✅ Imagen descargada y convertida a base64 ({len(img_base64)} chars)")
+            except Exception as e:
+                logger.debug(f"   ⚠️ Error descargando imagen, usando URL: {e}")
+                processed_images.append(img)  # fallback a la URL
+        else:
+            processed_images.append(img)
+    
+    # Si todas las imágenes están en base64 o URLs, enviar a Capsolver
+    try:
+        result = capsolver.solve({
+            "type": "AwsWafClassification",
+            "question": f"aws:grid:{question}",
+            "images": processed_images
+        })
+        return result
+    except Exception as e:
+        logger.debug(f"   ❌ Capsolver solve falló: {e}")
+        raise
+
+
+
+
+
+
+
+
+
+
 
 def bypass_waf(sess, captcha_url, aamation_id, client_ctx, json_opt, solver_key) -> str:
     """Bypassea WAF Amazon con reintentos internos ante errores de red."""
@@ -909,8 +944,6 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
     """
     Genera una cuenta de Amazon usando el método rápido (curl_cffi + Capsolver).
     Propaga SMSAccountBannedTemporarily, CAPSolverNoBalance y SMSNoBalance.
-    Al detectar actividad inusual (PERMANENT_UNUSUAL_ACTIVITY), reintenta con el
-    mismo número (creando nueva sesión, lo que renueva la IP si el proxy es rotativo).
     """
     if t is None:
         t = time.time()
@@ -920,14 +953,11 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
     MAX_REG_RETRIES = 20
 
     for intento in range(1, max_intentos + 1):
-        # Si se pasa un proxy, se usará (puede ser rotativo, como smartproxy)
-        # No es necesario modificar el proxy, solo crear nueva sesión en cada reintento.
         for num_attempt in range(1, max_num_intentos + 1):
             # ---------- OBTENER NÚMERO ----------
             try:
                 activation_id, sms_phone, purchase_country = get_number(hero_keys)
                 add_to_history(activation_id, sms_phone, 'hero')
-
                 logger.debug(f"📞 Número obtenido: {sms_phone} (país {purchase_country})")
             except (SMSAccountBannedTemporarily, SMSNoBalance) as e:
                 raise
@@ -956,7 +986,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
                     password = "dfbc1992"
 
-                    # ---------- CREAR SESIÓN (nueva en cada reintento) ----------
+                    # ---------- CREAR SESIÓN ----------
                     sess = curl_requests.Session()
                     sess.impersonate = "chrome"
                     sess.headers.update({
@@ -973,7 +1003,6 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     })
 
                     if proxy:
-                        # Si el proxy es rotativo, cada nueva sesión obtendrá una IP diferente
                         sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
 
                     # ---------- EMAIL EN PARALELO ----------
@@ -1056,9 +1085,19 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     verifyToken = None
                     if "data-context" in req2.text and "data-external-id" in req2.text:
                         logger.debug("* Resolviendo WAF...")
-                        verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                        
+                        # Intentar obtener verifyToken de req2
+                        try:
+                            verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                        except:
+                            verifyToken = None
+                        
                         dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
-                        anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+                        
+                        try:
+                            anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+                        except:
+                            anti_csrf = ""
 
                         json3 = json.dumps({
                             "clientData": json.dumps({
@@ -1105,7 +1144,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                             "pageId": assoc_handle,
                             "openid.ns": "http://specs.openid.net/auth/2.0",
                             "shouldShowPersistentLabels": "true",
-                            "verifyToken": verifyToken
+                            "verifyToken": verifyToken if verifyToken else ""
                         }
 
                         req4 = safe_request(
@@ -1121,11 +1160,45 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                             max_retries=3
                         )
 
-                        verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
-                        if not verifyToken:
-                            verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+
+                                                
+                        # ===== NUEVO LOG PARA DEBUG =====
+                        logger.debug(f"📄 req4 status: {req4.status_code}")
+                        logger.debug(f"📄 req4 URL: {req4.url}")
+                        logger.debug(f"📄 req4 text (primeros 500 chars): {req4.text[:500]}")
+                        # =================================
+
+                        # Intentar obtener verifyToken de req4, si no, mantener el anterior
+                        try:
+                            verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
+                        except:
                             if not verifyToken:
-                                raise Exception("No se pudo obtener verifyToken")
+                                verifyToken = ""
+                    else:
+                        # Si no hay WAF, intentar obtener verifyToken de req2
+                        try:
+                            verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
+                        except:
+                            verifyToken = ""
+
+                    # Si no hay verifyToken, intentar obtenerlo de cualquier otra forma
+                    if not verifyToken:
+                        # Buscar en el HTML general
+                        html_content = req2.text
+                        match = re.search(r'name="verifyToken"\s+value="([^"]+)"', html_content)
+                        if match:
+                            verifyToken = match.group(1)
+                            logger.debug(f"VerifyToken encontrado vía regex: {verifyToken}")
+                        else:
+                            # Intentar con req4 si existe
+                            if 'req4' in locals():
+                                match = re.search(r'name="verifyToken"\s+value="([^"]+)"', req4.text)
+                                if match:
+                                    verifyToken = match.group(1)
+                                    logger.debug(f"VerifyToken encontrado vía regex en req4: {verifyToken}")
+                    
+                    if not verifyToken:
+                        logger.warning("⚠️ No se pudo obtener verifyToken, pero continuamos...")
 
                     # ---------- OTP EMAIL ----------
                     base_openid = {
@@ -1145,18 +1218,26 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "autoReadStatus": "manual",
                         "verificationPageContactType": "email",
                         "action": "code",
-                        "verifyToken": verifyToken,
+                        "verifyToken": verifyToken if verifyToken else "",
                         "code": otp_code
                     }
 
                     req5 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data5)
-                    anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
-                    verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
+                    
+                    try:
+                        anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
+                    except:
+                        anti_csrf = ""
+                    
+                    try:
+                        verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
+                    except:
+                        verifyToken = ""
 
                     data6 = {
                         **base_openid,
                         "anti-csrftoken-a2z": anti_csrf,
-                        "verifyToken": verifyToken,
+                        "verifyToken": verifyToken if verifyToken else "",
                         "cvf_phone_cc": amazon_cc,
                         "cvf_phone_num": sms_phone,
                         "cvf_action": "collect"
@@ -1168,14 +1249,21 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     logger.debug(f"SMS Code: {sms_code}")
                     set_status(hero_keys, activation_id, 6)
 
-                    anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
-                    verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
+                    try:
+                        anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
+                    except:
+                        anti_csrf = ""
+                    
+                    try:
+                        verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
+                    except:
+                        verifyToken = ""
 
                     data7 = {
                         **base_openid,
                         "anti-csrftoken-a2z": anti_csrf,
                         "verificationPageContactType": "sms",
-                        "verifyToken": verifyToken,
+                        "verifyToken": verifyToken if verifyToken else "",
                         "code": sms_code,
                         "cvf_action": "code",
                         "resendContactType": "sms"
@@ -1186,9 +1274,8 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     if "entered already exists with another account" in req7.text:
                         logger.debug("Número ya registrado")
                         cancel_number(activation_id, 'hero')
-                        cancel_all_numbers()  # Por si hay otros
+                        cancel_all_numbers()
                         raise Exception("PERMANENT_NUMBER_ALREADY_REGISTERED")
-                    
 
                     if "new_account=1" not in req7.url:
                         logger.debug("Cuenta no creada")
@@ -1197,12 +1284,35 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     # ---------- DIRECCIÓN ----------
                     logger.debug("* Agregando dirección...")
 
-                    csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
-                    customer_id = find(req7.text, 'name="address-ui-widgets-obfuscated-customerId" value="', '"')
-                    wizard_id = find(req7.text, 'name="address-ui-widgets-address-wizard-interaction-id" value="', '"')
-                    prev_token = find(req7.text, 'name="address-ui-widgets-previous-address-form-state-token" value="', '"')
-                    widget_csrf = urllib.parse.quote(find(req7.text, 'name="address-ui-widgets-csrfToken" value="', '"'))
-                    form_load = find(req7.text, 'name="address-ui-widgets-form-load-start-time" value="', '"')
+                    try:
+                        csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
+                    except:
+                        csrf_addr = ""
+                    
+                    try:
+                        customer_id = find(req7.text, 'name="address-ui-widgets-obfuscated-customerId" value="', '"')
+                    except:
+                        customer_id = ""
+                    
+                    try:
+                        wizard_id = find(req7.text, 'name="address-ui-widgets-address-wizard-interaction-id" value="', '"')
+                    except:
+                        wizard_id = ""
+                    
+                    try:
+                        prev_token = find(req7.text, 'name="address-ui-widgets-previous-address-form-state-token" value="', '"')
+                    except:
+                        prev_token = ""
+                    
+                    try:
+                        widget_csrf = urllib.parse.quote(find(req7.text, 'name="address-ui-widgets-csrfToken" value="', '"'))
+                    except:
+                        widget_csrf = ""
+                    
+                    try:
+                        form_load = find(req7.text, 'name="address-ui-widgets-form-load-start-time" value="', '"')
+                    except:
+                        form_load = ""
 
                     sess.headers.update({
                         "Content-Type": "application/x-www-form-urlencoded",
@@ -1280,15 +1390,12 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     error_str = str(e)
                     logger.debug(f"Error en reg_retry #{reg_retry}: {error_str}")
 
-                    # ====== NUEVO: DETECTAR ACTIVIDAD INUSUAL ======
-                    # Si es actividad inusual, reintentamos con nueva sesión (mismo número)
+                    # Actividad inusual: reintentar con nueva sesión (mismo número)
                     if "PERMANENT_UNUSUAL_ACTIVITY" in error_str or "detected unusual activity" in error_str.lower():
                         logger.debug("🔄 Actividad inusual detectada → reintentando con nueva sesión (mismo número)")
-                        
-                        
-                        continue  # No cancelamos número, solo seguimos al siguiente reintento
+                        continue
 
-                    # Para otros errores, mantener lógica anterior
+                    # Otros errores permanentes
                     permanent_keywords = [
                         "PERMANENT_EMAIL_ALREADY_USED",
                         "PERMANENT_NUMBER_ALREADY_REGISTERED",
@@ -1303,9 +1410,8 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         logger.debug(f"Error permanente, cancelando número y pasando al siguiente.")
                         if activation_id:
                             set_status(hero_keys, activation_id, 8)
-                        break  # sale del bucle reg_retry → se comprará otro número
+                        break
                     else:
-                        # Error transitorio (red, timeout, etc.) → reintentar con misma sesión o nueva?
                         if reg_retry == MAX_REG_RETRIES:
                             logger.warning(f"Agotados reintentos para este número. Cancelando.")
                             if activation_id:
@@ -1316,17 +1422,14 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                             time.sleep(2)
                             continue
 
-            # Si no se registró después de los reintentos, continuar con el siguiente número
             if not registration_success:
                 continue
             else:
-                # registration_success es True solo si se retornó antes
                 pass
 
-        # Si se agotaron los números para este proxy, cambiar proxy (siguiente intento)
-        logger.debug(f"Se agotaron {max_num_intentos} números para el proxy actual, cambiando de proxy...")
-
     raise Exception(f"Se agotaron los {max_intentos} intentos externos")
+
+
 async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10, force_playwright=False):
     logger.debug(f"🚀 generate_cookie_api llamada con country={country}, force_playwright={force_playwright}")
     global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
@@ -1846,7 +1949,16 @@ def solve_funcaptcha_2captcha(page_url, site_key, surl=None):
     if not API_KEY_2CAPTCHA:
         return None
 
-    # Lista de configuraciones a probar (surl)
+    # Limpiar site_key (puede venir con espacios o caracteres extraños)
+    site_key = site_key.strip()
+    if not site_key:
+        return None
+
+    # Asegurar que surl sea una URL válida
+    if surl and not surl.startswith('http'):
+        surl = None
+
+    # Configuraciones a probar
     configs_to_try = [
         {'surl': None, 'desc': 'sin surl'},
         {'surl': surl, 'desc': f'surl={surl}'} if surl else None,
@@ -1866,7 +1978,7 @@ def solve_funcaptcha_2captcha(page_url, site_key, surl=None):
         if config['surl']:
             data['surl'] = config['surl']
         
-        logger.debug(f"   Probando 2captcha con {config['desc']}")
+        logger.debug(f"   Probando 2captcha con {config['desc']} (site_key: {site_key[:10]}...)")
         try:
             resp = requests.post('http://2captcha.com/in.php', data=data, timeout=30)
             result = resp.json()
@@ -1894,7 +2006,6 @@ def solve_funcaptcha_2captcha(page_url, site_key, surl=None):
             logger.warning(f"   Error en intento con {config['desc']}: {e}")
             continue
     return None
-
 def solve_funcaptcha_anticaptcha(page_url, site_key, surl=None):
     """Resuelve FunCaptcha usando AntiCaptcha, con la clase correcta (FunCaptchaTaskProxyless)."""
     if not API_KEY_ANTICAPTCHA:
@@ -1937,53 +2048,32 @@ def solve_funcaptcha_anticaptcha(page_url, site_key, surl=None):
 async def extract_site_key_robust(page):
     """
     Extrae el site_key de la página 'Confirma tu identidad' usando múltiples estrategias,
-    incluyendo esperar a que el iframe cargue su contenido.
+    incluyendo esperar a que el iframe cargue su contenido y buscar en frames anidados.
     Retorna (site_key, surl)
     """
     site_key = None
     surl = None
 
-    # --- Estrategia 0: Esperar a que el iframe principal tenga un src válido ---
+    # --- Estrategia 1: Esperar a que el iframe principal tenga un src válido ---
     iframe = None
-    for _ in range(10):  # hasta 10 segundos
+    for _ in range(15):  # hasta 15 segundos
         iframe = await page.query_selector('#cvf-aamation-challenge-iframe')
         if iframe:
             src = await iframe.get_attribute('src')
-            if src and src != 'about:blank':
+            if src and src != 'about:blank' and 'arkoselabs' in src:
                 break
         await page.wait_for_timeout(1000)
-    else:
-        logger.debug("   No se encontró iframe con src válido después de esperar")
-
-    # --- Estrategia 1: Buscar en el script de ACIC (data-external-id) ---
-    page_content = await page.content()
-    # UUID con guiones
-    uuid_match = re.search(r'"data-external-id":\s*"([A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12})"', page_content, re.IGNORECASE)
-    if uuid_match:
-        site_key = uuid_match.group(1)
-        logger.debug(f"   Site_key (UUID) desde script: {site_key}")
-    else:
-        # Alfanumérico largo (20+ caracteres)
-        alnum_match = re.search(r'"data-external-id":\s*"([A-Za-z0-9]{20,})"', page_content)
-        if alnum_match:
-            site_key = alnum_match.group(1)
-            logger.debug(f"   Site_key (alfanumérico) desde script: {site_key}")
-
-    # --- Estrategia 2: Buscar en el iframe (atributo o src) ---
+    
     if iframe:
-        # Atributo data-external-id
-        if not site_key:
-            site_key = await iframe.get_attribute('data-external-id')
-            if site_key:
-                logger.debug(f"   Site_key desde iframe data-external-id: {site_key}")
-        # Parámetro pk en src
         src = await iframe.get_attribute('src')
-        if src:
-            match = re.search(r'[?&]pk=([A-Za-z0-9]{20,})', src)
-            if match:
-                site_key = match.group(1)
+        if src and 'arkoselabs' in src:
+            logger.debug(f"   Iframe src: {src[:200]}")
+            # Extraer pk
+            pk_match = re.search(r'[?&]pk=([A-Za-z0-9_-]{20,})', src)
+            if pk_match:
+                site_key = pk_match.group(1)
                 logger.debug(f"   Site_key desde src pk: {site_key}")
-            # Extraer surl del src si es URL completa
+            # Extraer surl
             surl_match = re.search(r'surl=([^&]+)', src)
             if surl_match:
                 surl_candidate = surl_match.group(1)
@@ -1991,45 +2081,80 @@ async def extract_site_key_robust(page):
                     surl = surl_candidate
                     logger.debug(f"   Surl desde src: {surl}")
                 else:
-                    logger.debug(f"   Surl no válido: {surl_candidate}")
+                    # Decodificar URL si está codificada
+                    from urllib.parse import unquote
+                    surl_decoded = unquote(surl_candidate)
+                    if surl_decoded.startswith('http'):
+                        surl = surl_decoded
+                        logger.debug(f"   Surl decodificado: {surl}")
+
+    # --- Estrategia 2: Buscar en el script de ACIC (data-external-id) ---
+    page_content = await page.content()
+    # UUID con guiones (formato clásico)
+    uuid_match = re.search(r'"data-external-id":\s*"([A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12})"', page_content, re.IGNORECASE)
+    if uuid_match:
+        site_key = uuid_match.group(1)
+        logger.debug(f"   Site_key (UUID) desde script: {site_key}")
+    else:
+        # Alfanumérico largo (20+ caracteres) - nuevo formato
+        alnum_match = re.search(r'"data-external-id":\s*"([A-Za-z0-9]{20,})"', page_content)
+        if alnum_match:
+            site_key = alnum_match.group(1)
+            logger.debug(f"   Site_key (alfanumérico) desde script: {site_key}")
+        else:
+            # Buscar data-public-key
+            pub_match = re.search(r'"data-public-key":\s*"([^"]+)"', page_content)
+            if pub_match:
+                site_key = pub_match.group(1)
+                logger.debug(f"   Site_key desde data-public-key: {site_key}")
 
     # --- Estrategia 3: Buscar en frames anidados (game-core-frame) ---
-    for frame in page.frames:
-        if 'game-core' in frame.name or 'arkoselabs' in frame.url:
-            try:
-                # Buscar data-external-id dentro del frame
-                ext_id = await frame.evaluate('() => document.querySelector("[data-external-id]")?.getAttribute("data-external-id")')
-                if ext_id and not site_key:
-                    site_key = ext_id
-                    logger.debug(f"   Site_key desde frame interno: {site_key}")
-                # Buscar en el src del frame
-                frame_url = frame.url
-                if frame_url:
-                    match = re.search(r'[?&]pk=([A-Za-z0-9]{20,})', frame_url)
-                    if match and not site_key:
-                        site_key = match.group(1)
-                        logger.debug(f"   Site_key desde frame url pk: {site_key}")
-                    # También buscar surl en el frame
-                    surl_match = re.search(r'surl=([^&]+)', frame_url)
-                    if surl_match and surl_match.group(1).startswith('http'):
-                        surl = surl_match.group(1)
-                        logger.debug(f"   Surl desde frame: {surl}")
-            except Exception as e:
-                logger.debug(f"   Error accediendo a frame: {e}")
+    if not site_key:
+        for frame in page.frames:
+            if 'game-core' in frame.name or 'arkoselabs' in frame.url:
+                try:
+                    # Buscar data-external-id dentro del frame
+                    ext_id = await frame.evaluate('() => document.querySelector("[data-external-id]")?.getAttribute("data-external-id")')
+                    if ext_id and not site_key:
+                        site_key = ext_id
+                        logger.debug(f"   Site_key desde frame interno: {site_key}")
+                    # Buscar en el src del frame
+                    frame_url = frame.url
+                    if frame_url:
+                        match = re.search(r'[?&]pk=([A-Za-z0-9_-]{20,})', frame_url)
+                        if match and not site_key:
+                            site_key = match.group(1)
+                            logger.debug(f"   Site_key desde frame url pk: {site_key}")
+                        # También buscar surl en el frame
+                        surl_match = re.search(r'surl=([^&]+)', frame_url)
+                        if surl_match:
+                            surl_candidate = surl_match.group(1)
+                            if surl_candidate.startswith('http'):
+                                surl = surl_candidate
+                            else:
+                                from urllib.parse import unquote
+                                surl_decoded = unquote(surl_candidate)
+                                if surl_decoded.startswith('http'):
+                                    surl = surl_decoded
+                            logger.debug(f"   Surl desde frame: {surl}")
+                except Exception as e:
+                    logger.debug(f"   Error accediendo a frame: {e}")
 
-    # --- Estrategia 4: Si aún no hay site_key, intentar obtenerlo de la URL de la página (a veces viene en 'public_key') ---
+    # --- Estrategia 4: Si aún no hay site_key, intentar obtenerlo de la URL de la página (parámetro public_key) ---
     if not site_key:
         current_url = page.url
-        match = re.search(r'[?&]public_key=([A-Za-z0-9-]+)', current_url)
+        match = re.search(r'[?&]public_key=([A-Za-z0-9_-]+)', current_url)
         if match:
             site_key = match.group(1)
             logger.debug(f"   Site_key desde URL: {site_key}")
 
+    # Si site_key es una URL codificada, decodificarla
+    if site_key and '%' in site_key:
+        from urllib.parse import unquote
+        site_key = unquote(site_key)
+        logger.debug(f"   Site_key decodificado: {site_key}")
+
     return site_key, surl
-
-
-
-
 
 
 
