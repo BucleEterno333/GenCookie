@@ -3162,7 +3162,6 @@ async def wait_for_text(page, text, timeout=WAIT_TIMEOUT*1000):
 # FUNCIÓN PRINCIPAL DE CREACIÓN DE CUENTA (OPTIMIZADA CON REINTENTOS INTERNOS)
 # -------------------------------------------------------------------
 
-
 async def create_amazon_account(country_code, add_address_flag=True, max_retries=None, max_internal_retries=10):
     retries = max_retries if max_retries is not None else MAX_RETRIES
     logger.debug(f"🏁 Iniciando creación de cuenta para {country_code} (reintentos: {retries})")
@@ -3187,7 +3186,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
         }
 
         try:
-            # ----- PASO 1: Configurar sesión requests -----
+            # ----- PASO 1: Configurar sesión requests (solo para probar proxy) -----
             logger.debug("📦 Configurando sesión requests...")
             session = requests.Session()
             retry_strategy = Retry(
@@ -3217,7 +3216,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                 raise Exception(f"Proxy error: {ip}")
             logger.debug(f"   ✅ Proxy OK - IP pública: {ip}")
 
-            # ----- PASO 3: Generar credenciales -----
+            # ----- PASO 3: Generar credenciales (sin número aún) -----
             logger.debug("🔑 Generando credenciales...")
             password = f"Pass{random.randint(1000,9999)}{uuid.uuid4().hex[:8]}"
             first_name = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5)).capitalize()
@@ -3363,10 +3362,6 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             purchase_country = None
             sms_phone = None
 
-            # Diccionario para llevar el timestamp de compra de números (para cancelar después de 2 min)
-            # Guardamos {service_id: timestamp}
-            number_purchase_times = {}
-
             while internal_attempt < max_internal_retries and not registration_success:
                 internal_attempt += 1
                 logger.debug(f"🔄 Intento interno {internal_attempt}/{max_internal_retries} (misma IP)")
@@ -3379,19 +3374,23 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                 try:
                     # ========== OBTENER NÚMERO (solo si no se tiene aún) ==========
                     if phone_info is None:
-                        # Intentar obtener número
-                        phone_info = await get_phone_number(country_code)
-                        if not phone_info:
-                            raise Exception("No se pudo obtener número de teléfono")
-                        sms_phone = phone_info['local']
-                        service_id = phone_info['service_id']
-                        service_name = phone_info['service_name']
-                        purchase_country = phone_info['purchase_country']
-                        logger.debug(f"Número obtenido: {phone_info['full']} (servicio: {service_name}, país: {purchase_country})")
-                        account_data['phone'] = sms_phone
-                        account_data['purchase_country'] = purchase_country
-                        # Registrar timestamp de compra
-                        number_purchase_times[service_id] = time.time()
+                        try:
+                            phone_info = await get_phone_number(country_code)
+                            if not phone_info:
+                                raise Exception("No se pudo obtener número de teléfono")
+                            sms_phone = phone_info['local']
+                            service_id = phone_info['service_id']
+                            service_name = phone_info['service_name']
+                            purchase_country = phone_info['purchase_country']
+                            logger.debug(f"Número obtenido: {phone_info['full']} (servicio: {service_name}, país: {purchase_country})")
+                            account_data['phone'] = sms_phone
+                            account_data['purchase_country'] = purchase_country
+                        except SMSAccountBannedTemporarily as e:
+                            logger.error(f"❌ Todas las keys de SMS están en CHANNELS_LIMIT. Deteniendo proceso.")
+                            # Lanzar excepción para que el global la capture y desactive el servicio
+                            raise SMSAccountBannedTemporarily("Límite de canales alcanzado en todas las keys y países")
+                        except Exception as e:
+                            raise
 
                     # ----- PASO 7: Navegar a la URL base (con reintentos) -----
                     base_url = base_urls[country_code]
@@ -3522,63 +3521,32 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         raise Exception("No se encontró botón Continuar")
                     last_screenshot = await take_screenshot(page, "despues_continuar")
 
-                    # ===== NUEVA LÓGICA PARA NÚMERO YA REGISTRADO =====
+                    # ====== NUEVO: SI LA URL CONTIENE "claim?" ======
                     if "claim?" in page.url.lower():
-                        logger.warning("⚠️ Número ya registrado detectado.")
-                        
-                        # 1. Intentar cancelar el número si ya pasó el tiempo mínimo
-                        if service_id and service_id in number_purchase_times:
-                            elapsed = time.time() - number_purchase_times[service_id]
-                            if elapsed >= 120:
-                                try:
-                                    if service_name == 'hero':
-                                        await cancel_hero_sms(service_id)
-                                    elif service_name == '5sim':
-                                        await cancel_fivesim(service_id)
-                                    logger.debug(f"   ✅ Número {phone_info['full']} cancelado")
-                                except Exception as e:
-                                    logger.debug(f"   ⚠️ Error cancelando número: {e}")
-                            else:
-                                logger.debug(f"   ⏳ Número comprado hace {elapsed:.0f}s, esperando {120 - elapsed:.0f}s para cancelar")
-                                # Opcional: esperar y luego cancelar (lo hará el próximo ciclo)
+                        logger.warning("⚠️ Número ya registrado. Cancelando este número y comprando otro...")
 
-                        # 2. Obtener un nuevo número (mismo servicio, probando todos los países)
-                        current_service = service_name
-                        new_phone = await get_phone_number(country_code, force_service=current_service, force_country=None)
-                        if not new_phone:
-                            raise Exception("No se pudo obtener un nuevo número después de detectar número registrado")
+                        # 1. Intentar cancelar el número (si es posible, pero si da EARLY_CANCEL_DENIED, lo ignoramos)
+                        if service_id:
+                            try:
+                                # Solo intentar cancelar si ha pasado más de 2 minutos (120 segundos)
+                                # Para saberlo, necesitaríamos guardar el timestamp de compra.
+                                # Como no lo tenemos, mejor no cancelar y dejar que el número expire solo.
+                                # O simplemente intentar cancelar y si falla, continuar.
+                                if service_name == 'hero':
+                                    await cancel_hero_sms(service_id)
+                                elif service_name == '5sim':
+                                    await cancel_fivesim(service_id)
+                                logger.debug(f"   ✅ Número {phone_info['full']} cancelado (o se intentó)")
+                            except Exception as e:
+                                logger.debug(f"   ⚠️ No se pudo cancelar el número (probablemente EARLY_CANCEL_DENIED): {e}")
 
-                        # 3. Actualizar variables
-                        old_service_id = service_id
-                        phone_info = new_phone
-                        service_id = phone_info['service_id']
-                        service_name = phone_info['service_name']
-                        purchase_country = phone_info['purchase_country']
-                        account_data['phone'] = phone_info['local']
-                        account_data['purchase_country'] = purchase_country
-                        logger.debug(f"   ✅ Nuevo número obtenido: {phone_info['full']} (país: {purchase_country})")
-                        number_purchase_times[service_id] = time.time()
-
-                        # 4. Ir hacia atrás a la página de login (para rellenar el nuevo número)
-                        await page.go_back()
-                        await page.wait_for_load_state('domcontentloaded')
-                        await page.wait_for_selector(phone_field_selector, state='visible', timeout=10000)
-
-                        # 5. Rellenar el nuevo número
-                        phone_field = await page.wait_for_selector(phone_field_selector, timeout=10000)
-                        await phone_field.fill('')
-                        await phone_field.fill(phone_info['full'])
-
-                        # 6. Hacer clic en Continuar
-                        continue_clicked = False
-                        for selector in continue_selectors:
-                            if await smart_click(page, selector, timeout=5000, wait_for_navigation=True):
-                                continue_clicked = True
-                                break
-                        if not continue_clicked:
-                            raise Exception("No se pudo hacer clic en Continuar después de cambiar número")
-
-                        # 7. Continuar al siguiente paso (no hacer break, simplemente seguir)
+                        # 2. Marcar phone_info como None para forzar la compra de un nuevo número en la siguiente iteración
+                        phone_info = None
+                        # 3. Reiniciar el bucle interno (continue) para que se compre un nuevo número
+                        logger.debug("   🔄 Reiniciando bucle para comprar otro número...")
+                        # Limpiar cookies y cerrar página para empezar fresco
+                        await page.close()
+                        page = await context.new_page()
                         continue
 
                     # ----- PASO 10.5: Resolver captcha si aparece antes del envío -----
@@ -3600,11 +3568,16 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         page_content = await page.content()
                         is_login_page = await page.query_selector('#ap_email') is not None
                         if is_login_page:
-                            logger.warning("   🔄 Redirigido a la página de inicio de sesión antes de mandar forms. Reiniciando proceso interno.")
-                            raise Exception("AMAZON_REDIRECTED_TO_LOGIN")
+                            logger.warning("   🔄 Redirigido a la página de inicio de sesión. Reiniciando proceso interno.")
+                            # Limpiar cookies y reiniciar
+                            await page.close()
+                            page = await context.new_page()
+                            continue
                         elif "Lo sentimos" in page_content or "no podemos crear tu cuenta" in page_content:
-                            logger.warning("   ❌ Página de error de Amazon detectada (Lo sentimos, no podemos crear tu cuenta). Lanzando excepción para reintento.")
-                            raise Exception("AMAZON_ERROR_LOSENTIMOS")
+                            logger.warning("   ❌ Página de error de Amazon detectada. Reiniciando proceso interno.")
+                            await page.close()
+                            page = await context.new_page()
+                            continue
                         else:
                             logger.debug("   ℹ️ No se detectó error. Esperando 4 segundos a que el formulario cargue automáticamente...")
                             await page.wait_for_timeout(4000)
@@ -3670,18 +3643,19 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                                 raise Exception("AMAZON_BLOCKED_ACCOUNT")
                             if "incorrecto o no válido" in content or "Introduzca un número de móvil válido" in content:
                                 logger.warning(f"   NÚMERO INVÁLIDO (intento {submit_attempt}) -> rellenando número")
+                                # Si el número es inválido, comprar otro
                                 phone_field = await page.wait_for_selector(phone_field_selector, timeout=3000)
                                 if phone_field:
-                                    await phone_field.fill('')
-                                    await phone_field.fill(phone_info['full'])
-                                continue
+                                    # Marcar phone_info como None para comprar otro
+                                    phone_info = None
+                                    raise Exception("NUMERO_INVALIDO_RECARGAR")
                             if "Mínimo 6 caracteres requeridos" in content or "Minimo 6 caracteres requeridos" in content:
                                 logger.warning(f"   CONTRASEÑA VACÍA (intento {submit_attempt}) -> reintentando")
                                 continue
                             if "El número de teléfono móvil ya está en uso" in content or "El número de teléfono móvil ya está registrado" in content:
-                                logger.warning("   NÚMERO YA REGISTRADO -> forzando nuevo número...")
-                                # Lanzar excepción para que el bucle principal lo maneje
-                                raise Exception("NUMBER_ALREADY_IN_USE")
+                                logger.warning("   NÚMERO YA REGISTRADO -> comprando otro número")
+                                phone_info = None
+                                raise Exception("NUMERO_REGISTRADO_RECARGAR")
                             submit_success = True
                             break
 
@@ -3689,14 +3663,25 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             raise Exception("No se pudo enviar el formulario de registro después de varios intentos")
                         return True
 
-                    await enviar_formulario_registro()
+                    try:
+                        await enviar_formulario_registro()
+                    except Exception as e:
+                        if "NUMERO_INVALIDO_RECARGAR" in str(e) or "NUMERO_REGISTRADO_RECARGAR" in str(e):
+                            # Reiniciar el bucle para comprar otro número
+                            logger.debug("   🔄 Número inválido o registrado. Comprando otro...")
+                            await page.close()
+                            page = await context.new_page()
+                            continue
+                        else:
+                            raise
+
                     last_screenshot = await take_screenshot(page, "despues_registro")
 
-                    # ----- PASO 15: VERIFICACIÓN POR SMS (con opción de cambiar a SMS) -----
+                    # ----- PASO 15: VERIFICACIÓN POR SMS -----
                     logger.debug("📱 Verificación SMS con reintentos por país y número...")
                     await page.wait_for_timeout(5000)
 
-                    # Asegurar que selecciona SMS en lugar de WhatsApp (si aparece)
+                    # Verificar si estamos en WhatsApp
                     content = await safe_get_content(page)
                     if "Verificar con WhatsApp" in content or "Enviar código por SMS" in content:
                         logger.warning("📱 WhatsApp detectado, seleccionando SMS...")
@@ -3717,16 +3702,26 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                         if error_msg:
                             error_text = await error_msg.text_content()
                             if "No se puede enviar un mensaje SMS" in error_text or "Verifica a través de WhatsApp" in error_text:
-                                logger.warning(f"⚠️ SMS no disponible. Reintentando con otro número...")
-                                # Forzar cambio de número
-                                raise Exception("SMS_UNAVAILABLE_RETRY")
+                                logger.warning(f"⚠️ SMS no disponible. Cancelando número y comprando otro...")
+                                if service_id:
+                                    try:
+                                        if service_name == 'hero':
+                                            await cancel_hero_sms(service_id)
+                                        elif service_name == '5sim':
+                                            await cancel_fivesim(service_id)
+                                    except Exception as cancel_err:
+                                        logger.debug(f"   ⚠️ Error cancelando número: {cancel_err}")
+                                phone_info = None
+                                await page.close()
+                                page = await context.new_page()
+                                continue
                             else:
                                 logger.error(f"❌ Error inesperado: {error_text}")
                                 raise Exception(f"Error en verificación SMS: {error_text}")
                         else:
                             raise Exception(f"Campo de código no apareció: {e}")
 
-                    # Esperar código SMS (con reenvío automático)
+                    # Esperar código SMS
                     sms_code = await wait_for_sms_code_with_retry(service_name, service_id, page, timeout_total=TIMEOUT_SMS, resend_interval=40)
                     if sms_code:
                         await code_input.fill('')
@@ -3738,50 +3733,177 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                             await page.wait_for_load_state('domcontentloaded', timeout=15000)
                             if 'your-account' in page.url.lower() or 'account' in page.url.lower():
                                 logger.debug("   ✅ Registro exitoso después de SMS.")
-                                registration_success = True
-                                break
                             else:
                                 logger.warning("   Código incorrecto o no redirigió, reintentando...")
+                                # Si el código falla, cancelar número y comprar otro
+                                if service_id:
+                                    try:
+                                        if service_name == 'hero':
+                                            await cancel_hero_sms(service_id)
+                                        elif service_name == '5sim':
+                                            await cancel_fivesim(service_id)
+                                    except Exception as cancel_err:
+                                        logger.debug(f"   ⚠️ Error cancelando número: {cancel_err}")
+                                phone_info = None
+                                await page.close()
+                                page = await context.new_page()
                                 continue
                         else:
                             logger.warning("   No se encontró botón de verificar")
                     else:
-                        logger.warning(f"⏰ No se recibió código en {TIMEOUT_SMS} segundos")
-                        # Si no llegó código, cancelar número y obtener otro
-                        raise Exception("SMS_TIME_OUT")
-
-                    # ... (resto del código: verificar éxito, agregar dirección, etc.)
-
-                except Exception as e:
-                    error_str = str(e)
-                    logger.debug(f"Error en intento interno {internal_attempt}: {error_str}")
-
-                    # ===== Manejo de errores específicos =====
-                    if "NUMBER_ALREADY_IN_USE" in error_str:
-                        # Este error viene de enviar_formulario_registro cuando detecta "número ya registrado"
-                        # Simplemente reiniciamos el bucle interno (se cancelará el número si ha pasado tiempo)
-                        logger.warning("⚠️ Número ya registrado detectado en el formulario. Reiniciando...")
-                        continue
-                    elif "AMAZON_ERROR_PAGE" in error_str or "AMAZON_ERROR_LOSENTIMOS" in error_str or "AMAZON_BLOCKED_ACCOUNT" in error_str:
-                        # No cancelar número, solo reiniciar página con nuevo proxy
-                        logger.warning("⚠️ Error de página de Amazon detectado. Se reiniciará la página sin cancelar el número.")
-                        raise  # Propagar al global
-                    elif "SMS_TIME_OUT" in error_str or "SMS_UNAVAILABLE_RETRY" in error_str:
-                        # Cancelar el número y obtener otro en el siguiente intento
-                        if service_id and service_id in number_purchase_times:
+                        logger.warning(f"⏰ No se recibió código en el tiempo límite. Cancelando número...")
+                        if service_id:
                             try:
                                 if service_name == 'hero':
                                     await cancel_hero_sms(service_id)
                                 elif service_name == '5sim':
                                     await cancel_fivesim(service_id)
-                                logger.debug(f"   ✅ Número {phone_info['full']} cancelado por timeout")
-                            except Exception as e:
-                                logger.debug(f"   ⚠️ Error cancelando número por timeout: {e}")
-                        # Marcar phone_info como None para forzar nuevo número en el próximo loop
+                            except Exception as cancel_err:
+                                logger.debug(f"   ⚠️ Error cancelando número: {cancel_err}")
                         phone_info = None
+                        await page.close()
+                        page = await context.new_page()
                         continue
-                    elif "AMAZON_CAPTCHA_ERROR" in error_str or "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_REDIRECTED_TO_LOGIN" in error_str or "AMAZON_SINENLACE_TRASCAMBIAR" in error_str:
+
+                    # ----- PASO 16: Verificar éxito -----
+                    if 'your-account' in page.url.lower() or 'account' in page.url.lower() or 'welcome' in page.url.lower():
+                        logger.debug("   ✅ Registro exitoso!")
+                        cookies = await context.cookies()
+                        cookie_dict = {c['name']: c['value'] for c in cookies}
+                        cookie_string = '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
+                        account_data['cookie_dict'] = cookie_dict
+                        account_data['cookie_string'] = cookie_string
+                        logger.debug(f"   🍪 Cookies obtenidas: {len(cookie_dict)} cookies")
+
+                        if add_address_flag:
+                            logger.debug("📍 Agregando dirección...")
+                            try:
+                                await page.unroute('**/*', block_resources)
+                                await smart_goto(page, add_address_urls[country_code], wait_until='domcontentloaded', timeout=20000)
+                                await page.wait_for_selector('#address-ui-widgets-enterAddressLine1, #address-ui-widgets-enterAddressFullName', timeout=15000)
+                                last_screenshot = await take_screenshot(page, "add_address_form")
+
+                                address_data = {
+                                    'US': {
+                                        'fullName': 'John Doe',
+                                        'phone': f'1{random.randint(1000000000, 9999999999)}',
+                                        'line1': '123 Main Street',
+                                        'city': 'New York',
+                                        'state': 'NY',
+                                        'postalCode': '10001'
+                                    },
+                                    'MX': {
+                                        'street': 'Calzada Ignacio Zaragoza 1584',
+                                        'postal_code': '09100',
+                                        'city': 'Ciudad de México',
+                                        'state': 'CDMX',
+                                        'phone': f"55{random.randint(10000000, 99999999)}"
+                                    }
+                                }
+
+                                target_country = 'MX'
+                                if target_country != country_code:
+                                    logger.debug(f"🌎 Cambiando país a {target_country} (desde {country_code})")
+                                    dropdown_btn = await page.wait_for_selector('span.a-button-text[data-action="a-dropdown-button"]', timeout=5000)
+                                    await dropdown_btn.click()
+                                    await page.wait_for_timeout(1000)
+                                    first_letter = 'E' if target_country == 'US' else 'M'
+                                    await page.keyboard.type(first_letter)
+                                    await page.wait_for_timeout(1000)
+                                    click_x = 500
+                                    click_y = 300
+                                    await page.mouse.click(click_x, click_y)
+                                    await page.wait_for_timeout(2000)
+                                    logger.debug(f"   ✅ País cambiado a {target_country} mediante coordenadas")
+                                else:
+                                    logger.debug(f"   🇲🇽 Usando país actual {country_code} para dirección")
+
+                                if target_country == 'US':
+                                    data = address_data['US']
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressFullName', data['fullName'])
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressPhoneNumber', data['phone'])
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressLine1', data['line1'])
+                                    city_input = await page.query_selector('#address-ui-widgets-enterAddressCity-input, #address-ui-widgets-enterAddressCity input')
+                                    if city_input:
+                                        await city_input.fill(data['city'])
+                                    else:
+                                        await smart_fill(page, 'input[aria-label*="Ciudad"]', data['city'])
+                                    try:
+                                        state_dropdown = await page.wait_for_selector('#address-ui-widgets-enterAddressStateOrRegion .a-button, .a-dropdown-button', timeout=5000)
+                                        await state_dropdown.click()
+                                        await page.wait_for_selector('.a-dropdown-options', state='visible', timeout=5000)
+                                        await page.keyboard.type(data['state'][0])
+                                        await page.wait_for_timeout(500)
+                                        await page.mouse.click(click_x, click_y + 100)
+                                        logger.debug(f"   ✅ Estado seleccionado: {data['state']}")
+                                    except Exception as e:
+                                        logger.warning(f"   ⚠️ No se pudo seleccionar estado: {e}")
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', data['postalCode'])
+                                else:   # México
+                                    data = address_data['MX']
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressLine1', data['street'])
+                                    await smart_fill(page, '#address-ui-widgets-enterAddressPostalCode', data['postal_code'])
+                                    validate_btn = await page.wait_for_selector('#address-ui-widgets-enterAddressPostalCode-submit', timeout=5000)
+                                    if validate_btn:
+                                        await validate_btn.click()
+                                        await page.wait_for_timeout(3000)
+
+                                submit_btn = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
+                                if submit_btn:
+                                    await submit_btn.click()
+                                    await page.wait_for_timeout(3000)
+                                    error_elem = await page.query_selector('.a-alert-error, .a-alert-warning')
+                                    if error_elem:
+                                        submit_btn2 = await page.query_selector('span#address-ui-widgets-form-submit-button input[type="submit"], input[value="Agregar dirección"]')
+                                        if submit_btn2:
+                                            async with page.expect_navigation(timeout=NAVIGATION_TIMEOUT*1000):
+                                                await submit_btn2.click()
+                                            logger.debug("   ✅ Segundo clic realizado, navegación detectada")
+                                        else:
+                                            logger.warning("   ⚠️ Botón desapareció después del primer clic")
+                                    else:
+                                        logger.debug("   ✅ Dirección agregada sin error")
+                                else:
+                                    logger.warning("   ⚠️ No se encontró botón de envío")
+
+                                if "addresses" in page.url:
+                                    account_data['address'] = "Dirección agregada exitosamente"
+                                    logger.debug("   ✅ Dirección agregada")
+                                else:
+                                    account_data['address'] = f"Redirección inesperada: {page.url}"
+                            except Exception as e:
+                                logger.warning(f"⚠️ Error agregando dirección: {e}")
+                                account_data['address'] = f"Error: {e}"
+                            finally:
+                                await page.route('**/*', block_resources)
+                        else:
+                            account_data['address'] = "No se agregó dirección"
+
+                        registration_success = True
+                        return account_data, None, last_screenshot
+                    else:
+                        raise Exception(f"Registro fallido, URL: {page.url}")
+
+                except Exception as e:
+                    error_str = str(e)
+                    logger.debug(f"Error en intento interno {internal_attempt}: {error_str}")
+
+                    # Si es error de SMS de límite, propagar para desactivar
+                    if "SMSAccountBannedTemporarily" in error_str or "Límite de canales" in error_str:
+                        raise
+
+                    # Si es error de página de Amazon, reiniciar el bucle
+                    if "AMAZON_ERROR_PAGE" in error_str or "AMAZON_ERROR_LOSENTIMOS" in error_str or "AMAZON_BLOCKED_ACCOUNT" in error_str:
+                        logger.warning("⚠️ Error de página de Amazon. Reiniciando el bucle interno...")
+                        await page.close()
+                        page = await context.new_page()
+                        continue
+
+                    # Si es error recuperable, continuar el bucle
+                    if "SMS_TIME_OUT" in error_str or "AMAZON_CAPTCHA_ERROR" in error_str or "FUNCAPTCHA_NO_SITEKEY" in error_str or "FUNCAPTCHA_NO_TOKEN" in error_str or "FUNCAPTCHA_NOT_DETECTED" in error_str or "AMAZON_REDIRECTED_TO_LOGIN" in error_str or "SMS_UNAVAILABLE_RETRY" in error_str:
                         logger.warning(f"Fallo recuperable (intento interno {internal_attempt}), reiniciando en nueva pestaña...")
+                        await page.close()
+                        page = await context.new_page()
                         continue
                     else:
                         logger.error(f"Error no recuperable en intento interno {internal_attempt}: {e}")
@@ -3789,6 +3911,16 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 
             if not registration_success:
                 raise last_error
+
+        except SMSAccountBannedTemporarily as e:
+            logger.error(f"❌ SMSAccountBannedTemporarily capturado: {e}")
+            # Desactivar servicio y detener el proceso
+            set_service_enabled(False)
+            SERVICE_BLOCKED_REASON = 'sms_temp'
+            SERVICE_BLOCKED_UNTIL = time.time() + 30 * 60
+            threading.Timer(30 * 60, lambda: set_service_enabled(True)).start()
+            # Propagar la excepción para que el generador se detenga
+            raise
 
         except Exception as e:
             logger.error(f"❌ Error en intento global {global_attempt}: {e}")
@@ -3798,21 +3930,6 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
                     screenshot_b64 = await take_screenshot(page, "error_final")
                 except Exception as ss_err:
                     logger.debug(f"   No se pudo tomar captura: {ss_err}")
-
-            # Si es error de página de Amazon, NO cancelar número, solo reiniciar con nuevo proxy
-            if "AMAZON_ERROR_PAGE" in str(e) or "AMAZON_ERROR_LOSENTIMOS" in str(e) or "AMAZON_BLOCKED_ACCOUNT" in str(e):
-                logger.warning("⚠️ Error de página de Amazon. Reintentando con otro proxy pero manteniendo el número.")
-                # No cancelamos el número, solo limpiamos recursos y continuamos
-                if page:
-                    await page.close()
-                if context:
-                    await context.close()
-                if browser:
-                    await browser.close()
-                if playwright:
-                    await playwright.stop()
-                await asyncio.sleep(5)
-                continue  # Siguiente intento global con nuevo proxy (phone_info sigue definido)
 
             if global_attempt == retries:
                 return None, str(e), screenshot_b64
@@ -3842,10 +3959,6 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             logger.debug("✅ Limpieza completada")
 
     return None, "Error desconocido", None
-
-
-
-
 
 
 
