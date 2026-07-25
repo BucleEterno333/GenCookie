@@ -766,101 +766,203 @@ def safe_request(sess, method, url, data=None, json_data=None, headers=None, max
 
 def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None,
             activation_id=None, sms_phone=None, proxy=None, t=None, country_code='BR'):
+    """
+    Genera una cuenta de Amazon usando el método rápido (curl_cffi + Capsolver).
+    Adaptado para replicar el comportamiento de AmazonAccountCreator.
+    """
     if t is None:
         t = time.time()
+
     max_intentos = 50
     max_num_intentos = 5
     MAX_REG_RETRIES = 20
+
+    # Función auxiliar para normalizar el proxy (similar a helpers.normalizeProxy)
+    def normalize_proxy(proxy_str):
+        if not proxy_str:
+            return None
+        # Si ya tiene http:// o https://, lo dejamos
+        if proxy_str.startswith('http://') or proxy_str.startswith('https://'):
+            return proxy_str
+        # Si tiene formato user:pass@host:port, añadimos http://
+        if '@' in proxy_str:
+            return f"http://{proxy_str}"
+        # Si solo host:port
+        return f"http://{proxy_str}"
+
     for intento in range(1, max_intentos + 1):
         for num_attempt in range(1, max_num_intentos + 1):
             try:
                 activation_id, sms_phone, purchase_country = get_number(hero_keys)
                 add_to_history(activation_id, sms_phone, 'hero')
-                logging.debug(f"📞 Número obtenido: {sms_phone} (país {purchase_country})")
+                logger.debug(f"📞 Número obtenido: {sms_phone} (país {purchase_country})")
             except (SMSAccountBannedTemporarily, SMSNoBalance) as e:
                 raise
             except Exception as e:
-                logging.warning(f"⚠️ No se pudo obtener número: {e}")
+                logger.warning(f"⚠️ No se pudo obtener número: {e}")
                 time.sleep(2)
                 continue
+
             amazon_cc = {
                 'CA': 'CA', 'US': 'US', 'MX': 'MX', 'BR': 'BR',
                 'CM': 'CM', 'ID': 'ID', 'MA': 'MA', 'KG': 'KG', 'CO': 'CO', 'KZ': 'KZ'
             }.get(purchase_country, 'US')
-            logging.debug(f"Usando código de país para Amazon: {amazon_cc}")
+            logger.debug(f"Usando código de país para Amazon: {amazon_cc}")
+
             registration_success = False
+
             for reg_retry in range(1, MAX_REG_RETRIES + 1):
                 try:
-                    logging.debug(f"\n{'='*60}")
-                    logging.debug(f"INTENTO EXTERNO #{intento} - NUM # {num_attempt} - REG RETRY #{reg_retry}")
-                    logging.debug(f"{'='*60}")
+                    logger.debug(f"\n{'='*60}")
+                    logger.debug(f"INTENTO EXTERNO #{intento} - NUM # {num_attempt} - REG RETRY #{reg_retry}")
+                    logger.debug(f"{'='*60}")
+
                     info = gen_profile()
                     assoc_handle = "anywhere_v2_us"
                     arb = "88b7dd8f-6e15-491a-87df-9351dcbfc80f"
                     password = "dfbc1992"
+
+                    # ---------- CREAR SESIÓN CON HEADERS COMPLETOS ----------
                     sess = curl_requests.Session()
                     sess.impersonate = "chrome"
-                    sess.verify = False
+                    sess.verify = False  # Puede cambiarse a True si se usa certifi
 
+                    # Headers completos (igual que en helpers.buildSession)
                     sess.headers.update({
                         "User-Agent": info["user_agent"],
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                         "Accept-Language": "en-US,en;q=0.9",
                         "Accept-Encoding": "gzip, deflate, br",
                         "Connection": "keep-alive",
+                        "Cache-Control": "max-age=0",
                         "Upgrade-Insecure-Requests": "1",
+                        "Sec-Fetch-Dest": "document",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-Site": "none",
+                        "Sec-Fetch-User": "?1",
                         "sec-ch-ua": '"Chromium";v="147", "Not?A_Brand";v="99"',
                         "sec-ch-ua-mobile": "?1",
-                        "sec-ch-ua-platform": '"Android"',
+                        "sec-ch-ua-platform": '"Android"' if "Android" in info["user_agent"] else '"Windows"',
                         "DNT": "1",
                     })
+
+                    # Configurar proxy
                     if proxy:
-                        sess.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+                        normalized_proxy = normalize_proxy(proxy)
+                        sess.proxies = {"http": normalized_proxy, "https": normalized_proxy}
+                        logger.debug(f"Proxy configurado: {normalized_proxy}")
+
+                    # ---------- EMAIL EN PARALELO ----------
                     mail_result = {}
                     mail_thread = threading.Thread(target=new_mail, args=(sess, mail_result))
                     mail_thread.start()
+
+                    # Petición inicial /ax/claim (como en versión antigua)
                     sess.get(f"https://www.amazon.com/ax/claim?arb={arb}")
                     mail_thread.join(timeout=10)
+
                     if "error" in mail_result:
                         raise Exception(f"Error creando email: {mail_result['error']}")
+
                     email = mail_result.get("email")
                     mail_token = mail_result.get("token")
                     mail_api = mail_result.get("api")
                     if not email:
                         raise Exception("No se pudo obtener email")
-                    logging.debug(f"Email listo: {email} ({mail_api})")
-                    data1 = {"arb": arb, "email": email, "claimCollectionLayoutType": "unifiedAuthClaimCollection"}
-                    req1 = safe_request(
-                        sess,
-                        "POST",
+                    logger.debug(f"Email listo: {email} ({mail_api})")
+
+                    # ---------- PRIMER POST (claim) ----------
+                    # Extraer todos los campos ocultos del formulario (como en la versión antigua)
+                    # Primero hacemos GET a la página de registro para obtener el formulario inicial
+                    initial_url = (
                         "https://www.amazon.com/ap/register?openid.mode=checkid_setup"
                         "&openid.ns=http://specs.openid.net/auth/2.0"
                         "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
                         "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
                         "&openid.assoc_handle=anywhere_v2_us"
-                        "&openid.return_to=https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button",
+                        "&openid.return_to=https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button"
+                    )
+                    # Obtenemos la página para extraer anti-csrftoken-a2z y otros campos
+                    resp_initial = sess.get(initial_url, timeout=30)
+                    soup_initial = BeautifulSoup(resp_initial.text, 'html.parser')
+                    anti_csrf = None
+                    for inp in soup_initial.find_all('input', type='hidden'):
+                        if inp.get('name') == 'anti-csrftoken-a2z':
+                            anti_csrf = inp.get('value')
+                            break
+                    if not anti_csrf:
+                        # Buscar también en el texto con regex
+                        match = re.search(r'name="anti-csrftoken-a2z"\s+value="([^"]+)"', resp_initial.text)
+                        if match:
+                            anti_csrf = match.group(1)
+
+                    # Datos del primer POST (claim)
+                    data1 = {
+                        "arb": arb,
+                        "email": email,
+                        "claimCollectionLayoutType": "unifiedAuthClaimCollection",
+                        "anti-csrftoken-a2z": anti_csrf if anti_csrf else "",
+                    }
+                    # Añadir cualquier otro campo oculto que aparezca en el formulario
+                    for inp in soup_initial.find_all('input', type='hidden'):
+                        n = inp.get('name')
+                        if n and n not in data1:
+                            data1[n] = inp.get('value', '')
+
+                    req1 = safe_request(
+                        sess,
+                        "POST",
+                        initial_url,
                         data=data1,
-                        headers={"Referer": "https://www.amazon.com/ap/register", "Origin": "https://www.amazon.com"},
+                        headers={"Referer": initial_url, "Origin": "https://www.amazon.com"},
                         max_retries=3
                     )
+
                     if req1 is None or req1.status_code != 200 or "appActionToken" not in req1.text:
                         raise Exception("req1 falló")
-                    appActionToken = find(req1.text, 'name="appActionToken" value="', '"')
-                    workflowState = find(req1.text, 'name="workflowState" value="', '"')
-                    openid_return_to = find(req1.text, 'name="openid.return_to" value="', '"')
-                    prevRID = find(req1.text, 'name="prevRID" value="', '"')
+
+                    # Extraer campos ocultos de la respuesta
+                    soup1 = BeautifulSoup(req1.text, 'html.parser')
+                    appActionToken = None
+                    workflowState = None
+                    openid_return_to = None
+                    prevRID = None
+                    for inp in soup1.find_all('input', type='hidden'):
+                        name = inp.get('name')
+                        value = inp.get('value', '')
+                        if name == 'appActionToken':
+                            appActionToken = value
+                        elif name == 'workflowState':
+                            workflowState = value
+                        elif name == 'openid.return_to':
+                            openid_return_to = value
+                        elif name == 'prevRID':
+                            prevRID = value
+                    if not appActionToken:
+                        raise Exception("No se encontró appActionToken")
+
+                    # ---------- REGISTRO ----------
                     data2 = {
                         "appActionToken": appActionToken,
                         "appAction": "REGISTER",
                         "shouldShowPersistentLabels": "true",
-                        "openid.return_to": openid_return_to,
-                        "prevRID": prevRID,
-                        "workflowState": workflowState,
+                        "openid.return_to": openid_return_to or "",
+                        "prevRID": prevRID or "",
+                        "workflowState": workflowState or "",
                         "customerName": info["full_name"],
                         "email": email,
                         "password": password,
                         "showPasswordChecked": "true"
                     }
+                    # Añadir anti-csrftoken-a2z si aparece en la respuesta
+                    anti_csrf2 = None
+                    for inp in soup1.find_all('input', type='hidden'):
+                        if inp.get('name') == 'anti-csrftoken-a2z':
+                            anti_csrf2 = inp.get('value')
+                            break
+                    if anti_csrf2:
+                        data2['anti-csrftoken-a2z'] = anti_csrf2
+
                     req2 = safe_request(
                         sess,
                         "POST",
@@ -869,24 +971,33 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         headers={"Referer": req1.url, "Origin": "https://www.amazon.com"},
                         max_retries=3
                     )
+
+                    # Pausa aleatoria (0.5-1.5s)
+                    time.sleep(random.uniform(0.5, 1.5))
+
+                    # ---------- DETECTAR ERRORES PERMANENTES ----------
                     if "already an account" in req2.text:
-                        logging.debug("Email ya registrado")
+                        logger.debug("Email ya registrado")
                         raise Exception("PERMANENT_EMAIL_ALREADY_USED")
                     if "detected unusual activity" in req2.text:
-                        logging.debug("Actividad inusual - Rotando proxy")
+                        logger.debug("Actividad inusual - Rotando proxy")
                         raise Exception("PERMANENT_UNUSUAL_ACTIVITY")
+
+                    # ---------- WAF ----------
                     verifyToken = None
                     if "data-context" in req2.text and "data-external-id" in req2.text:
-                        logging.debug("* Resolviendo WAF...")
+                        logger.debug("* Resolviendo WAF...")
                         try:
                             verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
                         except:
                             verifyToken = None
+
                         dataExternalId = capR(r'"data-external-id":\s*"([^"]+)"', req2.text)
                         try:
-                            anti_csrf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
+                            anti_csrf_waf = find(req2.text, "name='anti-csrftoken-a2z' value='", "'")
                         except:
-                            anti_csrf = ""
+                            anti_csrf_waf = ""
+
                         json3 = json.dumps({
                             "clientData": json.dumps({
                                 "sessionId": sess.cookies.get("session-id", ""),
@@ -904,16 +1015,20 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                             "forceJsFlush": False,
                             "aamationToken": None,
                         }, separators=(",", ":"))
+
                         req3 = sess.get(f"https://www.amazon.com/aaut/verify/cvf?options={urllib.parse.quote(json3)}")
                         clientSideContext = json.loads(req3.headers.get("amz-aamation-resp")).get("clientSideContext")
                         aamation_id = capR(r'"id"\s*:\s*"([^"]+)"', req3.text)
                         captcha_url = capR(r'<script src="(https://ait\.[^"]+)/captcha\.js"', req3.text)
                         jwt_client_id = bypass_waf(sess, captcha_url, aamation_id, clientSideContext, json3, capsolver_key)
+
                         if not jwt_client_id:
                             raise Exception("WAF bypass falló")
-                        logging.debug("WAF PASS")
+
+                        logger.debug("WAF PASS")
+
                         data4 = {
-                            "anti-csrftoken-a2z": anti_csrf,
+                            "anti-csrftoken-a2z": anti_csrf_waf,
                             "cvf_aamation_response_token": jwt_client_id,
                             "cvf_captcha_captcha_action": "verifyAamationChallenge",
                             "cvf_aamation_error_code": "",
@@ -930,6 +1045,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                             "shouldShowPersistentLabels": "true",
                             "verifyToken": verifyToken if verifyToken else ""
                         }
+
                         req4 = safe_request(
                             sess,
                             "POST",
@@ -942,9 +1058,9 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                             },
                             max_retries=3
                         )
-                        logging.debug(f"📄 req4 status: {req4.status_code}")
-                        logging.debug(f"📄 req4 URL: {req4.url}")
-                        logging.debug(f"📄 req4 text (primeros 500 chars): {req4.text[:500]}")
+
+                        logger.debug(f"📄 req4 status: {req4.status_code}")
+                        logger.debug(f"📄 req4 URL: {req4.url}")
                         try:
                             verifyToken = find(req4.text, 'name="verifyToken" value="', '"')
                         except:
@@ -955,20 +1071,24 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                             verifyToken = find(req2.text, 'name="verifyToken" value="', '"')
                         except:
                             verifyToken = ""
+
                     if not verifyToken:
                         html_content = req2.text
                         match = re.search(r'name="verifyToken"\s+value="([^"]+)"', html_content)
                         if match:
                             verifyToken = match.group(1)
-                            logging.debug(f"VerifyToken encontrado vía regex: {verifyToken}")
+                            logger.debug(f"VerifyToken encontrado vía regex: {verifyToken}")
                         else:
                             if 'req4' in locals():
                                 match = re.search(r'name="verifyToken"\s+value="([^"]+)"', req4.text)
                                 if match:
                                     verifyToken = match.group(1)
-                                    logging.debug(f"VerifyToken encontrado vía regex en req4: {verifyToken}")
+                                    logger.debug(f"VerifyToken encontrado vía regex en req4: {verifyToken}")
+
                     if not verifyToken:
-                        logging.warning("⚠️ No se pudo obtener verifyToken, pero continuamos...")
+                        logger.warning("⚠️ No se pudo obtener verifyToken, pero continuamos...")
+
+                    # ---------- OTP EMAIL ----------
                     base_openid = {
                         "forceMobileLayout": "1",
                         "openid.assoc_handle": assoc_handle,
@@ -977,8 +1097,10 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "openid.ns": "http://specs.openid.net/auth/2.0",
                         "shouldShowPersistentLabels": "true"
                     }
+
                     otp_code = mail_code(sess, mail_token, mail_api)
-                    logging.debug(f"OTP: {otp_code}")
+                    logger.debug(f"OTP: {otp_code}")
+
                     data5 = {
                         **base_openid,
                         "autoReadStatus": "manual",
@@ -987,39 +1109,47 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "verifyToken": verifyToken if verifyToken else "",
                         "code": otp_code
                     }
+                    # Añadir anti-csrftoken-a2z si existe en req5
                     req5 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data5)
                     try:
-                        anti_csrf = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
+                        anti_csrf_otp = find(req5.text, "name='anti-csrftoken-a2z' value='", "'")
                     except:
-                        anti_csrf = ""
+                        anti_csrf_otp = ""
                     try:
                         verifyToken = find(req5.text, 'name="verifyToken" value="', '"')
                     except:
                         verifyToken = ""
+
                     data6 = {
                         **base_openid,
-                        "anti-csrftoken-a2z": anti_csrf,
+                        "anti-csrftoken-a2z": anti_csrf_otp,
                         "verifyToken": verifyToken if verifyToken else "",
                         "cvf_phone_cc": amazon_cc,
                         "cvf_phone_num": sms_phone,
                         "cvf_action": "collect"
                     }
                     req6 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data6)
-                    logging.debug("* Esperando SMS...")
+
+                    # Pausa antes de SMS
+                    time.sleep(random.uniform(1.0, 2.0))
+
+                    logger.debug("* Esperando SMS...")
                     sms_code = get_code(hero_keys, activation_id)
-                    logging.debug(f"SMS Code: {sms_code}")
+                    logger.debug(f"SMS Code: {sms_code}")
                     set_status(hero_keys, activation_id, 6)
+
                     try:
-                        anti_csrf = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
+                        anti_csrf_sms = find(req6.text, "name='anti-csrftoken-a2z' value='", "'")
                     except:
-                        anti_csrf = ""
+                        anti_csrf_sms = ""
                     try:
                         verifyToken = find(req6.text, 'name="verifyToken" value="', '"')
                     except:
                         verifyToken = ""
+
                     data7 = {
                         **base_openid,
-                        "anti-csrftoken-a2z": anti_csrf,
+                        "anti-csrftoken-a2z": anti_csrf_sms,
                         "verificationPageContactType": "sms",
                         "verifyToken": verifyToken if verifyToken else "",
                         "code": sms_code,
@@ -1027,15 +1157,19 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "resendContactType": "sms"
                     }
                     req7 = sess.post("https://www.amazon.com/ap/cvf/verify", data=data7)
+
                     if "entered already exists with another account" in req7.text:
-                        logging.debug("Número ya registrado")
+                        logger.debug("Número ya registrado")
                         cancel_number(activation_id, 'hero')
                         cancel_all_numbers()
                         raise Exception("PERMANENT_NUMBER_ALREADY_REGISTERED")
+
                     if "new_account=1" not in req7.url:
-                        logging.debug("Cuenta no creada")
+                        logger.debug("Cuenta no creada")
                         raise Exception("REGISTRATION_FAILED")
-                    logging.debug("* Agregando dirección...")
+
+                    # ---------- DIRECCIÓN (como en versión antigua) ----------
+                    logger.debug("* Agregando dirección...")
                     try:
                         csrf_addr = urllib.parse.quote(find(req7.text, "name='csrfToken' value='", "'"))
                     except:
@@ -1060,6 +1194,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         form_load = find(req7.text, 'name="address-ui-widgets-form-load-start-time" value="', '"')
                     except:
                         form_load = ""
+
                     sess.headers.update({
                         "Content-Type": "application/x-www-form-urlencoded",
                         "Origin": "https://www.amazon.com",
@@ -1069,6 +1204,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "Sec-Fetch-Site": "same-origin",
                         "Sec-Fetch-User": "?1"
                     })
+
                     data8 = (
                         f"csrfToken={csrf_addr}&addressID="
                         f"&address-ui-widgets-addressFormButtonText=save"
@@ -1094,20 +1230,24 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         f"&address-ui-widgets-previous-address-form-state-token={prev_token}"
                         f"&address-ui-widgets-saveOriginalOrSuggestedAddress=Submit+Query"
                     )
+
                     sess.post("https://www.amazon.com/a/addresses/add?ref=ya_address_book_add_button", data=data8)
+
                     cookies = "; ".join(f"{k}={v.replace(chr(34), chr(39))}" for k, v in sess.cookies.items())
                     elapsed = round(time.time() - t, 2)
-                    logging.debug(f"\n{'='*60}")
-                    logging.debug(f"CUENTA CREADA!")
-                    logging.debug(f"{'='*60}")
-                    logging.debug(f"Email:    {email}")
-                    logging.debug(f"Password: {password}")
-                    logging.debug(f"Phone:    {sms_phone}")
-                    logging.debug(f"Tiempo:   {elapsed}s | Ext: {intento} | Num: {num_attempt} | Retry: {reg_retry}")
-                    logging.debug(f"{'='*60}")
-                    logging.debug(f"COOKIES:")
-                    logging.debug(f"{cookies}")
-                    logging.debug(f"{'='*60}\n")
+
+                    logger.debug(f"\n{'='*60}")
+                    logger.debug(f"CUENTA CREADA!")
+                    logger.debug(f"{'='*60}")
+                    logger.debug(f"Email:    {email}")
+                    logger.debug(f"Password: {password}")
+                    logger.debug(f"Phone:    {sms_phone}")
+                    logger.debug(f"Tiempo:   {elapsed}s | Ext: {intento} | Num: {num_attempt} | Retry: {reg_retry}")
+                    logger.debug(f"{'='*60}")
+                    logger.debug(f"COOKIES:")
+                    logger.debug(f"{cookies}")
+                    logger.debug(f"{'='*60}\n")
+
                     registration_success = True
                     return {
                         "name": info["full_name"],
@@ -1122,16 +1262,20 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "intentos": intento,
                         "num_attempts": num_attempt
                     }
+
                 except CAPSolverNoBalance:
                     raise
                 except (SMSAccountBannedTemporarily, SMSNoBalance):
                     raise
                 except Exception as e:
                     error_str = str(e)
-                    logging.debug(f"Error en reg_retry #{reg_retry}: {error_str}")
+                    logger.debug(f"Error en reg_retry #{reg_retry}: {error_str}")
+
                     if "PERMANENT_UNUSUAL_ACTIVITY" in error_str or "detected unusual activity" in error_str.lower():
-                        logging.debug("🔄 Actividad inusual detectada → reintentando con nueva sesión (mismo número)")
+                        logger.debug("🔄 Actividad inusual detectada → reintentando con nueva sesión (mismo número)")
+                        # Limpiar cookies y headers para la nueva sesión (se reinicia el bucle)
                         continue
+
                     permanent_keywords = [
                         "PERMANENT_EMAIL_ALREADY_USED",
                         "PERMANENT_NUMBER_ALREADY_REGISTERED",
@@ -1141,27 +1285,29 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "REGISTRATION_FAILED"
                     ]
                     is_permanent = any(kw in error_str for kw in permanent_keywords)
+
                     if is_permanent:
-                        logging.debug(f"Error permanente, cancelando número y pasando al siguiente.")
+                        logger.debug(f"Error permanente, cancelando número y pasando al siguiente.")
                         if activation_id:
                             set_status(hero_keys, activation_id, 8)
                         break
                     else:
                         if reg_retry == MAX_REG_RETRIES:
-                            logging.warning(f"Agotados reintentos para este número. Cancelando.")
+                            logger.warning(f"Agotados reintentos para este número. Cancelando.")
                             if activation_id:
                                 set_status(hero_keys, activation_id, 8)
                             break
                         else:
-                            logging.debug(f"Reintentando con el mismo número (retry {reg_retry+1}/{MAX_REG_RETRIES})")
+                            logger.debug(f"Reintentando con el mismo número (retry {reg_retry+1}/{MAX_REG_RETRIES})")
                             time.sleep(2)
                             continue
+
             if not registration_success:
                 continue
             else:
                 pass
-    raise Exception(f"Se agotaron los {max_intentos} intentos externos")
 
+    raise Exception(f"Se agotaron los {max_intentos} intentos externos")
 # ========== MAPA DE PAÍSES ==========
 base_urls = {
     'CA': 'https://www.amazon.ca',
