@@ -9,7 +9,7 @@ Amazon Cookie Generator - Versión API REST optimizada para mínimo consumo de p
 - Resolución de FunCaptcha con 2captcha + AntiCaptcha (fallback, múltiples surl)
 - Detección de actividad inusual
 """
-
+import certifi
 import os
 import re
 import json
@@ -800,6 +800,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     password = "dfbc1992"
                     sess = curl_requests.Session()
                     sess.impersonate = "chrome"
+                    sess.cert = certifi.where()
                     sess.headers.update({
                         "User-Agent": info["user_agent"],
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",

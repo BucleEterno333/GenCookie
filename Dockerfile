@@ -26,7 +26,9 @@ RUN pip install --no-cache-dir \
     playwright>=1.35.0 \
     2captcha-python>=1.2.0 \
     anticaptchaofficial>=1.0.5 \
-    nest_asyncio>=1.5.0
+    nest_asyncio>=1.5.0 \
+    certifi>=2024.0.0      
+
 
 # Instalar navegadores de Playwright (necesario para la versión pesada)
 RUN playwright install chromium
