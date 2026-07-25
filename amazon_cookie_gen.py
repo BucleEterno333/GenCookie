@@ -800,7 +800,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                     password = "dfbc1992"
                     sess = curl_requests.Session()
                     sess.impersonate = "chrome"
-                    sess.cert = certifi.where()
+                    sess.verify = certifi.where()
                     sess.headers.update({
                         "User-Agent": info["user_agent"],
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
