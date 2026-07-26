@@ -41,6 +41,99 @@ from faker import Faker
 import urllib.parse
 from bs4 import BeautifulSoup
 import threading
+# ======================================================================
+# PARCH SSL GLOBAL - PARA EVITAR ERRORES DE CERTIFICADOS EN PRODUCCIÓN
+# ======================================================================
+import ssl
+import requests as std_requests
+import curl_cffi
+from curl_cffi import requests as cffi_requests
+
+# 1. Desactivar verificación SSL a nivel de módulo ssl
+try:
+    ssl._create_default_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+
+# 2. Variables de entorno para curl_cffi y requests
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+
+# 3. Parchear 'requests' estándar (parcheando el método request de Session)
+_original_std_request = std_requests.Session.request
+
+def patched_std_request(self, method, url, **kwargs):
+    kwargs['verify'] = False
+    return _original_std_request(self, method, url, **kwargs)
+
+std_requests.Session.request = patched_std_request
+
+# Parchear métodos de conveniencia get y post
+_original_std_get = std_requests.get
+_original_std_post = std_requests.post
+
+def patched_std_get(url, **kwargs):
+    kwargs['verify'] = False
+    return _original_std_get(url, **kwargs)
+
+def patched_std_post(url, **kwargs):
+    kwargs['verify'] = False
+    return _original_std_post(url, **kwargs)
+
+std_requests.get = patched_std_get
+std_requests.post = patched_std_post
+
+print("✅ Parche SSL aplicado a 'requests' estándar")
+
+# 4. Parchear 'curl_cffi.requests' (igual)
+_original_cffi_request = cffi_requests.Session.request
+
+def patched_cffi_request(self, method, url, **kwargs):
+    kwargs['verify'] = False
+    return _original_cffi_request(self, method, url, **kwargs)
+
+cffi_requests.Session.request = patched_cffi_request
+
+_original_cffi_get = cffi_requests.get
+_original_cffi_post = cffi_requests.post
+
+def patched_cffi_get(url, **kwargs):
+    kwargs['verify'] = False
+    return _original_cffi_get(url, **kwargs)
+
+def patched_cffi_post(url, **kwargs):
+    kwargs['verify'] = False
+    return _original_cffi_post(url, **kwargs)
+
+cffi_requests.get = patched_cffi_get
+cffi_requests.post = patched_cffi_post
+
+# También parchear el módulo importado como 'curl_cffi.requests'
+curl_cffi.requests.Session.request = patched_cffi_request
+curl_cffi.requests.get = patched_cffi_get
+curl_cffi.requests.post = patched_cffi_post
+
+print("✅ Parche SSL aplicado a 'curl_cffi.requests'")
+
+# 5. Desactivar advertencias de urllib3
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except ImportError:
+    pass
+
+print("🚀 SSL desactivado globalmente para todas las peticiones")
+# ======================================================================
+
+
+
+
+
+# Importar desde la carpeta amazon (la versión que funciona)
+from amazon import core, helpers, AmazonRegisterError, AccountBuilder, AwsWaf, CookieConverter
+from amazon.sms import HeroSms
+from amazon.captcha import Captcha
+
 
 # Forzar UTF-8 en la salida
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -3513,98 +3606,109 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
         if country not in base_urls:
             return {'success': False, 'error': f'País no soportado: {country}', 'country': country, 'screenshot': None}
 
-        # ========== NUEVO: Si force_playwright está activado, saltar método rápido ==========
-        if force_playwright:
-            logger.debug("🔧 force_playwright activado: saltando método rápido y usando Playwright directamente.")
-        else:
-            # ---------- MÉTODO RÁPIDO ----------
-            if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
-                logger.debug("🔧 Intentando método rápido (curl_cffi + Capsolver) de forma secuencial...")
-                loop = asyncio.get_running_loop()
-                max_attempts = 10
-                for attempt in range(1, max_attempts + 1):
-                    logger.debug(f"   Intento rápido #{attempt}/{max_attempts}")
-                    try:
-                        fast_result = await loop.run_in_executor(
-                            None,
-                            process,
-                            CAPSOLVER_API_KEY,
-                            HERO_SMS_KEYS,
-                            None, None, None, None, None,
-                            PROXY_STRING,
-                            None,
-                            country
-                        )
-                        if fast_result:
-                            logger.debug("✅ Método rápido exitoso.")
-                            account_data = {
-                                'phone': fast_result['phone'],
-                                'password': fast_result['password'],
-                                'name': fast_result['name'],
-                                'address': 'No address added',
-                                'cookie_string': fast_result['cookies'],
-                                'cookie_dict': dict(x.split('=', 1) for x in fast_result['cookies'].split('; ') if '=' in x),
-                                'country': country,
-                                'purchase_country': country
-                            }
-                            return {'success': True, 'data': account_data, 'country': country, 'screenshot': None}
-                    except CAPSolverNoBalance as e:
-                        logger.error(f"❌ CapSolver sin saldo: {e}")
-                        set_service_enabled(False)
-                        return {
-                            'success': False,
-                            'error': 'El servicio de resolución de captchas (CapSolver) no tiene saldo. El generador de cookies ha sido desactivado. Por favor, contacta al administrador para recargar el saldo y reactivar el servicio mediante /estatusCuki en el bot.',
-                            'screenshot': None,
-                            'captcha_balance': True
-                        }
-                    except SMSAccountBannedTemporarily as e:
-                        logger.error(f"❌ Al menos una key de SMS está baneada temporalmente: {e}")
-                        set_service_enabled(False)
-                        SERVICE_BLOCKED_REASON = 'sms_temp'
-                        SERVICE_BLOCKED_UNTIL = time.time() + 30 * 60
-                        threading.Timer(30 * 60, lambda: set_service_enabled(True)).start()
-                        return {
-                            'success': False,
-                            'error': 'Una cuenta de SMS está baneada temporalmente. El servicio se ha deshabilitado por 30 minutos. Reintenta más tarde.',
-                            'screenshot': None,
-                            'banned_temporarily': True
-                        }
-                    except SMSNoBalance as e:
-                        logger.error(f"❌ Todas las keys de SMS tienen saldo insuficiente: {e}")
-                        set_service_enabled(False)
-                        SERVICE_BLOCKED_REASON = 'no_balance'
-                        return {
-                            'success': False,
-                            'error': 'Saldo de SMS insuficiente en todas las cuentas. Avisar a administradores para recargar. El servicio ha sido deshabilitado indefinidamente.',
-                            'screenshot': None,
-                            'no_balance': True
-                        }
-                    except Exception as e:
-                        logger.debug(f"   Intento rápido #{attempt} falló: {e}")
-                        if attempt == max_attempts:
-                            logger.debug("⚠️ Todos los intentos rápidos fallaron. Recurriendo a Playwright...")
-                        else:
-                            await asyncio.sleep(2)
+        # ---------- MÉTODO PRINCIPAL: USAR AmazonAccountCreator (la versión que funciona) ----------
+        if CAPSOLVER_API_KEY and HERO_SMS_API_KEY and PROXY_STRING:
+            logger.debug("🔧 Usando AmazonAccountCreator (método rápido con curl_cffi y capsolver)")
+
+            # Normalizar proxy (si tiene formato user:pass@host:port)
+            proxy_str = PROXY_STRING
+            # Si el proxy no tiene http://, se lo añadimos (el creador espera el formato sin http)
+            if proxy_str and not proxy_str.startswith('http://') and not proxy_str.startswith('https://'):
+                proxy_str = proxy_str  # ya viene sin http, lo dejamos así
+
+            # Instanciar el creador (igual que en main.py)
+            loop = asyncio.get_running_loop()
+            creator = AmazonAccountCreator(
+                herosms_api_key=HERO_SMS_API_KEY,
+                capsolver_api_key=CAPSOLVER_API_KEY,
+                country=country,
+                proxy=proxy_str,
+                sms_max_price=0.18,  # puedes ajustar desde variable de entorno
+                on_status=None  # si quieres ver logs, puedes pasar una función lambda
+            )
+
+            # Ejecutar create (bloqueante, lo corremos en un hilo para no bloquear el event loop)
+            result = await loop.run_in_executor(None, creator.create, max_retries or 3, not add_address)
+
+            if result.get('status'):
+                # Extraer datos igual que en la versión antigua
+                profile = result.get('profile', {})
+                raw_cookie = result.get('cookies', '')
+                # Convertir cookie usando CookieConverter (importado desde amazon)
+                cookie = CookieConverter.convert(raw_cookie, country) if raw_cookie else ''
+
+                account_data = {
+                    'phone': profile.get('phone', '').replace('+', ''),  # o mantenlo con +
+                    'password': profile.get('password', ''),
+                    'name': '',  # no tenemos nombre en el perfil de AmazonAccountCreator, pero podemos generarlo
+                    'address': 'Dirección agregada' if add_address else 'No se agregó dirección',
+                    'cookie_string': raw_cookie,
+                    'cookie_dict': dict(x.split('=', 1) for x in raw_cookie.split('; ') if '=' in x),
+                    'country': country,
+                    'purchase_country': country,
+                    'email': profile.get('email', ''),
+                }
+                return {'success': True, 'data': account_data, 'country': country, 'screenshot': None}
             else:
-                logger.debug("⚠️ Método rápido no disponible (faltan claves o proxy). Usando Playwright directamente.")
+                error_msg = result.get('message', 'Error desconocido en AmazonAccountCreator')
+                # Si el error es de saldo o baneo, propagar excepción para manejarlo
+                if 'sms' in error_msg.lower() or 'balance' in error_msg.lower():
+                    raise Exception(error_msg)
+                return {'success': False, 'error': error_msg, 'country': country, 'screenshot': None}
 
-        # ---------- FALLBACK: PLAYWRIGHT ----------
-        account_data, error_msg, screenshot = await create_amazon_account(
-            country,
-            add_address_flag=add_address,
-            max_retries=max_retries,
-            max_internal_retries=max_internal_retries,
-            service_preference=service_preference
-        )
-        if account_data:
-            return {'success': True, 'data': account_data, 'country': country, 'screenshot': screenshot}
         else:
-            return {'success': False, 'error': error_msg, 'country': country, 'screenshot': screenshot}
+            logger.warning("⚠️ Faltan claves CAPSOLVER o HERO_SMS o PROXY_STRING. No se puede usar AmazonAccountCreator.")
+            # Si no se puede usar, podrías intentar el fallback a Playwright (si force_playwright es True)
+            if force_playwright:
+                logger.debug("🔧 force_playwright activado: usando Playwright directamente.")
+                account_data, error_msg, screenshot = await create_amazon_account(
+                    country,
+                    add_address_flag=add_address,
+                    max_retries=max_retries,
+                    max_internal_retries=max_internal_retries,
+                    service_preference=service_preference
+                )
+                if account_data:
+                    return {'success': True, 'data': account_data, 'country': country, 'screenshot': screenshot}
+                else:
+                    return {'success': False, 'error': error_msg, 'country': country, 'screenshot': screenshot}
+            else:
+                return {'success': False, 'error': 'No se puede generar cookie: faltan claves o proxy', 'country': country}
 
+    except CAPSolverNoBalance as e:
+        logger.error(f"❌ CapSolver sin saldo: {e}")
+        set_service_enabled(False)
+        return {
+            'success': False,
+            'error': 'El servicio de resolución de captchas (CapSolver) no tiene saldo. El generador de cookies ha sido desactivado.',
+            'screenshot': None,
+            'captcha_balance': True
+        }
+    except SMSAccountBannedTemporarily as e:
+        logger.error(f"❌ Al menos una key de SMS está baneada temporalmente: {e}")
+        set_service_enabled(False)
+        SERVICE_BLOCKED_REASON = 'sms_temp'
+        SERVICE_BLOCKED_UNTIL = time.time() + 30 * 60
+        threading.Timer(30 * 60, lambda: set_service_enabled(True)).start()
+        return {
+            'success': False,
+            'error': 'Una cuenta de SMS está baneada temporalmente. El servicio se ha deshabilitado por 30 minutos. Reintenta más tarde.',
+            'screenshot': None,
+            'banned_temporarily': True
+        }
+    except SMSNoBalance as e:
+        logger.error(f"❌ Todas las keys de SMS tienen saldo insuficiente: {e}")
+        set_service_enabled(False)
+        SERVICE_BLOCKED_REASON = 'no_balance'
+        return {
+            'success': False,
+            'error': 'Saldo de SMS insuficiente en todas las cuentas. Avisar a administradores para recargar. El servicio ha sido deshabilitado indefinidamente.',
+            'screenshot': None,
+            'no_balance': True
+        }
     except Exception as e:
         logger.exception(f"💥 Excepción en generate_cookie_api: {e}")
         return {'success': False, 'error': str(e), 'country': country, 'screenshot': None}
-
 # ===================================================================
 # API FLASK
 # ===================================================================
