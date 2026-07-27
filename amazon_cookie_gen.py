@@ -257,7 +257,7 @@ _MAIL_APIS = [
 ]
 
 # Orden de países para Hero SMS (barato a caro)
-HERO_COUNTRY_ORDER = ['CA', 'ID', 'MA', 'CO', 'MX', 'BR', 'CM', 'KZ', 'KG' ]
+HERO_COUNTRY_ORDER = ['US', 'CA', 'ID', 'MA', 'CO', 'MX', 'BR', 'CM', 'KZ', 'KG' ]
 FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
 
 # Mapeo de código de país ISO a número que espera Hero SMS
@@ -361,13 +361,7 @@ class AmazonAccountCreator:
                     return self._error(error_msg)
                 self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
                 time.sleep(2.0 if 'unusual activity' in error_msg else (0.5 if needs_new_number else 0.2))
-                if needs_new_number:
-                    self._emit("Acquiring new number...")
-                    try:
-                        self.phone_data = self.sms_service.getNumber()
-                    except Exception as sms_err:
-                        logger.warning(f"No se pudo obtener número: {sms_err}")
-                        return self._error(str(sms_err))
+                # NO intentes obtener nuevo número aquí; el próximo attempt lo hará automáticamente
         return self._error("Unexpected exit")
 
     def _attempt(self, retry: int) -> dict:
