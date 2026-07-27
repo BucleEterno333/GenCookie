@@ -290,7 +290,7 @@ class SMSNoBalance(Exception):
 
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "35"))
 CAPTCHA_MAX = 4
-SMS_TIMEOUT = int(os.environ.get("SMS_TIMEOUT", "75"))
+SMS_TIMEOUT = int(os.environ.get("SMS_TIMEOUT", "100"))
 
 # ======================================================================
 # CLASE AmazonAccountCreator
