@@ -337,7 +337,7 @@ class AmazonAccountCreator:
         else:
             logger.info(message)
 
-    def create(self, max_retries: int = 3, skip_billing: bool = False) -> dict:
+    def create(self, max_retries: int = 10, skip_billing: bool = False) -> dict:
         self.skip_billing = skip_billing
         for attempt in range(max_retries + 1):
             try:
