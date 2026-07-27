@@ -9,7 +9,7 @@ class HeroSms:
 
     COUNTRY_ID = 187
     SERVICE = 'am'
-    DEFAULT_MAX_PRICE = 0.12
+    DEFAULT_MAX_PRICE = 0.06
 
     def __init__(self, apiKey: str, maxPrice: float = None, targetCountry: str = 'CA') -> None:
         self.apiKey = apiKey

@@ -4062,7 +4062,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                 capsolver_api_key=CAPSOLVER_API_KEY,
                 country=country,
                 proxy=proxy_str,
-                sms_max_price=0.18,  # puedes ajustar desde variable de entorno
+                sms_max_price=0.06,  # puedes ajustar desde variable de entorno
                 on_status=None  # si quieres ver logs, puedes pasar una función lambda
             )
 
