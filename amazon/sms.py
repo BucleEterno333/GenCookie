@@ -38,13 +38,16 @@ class HeroSms:
         except Exception:
             return response.text.strip()
 
-    def getNumber(self, retries=0, no_numbers_retries=0) -> dict:
+    def getNumber(self, country_code: int = None, retries=0, no_numbers_retries=0) -> dict:
+        # Usar el país pasado, o el default de la instancia
+        target_country = country_code if country_code is not None else self.COUNTRY_ID
+        
         try:
             params = {
                 "action": "getNumberV2",
                 "api_key": self.apiKey,
                 "service": self.SERVICE,
-                "country": self.COUNTRY_ID,
+                "country": target_country,
                 "operator": "any",
                 "maxPrice": self._price_param(),
                 "fixedPrice": "true",
@@ -66,7 +69,7 @@ class HeroSms:
                 if code == "NO_NUMBERS" and no_numbers_retries < 8:
                     logger.debug(f"HeroSMS sin números, reintento {no_numbers_retries + 1}/8...")
                     time.sleep(1.5)
-                    return self.getNumber(retries, no_numbers_retries + 1)
+                    return self.getNumber(country_code, retries, no_numbers_retries + 1)
                 raise RuntimeError(f"HeroSMS: {data}")
 
             if isinstance(data, dict):
@@ -75,7 +78,7 @@ class HeroSms:
                     if str(error) == "NO_NUMBERS" and no_numbers_retries < 8:
                         logger.debug(f"HeroSMS sin números, reintento {no_numbers_retries + 1}/8...")
                         time.sleep(1.5)
-                        return self.getNumber(retries, no_numbers_retries + 1)
+                        return self.getNumber(country_code, retries, no_numbers_retries + 1)
                     raise RuntimeError(f"HeroSMS: {error}")
                 if "phoneNumber" not in data:
                     raise RuntimeError(f"HeroSMS: Respuesta inesperada: {data}")
@@ -84,7 +87,7 @@ class HeroSms:
                 phone_number = str(data["phoneNumber"])
                 logger.info(
                     f"Number: {phone_number} | ID: {activation_id} | "
-                    f"Country: {self.COUNTRY_ID} | maxPrice=${self._price_param()} | paid=${price}"
+                    f"Country: {target_country} | maxPrice=${self._price_param()} | paid=${price}"
                 )
                 return {
                     "activationId": activation_id,
@@ -99,8 +102,10 @@ class HeroSms:
             if retries < 3:
                 logger.warning(f"Retrying getNumber ({retries + 1}/3): {str(e)} — esperando 2s...")
                 time.sleep(1.0)
-                return self.getNumber(retries + 1, no_numbers_retries)
+                return self.getNumber(country_code, retries + 1, no_numbers_retries)
             raise RuntimeError(f"Failed to get number: {str(e)}")
+
+    # ... (el resto de los métodos markReady, getSMS, cancelActivation, finishActivation se mantienen igual)
 
     def markReady(self, activationId: str) -> None:
         try:
