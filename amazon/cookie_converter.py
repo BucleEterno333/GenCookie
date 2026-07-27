@@ -1,4 +1,5 @@
 import re
+from typing import Optional, Dict
 
 class CookieConverter:
 
@@ -16,7 +17,7 @@ class CookieConverter:
     _ALL_SUFFIXES = {v['suffix'] for v in REGIONS.values()}
 
     @classmethod
-    def detect_region(cls, cookie_text: str) -> str | None:
+    def detect_region(cls, cookie_text: str) -> Optional[str]:
         for code, cfg in cls.REGIONS.items():
             if f"-{cfg['suffix']}" in cookie_text:
                 return code
@@ -64,5 +65,5 @@ class CookieConverter:
         return out
 
     @classmethod
-    def convert_all(cls, cookie_text: str) -> dict[str, str]:
+    def convert_all(cls, cookie_text: str) -> Dict[str, str]:
         return {code: cls.convert(cookie_text, code) for code in cls.REGIONS}
