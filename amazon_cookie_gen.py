@@ -323,7 +323,8 @@ class AmazonAccountCreator:
                 _sms_price = float(os.environ.get("SMS_MAX_PRICE", "0.18"))
             except ValueError:
                 _sms_price = 0.12
-        self.sms_service   = HeroSms(herosms_api_key, maxPrice=_sms_price, targetCountry=country)
+        # targetCountry se establece como None para no fijar un país predeterminado
+        self.sms_service   = HeroSms(herosms_api_key, maxPrice=_sms_price, targetCountry=None)
         self._on_status    = on_status
         self.skip_billing  = False
 
@@ -374,9 +375,23 @@ class AmazonAccountCreator:
         init_time = time.time()
 
         if not self.phone_data:
-            self._emit("Acquiring phone number...")
-            self.phone_data = self.sms_service.getNumber()
-            self._emit(f"Phone: {self.phone_data['number']}")
+            self._emit("Acquiring phone number (trying countries in order)...")
+            for country_iso in HERO_COUNTRY_ORDER:
+                country_code = hero_country_map.get(country_iso)
+                if not country_code:
+                    continue
+                self._emit(f"Trying country {country_iso} (code {country_code})...")
+                try:
+                    phone_data = self.sms_service.getNumber(country=country_code)
+                    if phone_data:
+                        self.phone_data = phone_data
+                        self._emit(f"Phone obtained: {self.phone_data['number']} from {country_iso}")
+                        break
+                except Exception as e:
+                    self._emit(f"Failed for {country_iso}: {e}")
+                    continue
+            if not self.phone_data:
+                raise Exception("No phone number available in any country")
         else:
             logger.info(f"Reusing phone: {self.phone_data['number']}")
 
@@ -411,7 +426,6 @@ class AmazonAccountCreator:
             "cookies": cookies_raw,
             "country": self.country,
         }
-
     def _execute_flow(self) -> dict:
         phone       = self.phone_data['number']
         phone_short = self.phone_data['normalizedNumber']
