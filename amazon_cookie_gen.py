@@ -288,6 +288,9 @@ class SMSNoBalance(Exception):
     """Todas las keys de SMS tienen saldo insuficiente (NO_BALANCE)"""
     pass
 
+HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "35"))
+CAPTCHA_MAX = 4
+SMS_TIMEOUT = int(os.environ.get("SMS_TIMEOUT", "75"))
 
 # ======================================================================
 # CLASE AmazonAccountCreator
