@@ -382,7 +382,7 @@ class AmazonAccountCreator:
                     continue
                 self._emit(f"Trying country {country_iso} (code {country_code})...")
                 try:
-                    phone_data = self.sms_service.getNumber(country=country_code)
+                    phone_data = self.sms_service.getNumber(country_code=country_code)
                     if phone_data:
                         self.phone_data = phone_data
                         self._emit(f"Phone obtained: {self.phone_data['number']} from {country_iso}")
