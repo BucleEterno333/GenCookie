@@ -165,7 +165,7 @@ HERO_SMS_KEYS = [k for k in [HERO_SMS_API_KEY, HERO_SMS_API_KEY_BACKUP, HERO_SMS
 WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10'))          # Espera general para elementos
 NAVIGATION_TIMEOUT = int(os.getenv('NAVIGATION_TIMEOUT', '60'))  # Espera de navegación
 ACTION_TIMEOUT = int(os.getenv('ACTION_TIMEOUT', '5'))          # Espera para acciones específicas (clics, llenado)
-MAX_RETRIES = int(os.getenv('MAX_RETRIES', '10'))               # Reintentos globales
+MAX_RETRIES = int(os.getenv('MAX_RETRIES', '20'))               # Reintentos globales
 TIMEOUT_SMS = int(os.getenv('TIMEOUT_SMS', '180'))              # Timeout para esperar SMS
 
 SERVICE_BLOCKED_UNTIL = 0
@@ -337,7 +337,7 @@ class AmazonAccountCreator:
         else:
             logger.info(message)
 
-    def create(self, max_retries: int = 10, skip_billing: bool = False) -> dict:
+    def create(self, max_retries: int = 20, skip_billing: bool = False) -> dict:
         self.skip_billing = skip_billing
         for attempt in range(max_retries + 1):
             try:
@@ -1258,7 +1258,7 @@ async def is_phone_registered(phone_number, country_code='US'):
         await browser.close()
         return False
 
-def safe_request(sess, method, url, data=None, json_data=None, headers=None, max_retries=3, backoff=2):
+def safe_request(sess, method, url, data=None, json_data=None, headers=None, max_retries=20, backoff=2):
     if headers is None:
         headers = {}
     last_exception = None
@@ -1441,7 +1441,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         initial_url,
                         data=data1,
                         headers={"Referer": initial_url, "Origin": "https://www.amazon.com"},
-                        max_retries=3
+                        max_retries=20
                     )
 
                     if req1 is None or req1.status_code != 200 or "appActionToken" not in req1.text:
@@ -1495,7 +1495,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                         "https://www.amazon.com/ap/register",
                         data=data2,
                         headers={"Referer": req1.url, "Origin": "https://www.amazon.com"},
-                        max_retries=3
+                        max_retries=20
                     )
 
                     # Pausa aleatoria (0.5-1.5s)
@@ -1582,7 +1582,7 @@ def process(capsolver_key, hero_keys, email=None, mail_token=None, mail_api=None
                                 "Referer": req2.url,
                                 "Origin": "https://www.amazon.com"
                             },
-                            max_retries=3
+                            max_retries=20
                         )
 
                         logger.debug(f"📄 req4 status: {req4.status_code}")
@@ -1981,7 +1981,7 @@ def is_service_enabled():
     except Exception:
         return time.time() < SERVICE_BLOCKED_UNTIL
 
-def test_proxy(session, max_retries=3):
+def test_proxy(session, max_retries=20):
     for attempt in range(max_retries):
         try:
             response = session.get('https://api.ipify.org?format=json', timeout=15)
@@ -3088,7 +3088,7 @@ async def get_phone_number(account_country, force_service=None, force_country=No
     logger.error("❌ No se pudo obtener número de teléfono con ningún servicio.")
     return None
 
-async def wait_for_sms_code(service_name, service_id, page, max_retries=3, timeout_per_retry=30):
+async def wait_for_sms_code(service_name, service_id, page, max_retries=20, timeout_per_retry=30):
     for attempt in range(max_retries):
         logger.debug(f"📱 Esperando código SMS (intento {attempt+1}/{max_retries})...")
         code = None
@@ -3252,7 +3252,7 @@ async def wait_for_text(page, text, timeout=WAIT_TIMEOUT*1000):
 # ===================================================================
 # FUNCIÓN PRINCIPAL DE CREACIÓN DE CUENTA (OPTIMIZADA CON REINTENTOS INTERNOS)
 # ===================================================================
-async def create_amazon_account(country_code, add_address_flag=True, max_retries=None, max_internal_retries=10, service_preference=None):
+async def create_amazon_account(country_code, add_address_flag=True, max_retries=None, max_internal_retries=20, service_preference=None):
     retries = max_retries if max_retries is not None else MAX_RETRIES
     logger.debug(f"🏁 Iniciando creación de cuenta para {country_code} (reintentos: {retries})")
     for global_attempt in range(1, retries + 1):
@@ -3276,7 +3276,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
             logger.debug("📦 Configurando sesión requests...")
             session = requests.Session()
             retry_strategy = Retry(
-                total=3,
+                total=20,
                 backoff_factor=1,
                 status_forcelist=[429, 500, 502, 503, 504],
                 allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
@@ -4031,7 +4031,7 @@ async def create_amazon_account(country_code, add_address_flag=True, max_retries
 # ===================================================================
 # FUNCIÓN PRINCIPAL generate_cookie_api (punto de entrada)
 # ===================================================================
-async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=10, force_playwright=False, service_preference=None):
+async def generate_cookie_api(country, add_address=True, max_retries=None, max_internal_retries=20, force_playwright=False, service_preference=None):
     logger.debug(f"🚀 generate_cookie_api llamada con country={country}, force_playwright={force_playwright}")
     global SERVICE_BLOCKED_UNTIL, SERVICE_BLOCKED_REASON
 
@@ -4060,7 +4060,7 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
             )
 
             # Ejecutar create (bloqueante, lo corremos en un hilo para no bloquear el event loop)
-            result = await loop.run_in_executor(None, creator.create, max_retries or 3, not add_address)
+            result = await loop.run_in_executor(None, creator.create, max_retries or 20, not add_address)
 
             if result.get('status'):
                 # Extraer datos igual que en la versión antigua
@@ -4204,7 +4204,7 @@ def generate():
     country = data.get('country', '').upper()
     add_address = data.get('add_address', True)
     max_retries = data.get('max_retries', None)   # Nuevo parámetro opcional
-    max_internal_retries = data.get('max_internal_retries', 10)   # nuevo parámetro
+    max_internal_retries = data.get('max_internal_retries', 20)   # nuevo parámetro
     force_playwright = data.get('force_playwright', False)
     if not country:
         return jsonify({'success': False, 'error': 'Falta el parámetro country'}), 400
