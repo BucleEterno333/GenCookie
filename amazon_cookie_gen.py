@@ -290,7 +290,7 @@ class SMSNoBalance(Exception):
 
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "35"))
 CAPTCHA_MAX = 4
-SMS_TIMEOUT = int(os.environ.get("SMS_TIMEOUT", "110"))
+SMS_TIMEOUT = int(os.environ.get("SMS_TIMEOUT", "115"))
 
 # ======================================================================
 # CLASE AmazonAccountCreator
@@ -659,7 +659,7 @@ class AmazonAccountCreator:
         self._emit("Waiting for SMS code...")
         try:
             self.sms_service.markReady(self.phone_data['activationId'])
-            sms_timeout = int(os.environ.get("SMS_TIMEOUT", "110"))
+            sms_timeout = int(os.environ.get("SMS_TIMEOUT", "115"))
             otp_code = self.sms_service.getSMS(
                 self.phone_data['activationId'], timeout=sms_timeout,
             )
