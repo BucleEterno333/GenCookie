@@ -50,7 +50,6 @@ class HeroSms:
                 "country": target_country,
                 "operator": "any",
                 "maxPrice": self._price_param(),
-                "fixedPrice": "true",
                 "ref": secrets.token_hex(8),
             }
             resp = self.session.get(self.apiUrl, params=params, timeout=30)
