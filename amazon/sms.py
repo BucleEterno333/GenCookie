@@ -1,5 +1,8 @@
 import os
-import secrets, re, time, logging
+import secrets
+import re
+import time
+import logging
 import requests
 
 logger = logging.getLogger(__name__)
@@ -9,20 +12,15 @@ class HeroSms:
 
     COUNTRY_ID = 187
     SERVICE = 'am'
-    DEFAULT_MAX_PRICE = 0.06
 
-    def __init__(self, apiKey: str, maxPrice: float = None, targetCountry: str = 'CA') -> None:
+    def __init__(self, apiKey: str, targetCountry: str = 'CA') -> None:
         self.apiKey = apiKey
         self.apiUrl = (
             os.getenv("HERO_SMS_API")
             or "https://hero-sms.com/stubs/handler_api.php"
         )
         self.session = requests.Session()
-        self.maxPrice = float(maxPrice if maxPrice is not None else self.DEFAULT_MAX_PRICE)
         self.targetCountry = targetCountry
-
-    def _price_param(self) -> str:
-        return f"{self.maxPrice:.2f}"
 
     def __normalizeNumber(self, phone: str) -> str:
         phone_digits = re.sub(r"\D", "", phone)
@@ -39,9 +37,8 @@ class HeroSms:
             return response.text.strip()
 
     def getNumber(self, country_code: int = None, retries=0, no_numbers_retries=0) -> dict:
-        # Usar el país pasado, o el default de la instancia
         target_country = country_code if country_code is not None else self.COUNTRY_ID
-        
+
         try:
             params = {
                 "action": "getNumberV2",
@@ -49,7 +46,6 @@ class HeroSms:
                 "service": self.SERVICE,
                 "country": target_country,
                 "operator": "any",
-                "maxPrice": self._price_param(),
                 "ref": secrets.token_hex(8),
             }
             resp = self.session.get(self.apiUrl, params=params, timeout=30)
@@ -81,12 +77,14 @@ class HeroSms:
                     raise RuntimeError(f"HeroSMS: {error}")
                 if "phoneNumber" not in data:
                     raise RuntimeError(f"HeroSMS: Respuesta inesperada: {data}")
+
                 price = float(data.get("activationCost", 0))
                 activation_id = str(data["activationId"])
                 phone_number = str(data["phoneNumber"])
+
                 logger.info(
                     f"Number: {phone_number} | ID: {activation_id} | "
-                    f"Country: {target_country} | maxPrice=${self._price_param()} | paid=${price}"
+                    f"Country: {target_country} | paid=${price:.3f}"
                 )
                 return {
                     "activationId": activation_id,
@@ -103,8 +101,6 @@ class HeroSms:
                 time.sleep(1.0)
                 return self.getNumber(country_code, retries + 1, no_numbers_retries)
             raise RuntimeError(f"Failed to get number: {str(e)}")
-
-    # ... (el resto de los métodos markReady, getSMS, cancelActivation, finishActivation se mantienen igual)
 
     def markReady(self, activationId: str) -> None:
         try:

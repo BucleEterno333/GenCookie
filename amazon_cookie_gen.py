@@ -324,7 +324,7 @@ class AmazonAccountCreator:
             except ValueError:
                 _sms_price = 0.10
         # targetCountry se establece como None para no fijar un país predeterminado
-        self.sms_service   = HeroSms(herosms_api_key, maxPrice=_sms_price, targetCountry=None)
+        self.sms_service = HeroSms(herosms_api_key, targetCountry=None)
         self._on_status    = on_status
         self.skip_billing  = False
 
@@ -4056,7 +4056,6 @@ async def generate_cookie_api(country, add_address=True, max_retries=None, max_i
                 capsolver_api_key=CAPSOLVER_API_KEY,
                 country=country,
                 proxy=proxy_str,
-                sms_max_price=0.10,  # puedes ajustar desde variable de entorno
                 on_status=None  # si quieres ver logs, puedes pasar una función lambda
             )
 
