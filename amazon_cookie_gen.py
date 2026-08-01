@@ -257,7 +257,7 @@ _MAIL_APIS = [
 ]
 
 # Orden de países para Hero SMS (barato a caro)
-HERO_COUNTRY_ORDER = ['US', 'CA', 'ID', 'MA', 'CO', 'MX', 'BR', 'CM', 'KZ', 'KG' ]
+HERO_COUNTRY_ORDER = ['CA', 'ID', 'MA', 'CO', 'MX', 'BR', 'CM', 'KZ', 'KG', 'US' ]
 FIVESIM_MANUAL_ORDER = ['CO', 'LV', 'PK', 'TJ', 'KE', 'MX']
 
 # Mapeo de código de país ISO a número que espera Hero SMS
