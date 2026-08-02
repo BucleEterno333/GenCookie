@@ -305,6 +305,9 @@ class SMSNoBalance(Exception):
     """Todas las keys de SMS tienen saldo insuficiente (NO_BALANCE)"""
     pass
 
+class BillingAddressError(Exception):
+    """Fallo al agregar dirección después de múltiples reintentos."""
+
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "35"))
 CAPTCHA_MAX = 4
 SMS_TIMEOUT = int(os.environ.get("SMS_TIMEOUT", "115"))
@@ -312,6 +315,7 @@ SMS_TIMEOUT = int(os.environ.get("SMS_TIMEOUT", "115"))
 # ======================================================================
 # CLASE AmazonAccountCreator
 # ======================================================================
+
 class AmazonAccountCreator:
     def __init__(
         self,
@@ -334,13 +338,13 @@ class AmazonAccountCreator:
         self.user          = helpers.generateFakeProfile()
         self.capsolver_key = capsolver_api_key
         self.phone_data    = None
+        self._cancel_timer = None   # Para almacenar el temporizador de cancelación
         _sms_price = sms_max_price
         if _sms_price is None:
             try:
                 _sms_price = float(os.environ.get("SMS_MAX_PRICE", "0.10"))
             except ValueError:
                 _sms_price = 0.10
-        # targetCountry se establece como None para no fijar un país predeterminado
         self.sms_service = HeroSms(herosms_api_key, targetCountry=None)
         self._on_status    = on_status
         self.skip_billing  = False
@@ -354,6 +358,26 @@ class AmazonAccountCreator:
         else:
             logger.info(message)
 
+    def _schedule_cancel(self, activation_id: str, delay_seconds: int = 120):
+        """
+        Programa la cancelación del número después de 'delay_seconds' segundos.
+        Solo se programa una vez por número.
+        """
+        if self._cancel_timer is not None:
+            return  # Ya hay un temporizador programado para este número
+        self._emit(f"Scheduling cancellation for {activation_id} in {delay_seconds}s")
+        def cancel():
+            try:
+                self.sms_service.cancelActivation(activation_id)
+                self._emit(f"Number {activation_id} cancelled after delay")
+            except Exception as e:
+                self._emit(f"Error cancelling number {activation_id}: {e}")
+            finally:
+                self._cancel_timer = None
+        self._cancel_timer = threading.Timer(delay_seconds, cancel)
+        self._cancel_timer.daemon = True
+        self._cancel_timer.start()
+
     def create(self, max_retries: int = 20, skip_billing: bool = False) -> dict:
         self.skip_billing = skip_billing
         for attempt in range(max_retries + 1):
@@ -363,22 +387,32 @@ class AmazonAccountCreator:
                 self._emit("Cancelled by user")
                 self._cancel_phone()
                 return self._error("Cancelled by user")
+            except BillingAddressError as e:
+                error_msg = str(e)
+                # El número ya se canceló programadamente en _attempt, pero aseguramos
+                if self.phone_data:
+                    self._schedule_cancel(self.phone_data['activationId'])
+                if attempt >= max_retries:
+                    return self._error(error_msg)
+                self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
+                time.sleep(0.5)
             except Exception as e:
                 error_msg = str(e)
                 needs_new_number = any(k in error_msg for k in [
                     "unusual activity", "actividad inusual",
                     "number_associated", "sms_timeout",
+                    "billing_failed",
                 ])
-                if needs_new_number:
-                    self._cancel_phone()
+                if needs_new_number and self.phone_data:
+                    # Programamos cancelación diferida en lugar de cancelar ahora
+                    self._schedule_cancel(self.phone_data['activationId'])
                 if 'unusual activity' in error_msg or 'actividad inusual' in error_msg:
                     self.user = helpers.generateFakeProfile()
                 if attempt >= max_retries:
-                    self._cancel_phone()
+                    self._cancel_phone()  # por si acaso, pero ya se programó
                     return self._error(error_msg)
                 self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
                 time.sleep(2.0 if 'unusual activity' in error_msg else (0.5 if needs_new_number else 0.2))
-                # NO intentes obtener nuevo número aquí; el próximo attempt lo hará automáticamente
         return self._error("Unexpected exit")
 
     def _attempt(self, retry: int) -> dict:
@@ -396,6 +430,8 @@ class AmazonAccountCreator:
                     phone_data = self.sms_service.getNumber(country_code=country_code)
                     if phone_data:
                         self.phone_data = phone_data
+                        # Guardamos el timestamp de compra para el temporizador
+                        self.phone_data['purchase_time'] = time.time()
                         self._emit(f"Phone obtained: {self.phone_data['number']} from {country_iso}")
                         break
                 except Exception as e:
@@ -406,25 +442,55 @@ class AmazonAccountCreator:
         else:
             logger.info(f"Reusing phone: {self.phone_data['number']}")
 
-        result = self._execute_flow()
+        # Ejecutar el flujo principal (registro, captcha, SMS, etc.)
+        # Si falla, programamos cancelación diferida y re-lanzamos
+        try:
+            result = self._execute_flow()
+        except Exception as e:
+            # Cualquier error que invalide el número: programar cancelación diferida
+            if self.phone_data:
+                self._schedule_cancel(self.phone_data['activationId'])
+            raise  # Re-lanzar para que create lo maneje
+
         cookies_raw = result['cookies']
 
+        # Billing con reintentos
+        if not getattr(self, "skip_billing", False):
+            max_billing_retries = 3
+            billing_success = False
+            for billing_attempt in range(1, max_billing_retries + 1):
+                self._emit(f"Adding billing address (attempt {billing_attempt}/{max_billing_retries})...")
+                try:
+                    builder = AccountBuilder(
+                        cookies_raw,
+                        country=self.country,
+                        proxy=helpers.normalizeProxy(self.proxy),
+                    )
+                    billing = builder.handleBillingAddress()
+                    if billing['status']:
+                        self._emit(billing['message'])
+                        billing_success = True
+                        break
+                    else:
+                        self._emit(f"Billing attempt {billing_attempt} failed: {billing['message']}")
+                        if billing_attempt < max_billing_retries:
+                            time.sleep(2)
+                except Exception as e:
+                    self._emit(f"Billing attempt {billing_attempt} exception: {e}")
+                    if billing_attempt < max_billing_retries:
+                        time.sleep(2)
+            if not billing_success:
+                # Programamos cancelación del número (ya que la cuenta no sirve)
+                if self.phone_data:
+                    self._schedule_cancel(self.phone_data['activationId'])
+                raise BillingAddressError("billing_failed: Could not add billing address after retries")
+
+        # Si todo fue bien, finalizamos la activación (libera el número sin penalización)
         try:
             self.sms_service.finishActivation(self.phone_data['activationId'])
-        except Exception:
-            pass
-
-        if not getattr(self, "skip_billing", False):
-            self._emit("Adding billing address...")
-            builder = AccountBuilder(
-                cookies_raw, country=self.country,
-                proxy=helpers.normalizeProxy(self.proxy),
-            )
-            billing = builder.handleBillingAddress()
-            if billing['status']:
-                self._emit(billing['message'])
-            else:
-                self._emit(f"Billing warning: {billing['message']}")
+            self._emit("Activation finished successfully")
+        except Exception as e:
+            self._emit(f"Warning: finishActivation error: {e}")
 
         self._emit(f"Account created in {time.time() - init_time:.1f}s")
         return {
@@ -437,6 +503,7 @@ class AmazonAccountCreator:
             "cookies": cookies_raw,
             "country": self.country,
         }
+
     def _execute_flow(self) -> dict:
         phone       = self.phone_data['number']
         phone_short = self.phone_data['normalizedNumber']
@@ -673,12 +740,13 @@ class AmazonAccountCreator:
             if switch_html.find('input', {'name': 'code'}) or 'sms' in switch_resp.text.lower():
                 otp_resp = switch_resp
 
-        self._emit("Waiting for SMS code...")
+        # --- ESPERA DE SMS CON TIMEOUT DE 30 SEGUNDOS ---
+        self._emit("Waiting for SMS code (timeout: 30s)...")
         try:
             self.sms_service.markReady(self.phone_data['activationId'])
-            sms_timeout = int(os.environ.get("SMS_TIMEOUT", "115"))
+            # Forzamos timeout a 30 segundos (antes era variable)
             otp_code = self.sms_service.getSMS(
-                self.phone_data['activationId'], timeout=sms_timeout,
+                self.phone_data['activationId'], timeout=30,
             )
             if not otp_code:
                 raise RuntimeError("Empty SMS code")
@@ -724,10 +792,15 @@ class AmazonAccountCreator:
             raise AmazonRegisterError("otp_failed")
 
     def _cancel_phone(self):
+        """Cancelación inmediata (solo para limpieza, pero ahora usamos diferida)."""
         if self.phone_data:
+            # Si hay un temporizador pendiente, lo cancelamos (no lo necesitamos)
+            if self._cancel_timer:
+                self._cancel_timer.cancel()
+                self._cancel_timer = None
             try:
                 self.sms_service.cancelActivation(self.phone_data['activationId'])
-                logger.info("Phone cancelled to save credits")
+                logger.info("Phone cancelled immediately (fallback)")
             except Exception:
                 pass
             self.phone_data = None
@@ -738,8 +811,9 @@ class AmazonAccountCreator:
 
 
 
-# Historial de números comprados
-NUM_HISTORY = []
+
+
+
 
 def add_to_history(activation_id, phone_full, service_name):
     global NUM_HISTORY
