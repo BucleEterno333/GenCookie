@@ -740,19 +740,39 @@ class AmazonAccountCreator:
             if switch_html.find('input', {'name': 'code'}) or 'sms' in switch_resp.text.lower():
                 otp_resp = switch_resp
 
-        # --- ESPERA DE SMS CON TIMEOUT DE 30 SEGUNDOS ---
+        # --- ESPERA DE SMS CON TIMEOUT DE 30 SEGUNDOS (MANUAL) ---
         self._emit("Waiting for SMS code (timeout: 30s)...")
         try:
             self.sms_service.markReady(self.phone_data['activationId'])
-            # Forzamos timeout a 30 segundos (antes era variable)
-            otp_code = self.sms_service.getSMS(
-                self.phone_data['activationId'], timeout=30,
-            )
-            if not otp_code:
-                raise RuntimeError("Empty SMS code")
-            self._emit("SMS code received")
-        except Exception:
+        except Exception as e:
+            self._emit(f"Error marking ready: {e}")
+            raise AmazonRegisterError("sms_mark_ready_failed")
+
+        start_time = time.time()
+        otp_code = None
+        poll_interval = 2  # segundos entre intentos
+        max_wait = 30      # segundos totales
+
+        while time.time() - start_time < max_wait:
+            try:
+                # Intentar obtener el código
+                code = self.sms_service.getSMS(self.phone_data['activationId'], timeout=5)  # timeout corto por intento
+                if code:
+                    otp_code = code
+                    break
+            except Exception as e:
+                # Si hay error (red, API, etc.), lo registramos y seguimos intentando
+                self._emit(f"SMS polling error (will retry): {e}")
+                # Esperamos antes del siguiente intento
+                time.sleep(poll_interval)
+                continue
+            # Si no hubo código, esperamos antes del siguiente intento
+            time.sleep(poll_interval)
+
+        if not otp_code:
             raise AmazonRegisterError("sms_timeout")
+
+        self._emit("SMS code received")
 
         self._emit("Submitting OTP...")
         oh = BeautifulSoup(otp_resp.text, 'html.parser')
