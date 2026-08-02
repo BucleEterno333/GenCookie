@@ -388,48 +388,39 @@ class AmazonAccountCreator:
             self.phone_data = None
             self._emit("Phone data cleared")
 
-    def _cleanup_timers(self):
-        """Cancela todos los timers pendientes (limpieza final)."""
-        for t in self._cancel_timers:
-            t.cancel()
-        self._cancel_timers = []
-
     def create(self, max_retries: int = 20, skip_billing: bool = False) -> dict:
         self.skip_billing = skip_billing
-        try:
-            for attempt in range(max_retries + 1):
-                try:
-                    return self._attempt(attempt)
-                except KeyboardInterrupt:
-                    self._emit("Cancelled by user")
+        for attempt in range(max_retries + 1):
+            try:
+                return self._attempt(attempt)
+            except KeyboardInterrupt:
+                self._emit("Cancelled by user")
+                self._cancel_phone()
+                return self._error("Cancelled by user")
+            except BillingAddressError as e:
+                error_msg = str(e)
+                self._cancel_phone()
+                if attempt >= max_retries:
+                    return self._error(error_msg)
+                self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
+                time.sleep(0.5)
+            except Exception as e:
+                error_msg = str(e)
+                needs_new_number = any(k in error_msg for k in [
+                    "unusual activity", "actividad inusual",
+                    "number_associated", "sms_timeout",
+                    "billing_failed",
+                ])
+                if needs_new_number:
                     self._cancel_phone()
-                    return self._error("Cancelled by user")
-                except BillingAddressError as e:
-                    error_msg = str(e)
+                if 'unusual activity' in error_msg or 'actividad inusual' in error_msg:
+                    self.user = helpers.generateFakeProfile()
+                if attempt >= max_retries:
                     self._cancel_phone()
-                    if attempt >= max_retries:
-                        return self._error(error_msg)
-                    self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
-                    time.sleep(0.5)
-                except Exception as e:
-                    error_msg = str(e)
-                    needs_new_number = any(k in error_msg for k in [
-                        "unusual activity", "actividad inusual",
-                        "number_associated", "sms_timeout",
-                        "billing_failed",
-                    ])
-                    if needs_new_number:
-                        self._cancel_phone()
-                    if 'unusual activity' in error_msg or 'actividad inusual' in error_msg:
-                        self.user = helpers.generateFakeProfile()
-                    if attempt >= max_retries:
-                        self._cancel_phone()
-                        return self._error(error_msg)
-                    self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
-                    time.sleep(2.0 if 'unusual activity' in error_msg else (0.5 if needs_new_number else 0.2))
-            return self._error("Unexpected exit")
-        finally:
-            self._cleanup_timers()
+                    return self._error(error_msg)
+                self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
+                time.sleep(2.0 if 'unusual activity' in error_msg else (0.5 if needs_new_number else 0.2))
+        return self._error("Unexpected exit")
 
     def _attempt(self, retry: int) -> dict:
         self._emit(f"Attempt #{retry + 1}")
@@ -498,9 +489,6 @@ class AmazonAccountCreator:
             self._emit("Activation finished successfully")
         except Exception as e:
             self._emit(f"Warning: finishActivation error: {e}")
-
-        # Limpiar timers (ya no necesitamos cancelar este número)
-        self._cleanup_timers()
 
         self._emit(f"Account created in {time.time() - init_time:.1f}s")
         return {
@@ -820,8 +808,6 @@ class AmazonAccountCreator:
     @staticmethod
     def _error(message: str) -> dict:
         return {"status": False, "message": message}
-
-
 def add_to_history(activation_id, phone_full, service_name):
     global NUM_HISTORY
     NUM_HISTORY = [h for h in NUM_HISTORY if h['activation_id'] != activation_id]
