@@ -808,6 +808,15 @@ class AmazonAccountCreator:
     @staticmethod
     def _error(message: str) -> dict:
         return {"status": False, "message": message}
+
+
+
+
+
+
+
+
+
 def add_to_history(activation_id, phone_full, service_name):
     global NUM_HISTORY
     NUM_HISTORY = [h for h in NUM_HISTORY if h['activation_id'] != activation_id]
