@@ -338,7 +338,7 @@ class AmazonAccountCreator:
         self.user          = helpers.generateFakeProfile()
         self.capsolver_key = capsolver_api_key
         self.phone_data    = None
-        self._cancel_timer = None
+        self._cancel_timers = []  # <-- LISTA de timers
         _sms_price = sms_max_price
         if _sms_price is None:
             try:
@@ -360,11 +360,8 @@ class AmazonAccountCreator:
 
     def _schedule_cancel(self, activation_id: str, delay_seconds: int = 120):
         """Programa la cancelación del número después de 'delay_seconds' segundos."""
-        # Cancelar temporizador anterior si existe
-        if self._cancel_timer:
-            self._cancel_timer.cancel()
-            self._cancel_timer = None
-
+        if not activation_id:
+            return
         self._emit(f"Scheduling cancellation for {activation_id} in {delay_seconds}s")
         def cancel():
             try:
@@ -373,57 +370,66 @@ class AmazonAccountCreator:
             except Exception as e:
                 self._emit(f"Error cancelling number {activation_id}: {e}")
             finally:
-                self._cancel_timer = None
-
-        self._cancel_timer = threading.Timer(delay_seconds, cancel)
-        self._cancel_timer.daemon = True
-        self._cancel_timer.start()
+                # Remover este timer de la lista cuando termine
+                self._cancel_timers = [t for t in self._cancel_timers if t != timer]
+        timer = threading.Timer(delay_seconds, cancel)
+        timer.daemon = True
+        timer.start()
+        self._cancel_timers.append(timer)
 
     def _cancel_phone(self):
         """
-        Cancela el número actual (SIEMPRE con cancelación diferida) y limpia phone_data.
+        Cancela el número actual programando una cancelación diferida y limpia phone_data.
         """
         if self.phone_data:
             activation_id = self.phone_data.get('activationId')
             self._emit(f"Cancelling phone {activation_id} (clearing data)")
-            # Programar cancelación diferida (se encarga de cancelar timer anterior)
             self._schedule_cancel(activation_id)
             self.phone_data = None
             self._emit("Phone data cleared")
 
+    def _cleanup_timers(self):
+        """Cancela todos los timers pendientes (limpieza final)."""
+        for t in self._cancel_timers:
+            t.cancel()
+        self._cancel_timers = []
+
     def create(self, max_retries: int = 20, skip_billing: bool = False) -> dict:
         self.skip_billing = skip_billing
-        for attempt in range(max_retries + 1):
-            try:
-                return self._attempt(attempt)
-            except KeyboardInterrupt:
-                self._emit("Cancelled by user")
-                self._cancel_phone()
-                return self._error("Cancelled by user")
-            except BillingAddressError as e:
-                error_msg = str(e)
-                self._cancel_phone()
-                if attempt >= max_retries:
-                    return self._error(error_msg)
-                self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
-                time.sleep(0.5)
-            except Exception as e:
-                error_msg = str(e)
-                needs_new_number = any(k in error_msg for k in [
-                    "unusual activity", "actividad inusual",
-                    "number_associated", "sms_timeout",
-                    "billing_failed",
-                ])
-                if needs_new_number:
+        try:
+            for attempt in range(max_retries + 1):
+                try:
+                    return self._attempt(attempt)
+                except KeyboardInterrupt:
+                    self._emit("Cancelled by user")
                     self._cancel_phone()
-                if 'unusual activity' in error_msg or 'actividad inusual' in error_msg:
-                    self.user = helpers.generateFakeProfile()
-                if attempt >= max_retries:
+                    return self._error("Cancelled by user")
+                except BillingAddressError as e:
+                    error_msg = str(e)
                     self._cancel_phone()
-                    return self._error(error_msg)
-                self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
-                time.sleep(2.0 if 'unusual activity' in error_msg else (0.5 if needs_new_number else 0.2))
-        return self._error("Unexpected exit")
+                    if attempt >= max_retries:
+                        return self._error(error_msg)
+                    self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
+                    time.sleep(0.5)
+                except Exception as e:
+                    error_msg = str(e)
+                    needs_new_number = any(k in error_msg for k in [
+                        "unusual activity", "actividad inusual",
+                        "number_associated", "sms_timeout",
+                        "billing_failed",
+                    ])
+                    if needs_new_number:
+                        self._cancel_phone()
+                    if 'unusual activity' in error_msg or 'actividad inusual' in error_msg:
+                        self.user = helpers.generateFakeProfile()
+                    if attempt >= max_retries:
+                        self._cancel_phone()
+                        return self._error(error_msg)
+                    self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
+                    time.sleep(2.0 if 'unusual activity' in error_msg else (0.5 if needs_new_number else 0.2))
+            return self._error("Unexpected exit")
+        finally:
+            self._cleanup_timers()
 
     def _attempt(self, retry: int) -> dict:
         self._emit(f"Attempt #{retry + 1}")
@@ -492,6 +498,9 @@ class AmazonAccountCreator:
             self._emit("Activation finished successfully")
         except Exception as e:
             self._emit(f"Warning: finishActivation error: {e}")
+
+        # Limpiar timers (ya no necesitamos cancelar este número)
+        self._cleanup_timers()
 
         self._emit(f"Account created in {time.time() - init_time:.1f}s")
         return {
@@ -811,7 +820,6 @@ class AmazonAccountCreator:
     @staticmethod
     def _error(message: str) -> dict:
         return {"status": False, "message": message}
-
 def add_to_history(activation_id, phone_full, service_name):
     global NUM_HISTORY
     NUM_HISTORY = [h for h in NUM_HISTORY if h['activation_id'] != activation_id]
