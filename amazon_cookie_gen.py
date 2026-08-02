@@ -359,9 +359,12 @@ class AmazonAccountCreator:
             logger.info(message)
 
     def _schedule_cancel(self, activation_id: str, delay_seconds: int = 120):
-        """Programa cancelación diferida (solo si no hay otro temporizador activo)."""
-        if self._cancel_timer is not None:
-            return
+        """Programa la cancelación del número después de 'delay_seconds' segundos."""
+        # Cancelar temporizador anterior si existe
+        if self._cancel_timer:
+            self._cancel_timer.cancel()
+            self._cancel_timer = None
+
         self._emit(f"Scheduling cancellation for {activation_id} in {delay_seconds}s")
         def cancel():
             try:
@@ -371,28 +374,20 @@ class AmazonAccountCreator:
                 self._emit(f"Error cancelling number {activation_id}: {e}")
             finally:
                 self._cancel_timer = None
+
         self._cancel_timer = threading.Timer(delay_seconds, cancel)
         self._cancel_timer.daemon = True
         self._cancel_timer.start()
 
     def _cancel_phone(self):
-        """Cancela el número actual (inmediato o diferido) y SIEMPRE limpia phone_data."""
+        """
+        Cancela el número actual (SIEMPRE con cancelación diferida) y limpia phone_data.
+        """
         if self.phone_data:
             activation_id = self.phone_data.get('activationId')
             self._emit(f"Cancelling phone {activation_id} (clearing data)")
-            # Cancelar temporizador existente
-            if self._cancel_timer:
-                self._cancel_timer.cancel()
-                self._cancel_timer = None
-            # Intentar cancelación inmediata (puede fallar si <2min)
-            try:
-                self.sms_service.cancelActivation(activation_id)
-                self._emit(f"Phone {activation_id} cancelled immediately (fallback)")
-            except Exception as e:
-                # Si falla, programar cancelación diferida
-                self._emit(f"Immediate cancel failed: {e}, scheduling delayed")
-                self._schedule_cancel(activation_id)
-            # Siempre limpiar phone_data para obtener un nuevo número en el siguiente intento
+            # Programar cancelación diferida (se encarga de cancelar timer anterior)
+            self._schedule_cancel(activation_id)
             self.phone_data = None
             self._emit("Phone data cleared")
 
@@ -407,7 +402,7 @@ class AmazonAccountCreator:
                 return self._error("Cancelled by user")
             except BillingAddressError as e:
                 error_msg = str(e)
-                self._cancel_phone()  # Limpia phone_data
+                self._cancel_phone()
                 if attempt >= max_retries:
                     return self._error(error_msg)
                 self._emit(f"Retry {attempt + 1}/{max_retries}: {error_msg}")
@@ -420,7 +415,7 @@ class AmazonAccountCreator:
                     "billing_failed",
                 ])
                 if needs_new_number:
-                    self._cancel_phone()  # Limpia phone_data
+                    self._cancel_phone()
                 if 'unusual activity' in error_msg or 'actividad inusual' in error_msg:
                     self.user = helpers.generateFakeProfile()
                 if attempt >= max_retries:
@@ -457,13 +452,8 @@ class AmazonAccountCreator:
         else:
             logger.info(f"Reusing phone: {self.phone_data['number']}")
 
-        # Ejecutar flujo principal
-        try:
-            result = self._execute_flow()
-        except Exception as e:
-            # Si falla, limpiar phone_data (cancelación diferida si es necesario)
-            self._cancel_phone()
-            raise
+        # Ejecutar flujo principal SIN capturar excepciones (suben a create)
+        result = self._execute_flow()
 
         cookies_raw = result['cookies']
 
@@ -761,23 +751,19 @@ class AmazonAccountCreator:
 
         start_time = time.time()
         otp_code = None
-        poll_interval = 2  # segundos entre intentos
-        max_wait = 30      # segundos totales
+        poll_interval = 2
+        max_wait = 30
 
         while time.time() - start_time < max_wait:
             try:
-                # Intentar obtener el código
-                code = self.sms_service.getSMS(self.phone_data['activationId'], timeout=5)  # timeout corto por intento
+                code = self.sms_service.getSMS(self.phone_data['activationId'], timeout=5)
                 if code:
                     otp_code = code
                     break
             except Exception as e:
-                # Si hay error (red, API, etc.), lo registramos y seguimos intentando
                 self._emit(f"SMS polling error (will retry): {e}")
-                # Esperamos antes del siguiente intento
                 time.sleep(poll_interval)
                 continue
-            # Si no hubo código, esperamos antes del siguiente intento
             time.sleep(poll_interval)
 
         if not otp_code:
@@ -822,12 +808,9 @@ class AmazonAccountCreator:
         else:
             raise AmazonRegisterError("otp_failed")
 
-
-    def _error(self, message: str) -> dict:
+    @staticmethod
+    def _error(message: str) -> dict:
         return {"status": False, "message": message}
-
-
-
 
 def add_to_history(activation_id, phone_full, service_name):
     global NUM_HISTORY
